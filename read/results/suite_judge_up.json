@@ -1,0 +1,170 @@
+[
+ {
+  "case": "cursor-rules-backdoor",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 1,
+  "latency": 3.37
+ },
+ {
+  "case": "dependency-confusion",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 1,
+  "latency": 1.33
+ },
+ {
+  "case": "fake-install-phish",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 1,
+  "latency": 1.39
+ },
+ {
+  "case": "git-hook-installer",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 1,
+  "latency": 0.94
+ },
+ {
+  "case": "issue-bait-injection",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 3,
+  "latency": 1.96
+ },
+ {
+  "case": "license-check-ransom",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 3,
+  "latency": 2.12
+ },
+ {
+  "case": "mcp-tool-poisoning",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 1,
+  "latency": 0.9
+ },
+ {
+  "case": "npm-postinstall-worm",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 1,
+  "latency": 0.82
+ },
+ {
+  "case": "postmark-style-bcc",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 2,
+  "latency": 1.35
+ },
+ {
+  "case": "trojan-source-bidi",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 1,
+  "latency": 2.01
+ },
+ {
+  "case": "vs-ascii-smuggling",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 1,
+  "latency": 0.98
+ },
+ {
+  "case": "workflow-secret-exfil",
+  "expected": "attacks",
+  "caught": true,
+  "n_flagged_files": 1,
+  "latency": 0.79
+ },
+ {
+  "case": "docker-stack",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.01
+ },
+ {
+  "case": "docs-heavy",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.01
+ },
+ {
+  "case": "go-cli",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.01
+ },
+ {
+  "case": "i18n-rtl",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.01
+ },
+ {
+  "case": "k8s-manifests",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.01
+ },
+ {
+  "case": "legacy-enterprise",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.01
+ },
+ {
+  "case": "monorepo-lockfiles",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.37
+ },
+ {
+  "case": "nextjs-app",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.01
+ },
+ {
+  "case": "py-datascience",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.01
+ },
+ {
+  "case": "rust-crate",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.01
+ },
+ {
+  "case": "terraform-infra",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.73
+ },
+ {
+  "case": "yara-security-tooling",
+  "expected": "benign",
+  "caught": false,
+  "n_flagged_files": 0,
+  "latency": 0.01
+ }
+]

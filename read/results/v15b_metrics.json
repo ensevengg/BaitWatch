@@ -1,0 +1,135 @@
+{
+  "checkpoint": "/home/enseven/.local/share/baitwatch/models/v15b_22m",
+  "thresholds": {
+    "flag_threshold": 0.84,
+    "review_low": 0.528,
+    "hard_high": 0.9,
+    "selection": {
+      "flag_threshold": 0.84,
+      "f2": 0.8602466236054023,
+      "recall": 0.8363463368220743,
+      "fpr": 0.019330855018587362,
+      "precision": 0.9712707182320443,
+      "constraint_met": true
+    },
+    "val_chunks": 2396,
+    "val_benign": 1345,
+    "val_attack": 1051
+  },
+  "computed_at": "2026-10-27T04:39:35+0530",
+  "injecagent": {
+    "variants": {
+      "dh_base": {
+        "n": 510,
+        "recall_raw": 0.3667,
+        "recall_injected_response": 0.3863
+      },
+      "dh_enhanced": {
+        "n": 510,
+        "recall_raw": 0.3667,
+        "recall_injected_response": 0.9157
+      },
+      "ds_base": {
+        "n": 544,
+        "recall_raw": 0.2812,
+        "recall_injected_response": 0.5165
+      },
+      "ds_enhanced": {
+        "n": 544,
+        "recall_raw": 0.2812,
+        "recall_injected_response": 0.9485
+      }
+    },
+    "by_attack_type_base": {
+      "Data Security Harm": {
+        "n": 187,
+        "recall_injected_response": 0.4278
+      },
+      "Financial Data": {
+        "n": 102,
+        "recall_injected_response": 0.5686
+      },
+      "Financial Harm": {
+        "n": 153,
+        "recall_injected_response": 0.3987
+      },
+      "Others": {
+        "n": 255,
+        "recall_injected_response": 0.5137
+      },
+      "Physical Data": {
+        "n": 187,
+        "recall_injected_response": 0.492
+      },
+      "Physical Harm": {
+        "n": 170,
+        "recall_injected_response": 0.3294
+      }
+    },
+    "overall": {
+      "n": 2108,
+      "recall_raw": 0.3226,
+      "recall_injected_response": 0.6931,
+      "mean_score_raw": 0.6518
+    }
+  },
+  "test_split": {
+    "threshold": 0.84,
+    "overall": {
+      "precision": 0.9449,
+      "recall": 0.8325,
+      "f1": 0.8852,
+      "support": 2396
+    },
+    "by_source": {
+      "llmail": {
+        "precision": 0.9444,
+        "recall": 0.8478,
+        "f1": 0.8935,
+        "support": 1438
+      },
+      "opencodeinstruct": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 399
+      },
+      "prodnull": {
+        "precision": 0.9463,
+        "recall": 0.7924,
+        "f1": 0.8625,
+        "support": 559
+      }
+    }
+  },
+  "benign_corpus": {
+    "files": 2027,
+    "chunks": 8936,
+    "flagged_files": 180,
+    "file_fpr": 0.0888,
+    "chunk_fpr": 0.0553,
+    "flagged_file_list": [
+      "CheatSheetSeries/CLAUDE.md",
+      "CheatSheetSeries/.textlintrc",
+      "CheatSheetSeries/book.json",
+      "CheatSheetSeries/link-check-known-failures.json",
+      "CheatSheetSeries/package-lock.json",
+      "CheatSheetSeries/.claude/commands/review-cheatsheet-pr.md",
+      "CheatSheetSeries/.github/ISSUE_TEMPLATE/new_cheatsheet_proposal.md",
+      "CheatSheetSeries/.github/ISSUE_TEMPLATE/update_cheatsheet_proposal.md",
+      "CheatSheetSeries/.github/workflows/build-and-deploy-website.yml",
+      "CheatSheetSeries/.github/workflows/citation-check.yml",
+      "CheatSheetSeries/assets/Authorization_filter.drawio",
+      "CheatSheetSeries/assets/Authorization_filter.svg",
+      "CheatSheetSeries/assets/Authorized_data_set.drawio",
+      "CheatSheetSeries/assets/Authorized_data_set.svg",
+      "CheatSheetSeries/assets/Centralized_Service_Level_Authorization.drawio",
+      "CheatSheetSeries/assets/Centralized_Service_Level_Authorization.svg",
+      "CheatSheetSeries/assets/Decentralized_Service_Level_Authorization.drawio",
+      "CheatSheetSeries/assets/Decentralized_Service_Level_Authorization.svg",
+      "CheatSheetSeries/assets/Edge_Level_Authentication.drawio",
+      "CheatSheetSeries/assets/Edge_Level_Authorization_Classic.drawio"
+    ]
+  },
+  "elapsed_s": 48.5
+}
