@@ -1,5 +1,6 @@
 """Required Linux Docker checks: these must not silently skip on a broken host."""
 
+import ipaddress
 import json
 import socket
 import subprocess
@@ -65,7 +66,7 @@ for path in ('/should-not-write', '/repo/README.md'):
 deadline = time.monotonic() + 4
 while True:
     try:
-        conn = http.client.HTTPConnection('10.13.37.9', 80, timeout=1)
+        conn = http.client.HTTPConnection(sys.argv[1], 80, timeout=1)
         conn.request('GET', '/')
         response = conn.getresponse()
         assert response.status == 200
@@ -97,7 +98,7 @@ print('ISOLATION_OK'); print('STDERR_OK', file=sys.stderr)
         service = sandbox.start_service(
             "http", PYTHON_IMAGE, ["python", "-m", "http.server", "80", "--bind", "0.0.0.0"]
         )
-        result = sandbox.run_command(["python", "-c", code])
+        result = sandbox.run_command(["python", "-c", code, sandbox.http_ip])
         assert result.exit_code == 0, result.model_dump_json()
         assert result.stdout == "ISOLATION_OK\n"
         assert result.stderr == "STDERR_OK\n"
@@ -118,7 +119,7 @@ print('ISOLATION_OK'); print('STDERR_OK', file=sys.stderr)
         assert list(cage.attrs["NetworkSettings"]["Networks"]) == [sandbox.name]
         network = engine.networks.get(sandbox.network_id)
         assert network.attrs["Internal"]
-        assert network.attrs["IPAM"]["Config"][0]["Subnet"] == "10.13.37.0/24"
+        assert network.attrs["IPAM"]["Config"][0]["Subnet"] == sandbox.subnet
     assert (repo / "README.md").read_text() == "A benign fixture.\n"
     assert sandbox.evidence.status == "incomplete"
     assert sandbox.evidence.components.sandbox == State.COMPLETE
@@ -175,7 +176,8 @@ for target in sys.argv[1:]:
     try:
         with Sandbox(repo, SandboxConfig(image=PYTHON_IMAGE)) as sandbox:
             network = engine.networks.get(sandbox.network_id)
-            targets = {"10.13.37.1", *host_ipv4_addresses()}
+            gateway_subnet = ipaddress.IPv4Network(sandbox.subnet)
+            targets = {str(gateway_subnet.network_address + 1), *host_ipv4_addresses()}
             gateway = network.attrs["IPAM"]["Config"][0].get("Gateway")
             if gateway:
                 targets.add(gateway)
@@ -242,14 +244,40 @@ def test_subnet_collision_does_not_remove_someone_elses_network(repo: Path, engi
         ipam=IPAMConfig(pool_configs=[IPAMPool(subnet="10.13.37.0/24")]),
     )
     try:
-        sandbox = Sandbox(repo)
-        with pytest.raises(SandboxError), sandbox:
-            pytest.fail("cannot enter an overlapping network")
+        with Sandbox(repo) as sandbox:
+            chosen = ipaddress.IPv4Network(sandbox.subnet)
+            assert chosen.subnet_of(ipaddress.IPv4Network("10.13.0.0/16"))
+            assert chosen != ipaddress.IPv4Network("10.13.37.0/24")
+            result = sandbox.run_command(["true"])
+            assert result.exit_code == 0
+            assert not sandbox.evidence.errors
         assert engine.networks.get(unrelated.id).id == unrelated.id
-        assert sandbox.evidence.status == "error"
-        assert not sandbox.staged_path.parent.exists()
+        explicit = Sandbox(repo, SandboxConfig(subnet="10.13.37.0/24"))
+        with pytest.raises(SandboxError, match="overlaps"), explicit:
+            pytest.fail("an explicitly configured overlap must fail closed")
+        assert engine.networks.get(unrelated.id).id == unrelated.id
+        assert explicit.evidence.status == "error"
+        assert not explicit.staged_path.parent.exists()
     finally:
         unrelated.remove()
+
+
+def test_two_sandboxes_run_side_by_side(repo: Path, tmp_path: Path, engine):
+    second_repo = tmp_path / "second-repo"
+    second_repo.mkdir()
+    (second_repo / "README.md").write_text("A benign fixture.\n")
+    first = Sandbox(repo)
+    second = Sandbox(second_repo)
+    with first, second:
+        assert first.subnet != second.subnet
+        one = first.run_command(["sh", "-c", "echo first ready"])
+        two = second.run_command(["sh", "-c", "echo second ready"])
+        assert one.exit_code == 0 and one.stdout == "first ready\n", one.model_dump_json()
+        assert two.exit_code == 0 and two.stdout == "second ready\n", two.model_dump_json()
+        assert not first.evidence.errors
+        assert not second.evidence.errors
+    assert_resources_removed(engine, first)
+    assert_resources_removed(engine, second)
 
 
 def test_detonate_success_is_still_incomplete(repo: Path, engine):

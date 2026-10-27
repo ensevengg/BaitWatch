@@ -1,23 +1,109 @@
+import ipaddress
 import shutil
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from docker.errors import NotFound
+from docker.errors import APIError, NotFound
 
 from run.evidence import CommandResult, State
-from run.sandbox import SCAN_LABEL, Sandbox, SandboxConfig, SandboxError, detonate
+from run.sandbox import (
+    SCAN_LABEL,
+    SUBNET_ATTEMPTS,
+    Sandbox,
+    SandboxConfig,
+    SandboxError,
+    detonate,
+)
+
+OVERLAP = "Pool overlaps with other one on this address space"
 
 
-def fake_client(gateway: str = ""):
+def fake_client(gateway: str = "", create_side_effect=None):
     client = MagicMock()
     client.info.return_value = {"OSType": "linux"}
-    client.networks.create.return_value.attrs = {
-        "IPAM": {"Config": [{"Subnet": "10.13.37.0/24", "Gateway": gateway}]}
-    }
+    network = MagicMock()
+    network.attrs = {"IPAM": {"Config": [{"Subnet": "10.13.37.0/24", "Gateway": gateway}]}}
+    client.networks.create.return_value = network
+    if create_side_effect is not None:
+        client.networks.create.side_effect = create_side_effect
     client.containers.list.return_value = []
     client.networks.list.return_value = []
     return client
+
+
+def requested_subnets(client) -> list[str]:
+    return [
+        str(call.kwargs["ipam"]["Config"][0]["Subnet"])
+        for call in client.networks.create.call_args_list
+    ]
+
+
+def test_default_subnet_and_addresses_are_preserved_when_free(repo: Path):
+    client = fake_client()
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with pytest.raises(SandboxError):
+        _ = sandbox.cage_ip
+    with sandbox:
+        assert client.networks.create.call_count == 1
+        assert requested_subnets(client) == ["10.13.37.0/24"]
+        assert sandbox.subnet == "10.13.37.0/24"
+        assert sandbox.cage_ip == "10.13.37.20"
+        assert sandbox.dns_ip == "10.13.37.53"
+        assert sandbox.http_ip == "10.13.37.9"
+
+
+def test_overlap_on_default_subnet_falls_back_to_a_free_one(repo: Path):
+    network = MagicMock()
+    network.attrs = {"IPAM": {"Config": [{"Subnet": "10.13.200.0/24", "Gateway": ""}]}}
+    client = fake_client(create_side_effect=[APIError(OVERLAP), network])
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        requests = requested_subnets(client)
+        assert requests[0] == "10.13.37.0/24"
+        assert len(requests) == 2
+        assert requests[1] != "10.13.37.0/24"
+        assert ipaddress.IPv4Network(requests[1]).subnet_of(ipaddress.IPv4Network("10.13.0.0/16"))
+        assert sandbox.subnet == requests[1]
+        network = ipaddress.IPv4Network(sandbox.subnet)
+        assert sandbox.cage_ip == str(network.network_address + 20)
+        assert sandbox.dns_ip == str(network.network_address + 53)
+        assert sandbox.http_ip == str(network.network_address + 9)
+        assert ipaddress.IPv4Address(sandbox.cage_ip) in network.hosts()
+
+
+def test_explicit_subnet_overlap_fails_closed_without_retry(repo: Path):
+    client = fake_client(create_side_effect=APIError(OVERLAP))
+    sandbox = Sandbox(repo, SandboxConfig(subnet="10.13.37.0/24"), client_factory=lambda: client)
+    with pytest.raises(SandboxError, match="overlaps"), sandbox:
+        pytest.fail("an explicitly configured overlap must fail closed")
+    assert client.networks.create.call_count == 1
+    assert sandbox.evidence.errors[0].code == "SANDBOX_SETUP"
+    assert not sandbox.staged_path.parent.exists()
+    client.close.assert_called_once()
+
+
+def test_non_overlap_api_error_is_not_retried(repo: Path):
+    client = fake_client(create_side_effect=APIError("physics broke, please reboot the daemon"))
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with pytest.raises(SandboxError, match="reboot"), sandbox:
+        pytest.fail("only overlap errors may fall back to another subnet")
+    assert client.networks.create.call_count == 1
+    assert not sandbox.staged_path.parent.exists()
+
+
+def test_all_fallback_subnets_overlapping_fails_closed(repo: Path):
+    client = fake_client(create_side_effect=APIError(OVERLAP))
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with pytest.raises(SandboxError, match="candidate subnets"), sandbox:
+        pytest.fail("exhausted subnet fallbacks must fail closed")
+    requests = requested_subnets(client)
+    assert len(requests) == SUBNET_ATTEMPTS
+    assert len(set(requests)) == SUBNET_ATTEMPTS
+    assert requests[0] == "10.13.37.0/24"
+    assert sandbox.evidence.errors[0].code == "SANDBOX_SETUP"
+    assert not sandbox.staged_path.parent.exists()
+    client.close.assert_called_once()
 
 
 def test_network_with_a_host_gateway_fails_closed(repo: Path):
@@ -108,8 +194,18 @@ def test_cleanup_failure_is_observable_and_not_complete(repo: Path):
 
 
 def test_invalid_network_configuration_is_rejected():
-    with pytest.raises(ValueError, match="distinct usable"):
-        SandboxConfig(cage_ip="10.13.37.53")
+    with pytest.raises(ValueError, match="distinct"):
+        SandboxConfig(dns_host=53, http_host=53)
+    with pytest.raises(ValueError, match="2..254"):
+        SandboxConfig(cage_host=1)
+    with pytest.raises(ValueError, match="2..254"):
+        SandboxConfig(http_host=255)
+    with pytest.raises(ValueError, match="/24"):
+        SandboxConfig(subnet="10.13.0.0/16")
+    with pytest.raises(ValueError, match="/24"):
+        SandboxConfig(subnet="10.13.37.7/24")
+    with pytest.raises(ValueError, match="/24"):
+        SandboxConfig(subnet="not-a-network")
     with pytest.raises(ValueError, match="positive"):
         SandboxConfig(max_output_bytes=0)
 

@@ -21,7 +21,7 @@ uv run pytest -m "not gpu" tests/run
 
 On a machine without Docker, run the unit tests with `uv run pytest -m "not docker and not gpu" tests/run`. The full gate needs Docker. If the daemon or an image is missing, the Docker tests fail instead of skipping.
 
-Every scan uses the fixed subnet `10.13.37.0/24`, so scans and tests on one daemon must run one at a time. If the subnet is already taken, the scan records an error. It never deletes another scan's network to free the subnet.
+Each scan creates its own network. Automatic selection tries the documented subnet `10.13.37.0/24` first and falls back to other subnets under `10.13.0.0/16` when Docker reports the range is taken, so scans can run at the same time. A configured subnet is used as written and never falls back. A scan never deletes another network to free a subnet. If every candidate subnet is taken, the scan records an error.
 
 ## Diagnostic command
 
