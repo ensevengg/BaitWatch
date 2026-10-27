@@ -1,0 +1,502 @@
+{
+  "$defs": {
+    "CommandResult": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Command",
+          "type": "array"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        },
+        "stdout": {
+          "default": "",
+          "title": "Stdout",
+          "type": "string"
+        },
+        "stderr": {
+          "default": "",
+          "title": "Stderr",
+          "type": "string"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
+        },
+        "output_truncated": {
+          "default": false,
+          "title": "Output Truncated",
+          "type": "boolean"
+        },
+        "duration_seconds": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Duration Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "title": "CommandResult",
+      "type": "object"
+    },
+    "FileDiff": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "change": {
+          "enum": [
+            "added",
+            "modified",
+            "deleted"
+          ],
+          "title": "Change",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "change"
+      ],
+      "title": "FileDiff",
+      "type": "object"
+    },
+    "HoneytokenHit": {
+      "additionalProperties": false,
+      "properties": {
+        "token_id": {
+          "title": "Token Id",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "dns",
+            "http",
+            "tls",
+            "tool_log",
+            "transcript"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "source_ip": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Ip"
+        }
+      },
+      "required": [
+        "token_id",
+        "source"
+      ],
+      "title": "HoneytokenHit",
+      "type": "object"
+    },
+    "NetworkHit": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ip": {
+          "title": "Source Ip",
+          "type": "string"
+        },
+        "scan_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scan Token"
+        },
+        "destination": {
+          "title": "Destination",
+          "type": "string"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_ip",
+        "destination"
+      ],
+      "title": "NetworkHit",
+      "type": "object"
+    },
+    "ReadEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/State",
+          "default": "not_run"
+        }
+      },
+      "title": "ReadEvidence",
+      "type": "object"
+    },
+    "RunComponents": {
+      "additionalProperties": false,
+      "properties": {
+        "sandbox": {
+          "$ref": "#/$defs/State",
+          "default": "not_run"
+        },
+        "dns_sink": {
+          "$ref": "#/$defs/State",
+          "default": "not_run"
+        },
+        "http_sink": {
+          "$ref": "#/$defs/State",
+          "default": "not_run"
+        },
+        "tls_sink": {
+          "$ref": "#/$defs/State",
+          "default": "not_run"
+        },
+        "decoy": {
+          "$ref": "#/$defs/State",
+          "default": "not_run"
+        },
+        "trace": {
+          "$ref": "#/$defs/State",
+          "default": "not_run"
+        }
+      },
+      "title": "RunComponents",
+      "type": "object"
+    },
+    "RunError": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "RunError",
+      "type": "object"
+    },
+    "RunEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scan_id": {
+          "format": "uuid",
+          "title": "Scan Id",
+          "type": "string"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "Started At",
+          "type": "string"
+        },
+        "status": {
+          "default": "incomplete",
+          "enum": [
+            "incomplete",
+            "complete",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "components": {
+          "$ref": "#/$defs/RunComponents"
+        },
+        "staging_exclusions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Staging Exclusions",
+          "type": "array"
+        },
+        "dns_hits": {
+          "items": {
+            "$ref": "#/$defs/NetworkHit"
+          },
+          "title": "Dns Hits",
+          "type": "array"
+        },
+        "http_hits": {
+          "items": {
+            "$ref": "#/$defs/NetworkHit"
+          },
+          "title": "Http Hits",
+          "type": "array"
+        },
+        "tls_hits": {
+          "items": {
+            "$ref": "#/$defs/NetworkHit"
+          },
+          "title": "Tls Hits",
+          "type": "array"
+        },
+        "honeytoken_hits": {
+          "items": {
+            "$ref": "#/$defs/HoneytokenHit"
+          },
+          "title": "Honeytoken Hits",
+          "type": "array"
+        },
+        "file_diffs": {
+          "items": {
+            "$ref": "#/$defs/FileDiff"
+          },
+          "title": "File Diffs",
+          "type": "array"
+        },
+        "tool_log": {
+          "items": {
+            "$ref": "#/$defs/CommandResult"
+          },
+          "title": "Tool Log",
+          "type": "array"
+        },
+        "errors": {
+          "items": {
+            "$ref": "#/$defs/RunError"
+          },
+          "title": "Errors",
+          "type": "array"
+        }
+      },
+      "title": "RunEvidence",
+      "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "complete"
+              }
+            }
+          },
+          "then": {
+            "type": "object",
+            "required": [
+              "status",
+              "components",
+              "errors"
+            ],
+            "properties": {
+              "status": {
+                "const": "complete"
+              },
+              "components": {
+                "type": "object",
+                "required": [
+                  "sandbox",
+                  "dns_sink",
+                  "http_sink",
+                  "tls_sink",
+                  "decoy",
+                  "trace"
+                ],
+                "properties": {
+                  "sandbox": {
+                    "const": "complete"
+                  },
+                  "dns_sink": {
+                    "const": "complete"
+                  },
+                  "http_sink": {
+                    "const": "complete"
+                  },
+                  "tls_sink": {
+                    "const": "complete"
+                  },
+                  "decoy": {
+                    "const": "complete"
+                  },
+                  "trace": {
+                    "const": "complete"
+                  }
+                }
+              },
+              "errors": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "State": {
+      "enum": [
+        "not_run",
+        "complete",
+        "error"
+      ],
+      "title": "State",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "verdict": {
+      "default": "FLAG",
+      "enum": [
+        "ALLOW",
+        "FLAG",
+        "BLOCK"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "read": {
+      "$ref": "#/$defs/ReadEvidence"
+    },
+    "run": {
+      "$ref": "#/$defs/RunEvidence"
+    }
+  },
+  "required": [
+    "reason"
+  ],
+  "title": "VerdictReport",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "verdict"
+        ],
+        "properties": {
+          "verdict": {
+            "const": "ALLOW"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "read",
+          "run"
+        ],
+        "properties": {
+          "read": {
+            "required": [
+              "status"
+            ],
+            "properties": {
+              "status": {
+                "const": "complete"
+              }
+            }
+          },
+          "run": {
+            "type": "object",
+            "required": [
+              "status",
+              "components",
+              "errors",
+              "honeytoken_hits"
+            ],
+            "properties": {
+              "status": {
+                "const": "complete"
+              },
+              "components": {
+                "type": "object",
+                "required": [
+                  "sandbox",
+                  "dns_sink",
+                  "http_sink",
+                  "tls_sink",
+                  "decoy",
+                  "trace"
+                ],
+                "properties": {
+                  "sandbox": {
+                    "const": "complete"
+                  },
+                  "dns_sink": {
+                    "const": "complete"
+                  },
+                  "http_sink": {
+                    "const": "complete"
+                  },
+                  "tls_sink": {
+                    "const": "complete"
+                  },
+                  "decoy": {
+                    "const": "complete"
+                  },
+                  "trace": {
+                    "const": "complete"
+                  }
+                }
+              },
+              "errors": {
+                "maxItems": 0
+              },
+              "honeytoken_hits": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

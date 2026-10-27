@@ -39,6 +39,20 @@ pytest -m "not gpu"                  # CPU test suite
 
 Detector checkpoint, thresholds and the full API: [`read/README.md`](read/README.md).
 
+## Quick start (RUN side)
+
+Needs Linux, Docker Engine 28 or later, and uv.
+
+```bash
+uv sync --frozen --extra dev
+docker pull alpine:3.20
+docker pull python:3.12-alpine
+bash run/check.sh                    # lint, format and RUN tests, including Docker isolation
+baitwatch-run sandbox <repo> -- echo hello
+```
+
+Sandbox boundary, evidence contract and known limits: [`run/README.md`](run/README.md).
+
 ## Meta models
 
 - **Llama Prompt Guard 2 (22M), fine-tuned:** local detector
