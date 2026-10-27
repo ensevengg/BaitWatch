@@ -33,9 +33,11 @@ class WalkerConfig:
     max_file_bytes: int = 262_144          # larger text files are scanned as a prefix, marked truncated
     max_files: int = 5_000                 # beyond this the scan is marked truncated (fail-closed upstream)
     binary_sniff_bytes: int = 8_192
+    # .vscode/.idea are NOT skipped: workspace settings/tasks are a documented
+    # agent attack surface (auto-approve flags, folder-open tasks).
     excluded_dirs: frozenset[str] = frozenset({
         ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
-        ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".idea", ".vscode",
+        ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
         "dist", "build", ".next", ".parcel-cache", "target",
     })
     binary_extensions: frozenset[str] = frozenset({
@@ -47,6 +49,7 @@ class WalkerConfig:
         ".db", ".sqlite", ".sqlite3", ".mdb", ".parquet", ".arrow", ".feather",
         ".pkl", ".pickle", ".pt", ".pth", ".ckpt", ".safetensors", ".gguf", ".onnx",
         ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".ttc",
+        ".ai", ".psd", ".sketch",              # design files: binary streams
     })
 
 
@@ -59,6 +62,7 @@ class JudgeConfig:
     # configuration actually takes effect.
     endpoints: tuple[dict, ...] | None = None
     timeout_s: float = 10.0                # per judge call, roadmap D5
+    concurrency: int = 4                   # parallel judge calls per scan
     max_calls_per_scan: int = 12
     max_tokens_per_scan: int = 16_000      # judge input+output token budget per scan
     max_chunk_chars: int = 4_000           # never send more than this to the judge
@@ -106,7 +110,18 @@ class ReadConfig:
     overlap_tokens: int = 64
     max_file_tokens: int = 24_000
     max_chunks_per_file: int = 64         # 64*384 covers the 24k-token cap
-    max_views_per_file: int = 8           # original + decoded variants, capped
+    max_views_per_file: int = 8           # original + one view per decoder, capped
+    tail_bytes: int = 16_384              # oversized files: the last bytes are scanned too
+    tail_windows: int = 2                 # chunk-capped files: last windows always scored
+    mask_blobs: bool = True               # base64/hex blobs -> placeholder before scoring
+    # Oversized files are covered head + tail; with strict_coverage the
+    # unscanned middle also makes the READ verdict "incomplete".
+    strict_coverage: bool = False
+    # Persistent chunk-score cache (read/cache.py); only used when scan()
+    # loads the detector itself. None path = BAITWATCH_SCORE_CACHE or
+    # ~/.cache/baitwatch/scores.sqlite.
+    score_cache: bool = True
+    score_cache_path: Path | None = None
     on_file_error: str = "flag"            # "flag" (fail-closed) or "skip"
     enable_decoders: bool = True
     judge: JudgeConfig = field(default_factory=JudgeConfig)
@@ -130,7 +145,9 @@ class ReadConfig:
         cfg.max_chunks_per_file = 8
         cfg.max_file_tokens = 8_000
         cfg.batch_size = 128
-        return cfg
+        # The pinned checkpoint's thresholds, not the class defaults: the
+        # hook must judge with the same cutoffs as a full scan.
+        return config_from_model_config(cfg)
 
 
 def model_config_path() -> Path:
@@ -163,6 +180,12 @@ def resolve_model_path(explicit: Path | str | None = None) -> Path:
         p = Path(pinned["checkpoint_path"])
         if p.exists():
             return p
+        # Never fall back silently: the pinned thresholds belong to the pinned
+        # checkpoint, and the base model under them is a different detector.
+        raise FileNotFoundError(
+            f"pinned checkpoint missing: {p} (read/model_config.json, tag "
+            f"{pinned.get('tag')!r}). Restore it, re-pin with read.training.pin, "
+            "or set BAITWATCH_MODEL_PATH explicitly.")
     for p in DEFAULT_MODEL_DIRS:
         if p.exists():
             return p

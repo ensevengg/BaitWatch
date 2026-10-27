@@ -56,18 +56,24 @@ class Finding:
         return self.status == STATUS_FLAGGED
 
 
-def system_finding(file: str, note: str, chunk_id: int = 0) -> Finding:
+def system_finding(file: str, note: str, chunk_id: int = 0, *,
+                   evidence: dict[str, Any] | None = None,
+                   decoder: str | None = None) -> Finding:
     """Fail-closed placeholder: something went wrong, so the file stays suspect.
 
     Used for unreadable files and for chunks whose score could not be produced
     (detector failure mid-scan). Layer "system" tells the verdict engine this
-    flag came from BaitWatch itself, not the detector.
+    flag came from BaitWatch itself, not the detector. When the failure is
+    about a specific chunk, ``evidence`` keeps its text/line so the reader can
+    see what went unchecked.
     """
     return Finding(
         file=file,
         chunk_id=chunk_id,
         score=1.0,
         layer=LAYER_SYSTEM,
-        evidence={"text": "", "line": None, "note": note},
+        evidence={**(evidence or {"text": "", "line": None}), "note": note},
         status=STATUS_FLAGGED,
+        decoded=decoder is not None,
+        decoder=decoder,
     )

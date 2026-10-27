@@ -22,15 +22,17 @@ class Chunk:
     text: str
     start_char: int    # offset into the view text
     end_char: int
-    start_line: int    # 1-based, computed by the caller via line index
+    start_line: int | None   # 1-based; None when the position in the file is unknown
 
 
 def chunk_lines(text: str) -> list[int]:
     """Line-start offsets for 1-based line lookup via bisect."""
     starts = [0]
-    for i, ch in enumerate(text):
-        if ch == "\n":
-            starts.append(i + 1)
+    find = text.find
+    i = find("\n")
+    while i != -1:
+        starts.append(i + 1)
+        i = find("\n", i + 1)
     return starts
 
 
@@ -47,7 +49,8 @@ def line_at(line_starts: list[int], offset: int) -> int:
 
 class Chunker:
     def __init__(self, tokenizer, window_tokens: int = 448, overlap_tokens: int = 64,
-                 max_file_tokens: int = 24_000, max_chunks: int = 48):
+                 max_file_tokens: int = 24_000, max_chunks: int = 48,
+                 tail_windows: int = 2):
         if window_tokens + MAX_SPECIALS > 512:
             raise ValueError("window_tokens + specials must fit the model's 512-token context")
         if overlap_tokens >= window_tokens:
@@ -57,25 +60,39 @@ class Chunker:
         self.overlap = overlap_tokens
         self.max_file_tokens = max_file_tokens
         self.max_chunks = max_chunks
+        # Over a cap, the last windows are still scored: payloads appended to
+        # the end of a long file are the cheapest evasion of a prefix scan.
+        self.tail_windows = max(0, min(tail_windows, max_chunks - 1))
+
+    def _content_offsets(self, text: str, base: int = 0,
+                         max_tokens: int | None = None) -> tuple[list[tuple[int, int]], bool]:
+        """(content offsets shifted by ``base``, whether max_tokens truncated)."""
+        kwargs = {}
+        if max_tokens is not None:
+            kwargs = {"truncation": True, "max_length": max_tokens + MAX_SPECIALS}
+        enc = self.tok(text, return_offsets_mapping=True, add_special_tokens=True, **kwargs)
+        truncated = (max_tokens is not None
+                     and len(enc["input_ids"]) >= max_tokens + MAX_SPECIALS)
+        # Drop the specials' (0,0) placeholders, keep content offsets only.
+        return [(s + base, e + base) for s, e in enc["offset_mapping"] if e > s], truncated
 
     def chunk(self, text: str, file: str, view: str = "original",
-              first_chunk_id: int = 0) -> tuple[list[Chunk], int]:
+              first_chunk_id: int = 0,
+              line_offset: int | None = 0) -> tuple[list[Chunk], int]:
         """Returns (chunks, uncovered_tokens).
 
-        ``uncovered_tokens`` counts every content token beyond the last produced
-        window — from the chunk cap *or* the tokenizer's own truncation — so a
-        scan can honestly report that unseen text remains.
+        ``uncovered_tokens`` counts content tokens no window covers — from the
+        chunk cap *or* the token cap — so a scan can honestly report that
+        unseen text remains (at least 1 when the token cap hid an unknown
+        amount). Over either cap the head windows and the last
+        ``tail_windows`` windows are scored. ``line_offset`` shifts reported
+        line numbers (tail segments); None means lines are unknown.
         """
         if not text or not text.strip():
             return [], 0
-        enc = self.tok(text, return_offsets_mapping=True, add_special_tokens=True,
-                       truncation=True, max_length=self.max_file_tokens + MAX_SPECIALS)
-        # Hitting the cap means the file had more tokens than we tokenized;
-        # offsets can't see past it, so flag at least one token as unseen.
-        hit_token_cap = len(enc["input_ids"]) >= self.max_file_tokens + MAX_SPECIALS
-        offsets = [o for o in enc["offset_mapping"]]
-        # Drop the specials' (0,0) placeholders, keep content offsets only.
-        content = [(s, e) for s, e in offsets if e > s]
+        # Hitting the token cap means the file had more tokens than we
+        # tokenized; offsets can't see past it.
+        content, hit_token_cap = self._content_offsets(text, max_tokens=self.max_file_tokens)
         if not content:
             return [], 0
 
@@ -94,16 +111,37 @@ class Chunker:
             windows[-2] = (len(content) - min(self.window, len(content)), len(content))
             windows.pop()
 
-        limited = windows[: self.max_chunks]
-        covered = limited[-1][1] if limited else 0
-        uncovered = max(0, len(content) - covered)
-        if hit_token_cap:
-            uncovered = max(uncovered, 1)
+        spans: list[tuple[int, int]] = []      # char spans to emit, in order
+        k = self.tail_windows
+        if hit_token_cap and k:
+            head = windows[: self.max_chunks - k]
+            spans = [(content[a][0], content[b - 1][1]) for a, b in head]
+            head_end = spans[-1][1] if spans else 0
+            # Tokenize just the end of the file for the tail windows.
+            tail_start = max(head_end, len(text) - self.window * k * 8)
+            tail, _ = self._content_offsets(text[tail_start:], base=tail_start)
+            tail = tail[-(self.window * k - self.overlap * (k - 1)):]
+            for i in range(k):
+                a = i * (self.window - self.overlap)
+                if a >= len(tail):
+                    break
+                b = min(a + self.window, len(tail))
+                spans.append((tail[a][0], tail[b - 1][1]))
+            uncovered = 1
+        else:
+            if len(windows) > self.max_chunks:
+                keep = windows[: self.max_chunks - k] + (windows[-k:] if k else [])
+            else:
+                keep = windows
+            covered = [False] * len(content)
+            for a, b in keep:
+                covered[a:b] = [True] * (b - a)
+            uncovered = covered.count(False) + (1 if hit_token_cap else 0)
+            spans = [(content[a][0], content[b - 1][1]) for a, b in keep]
+
         chunks: list[Chunk] = []
-        line_starts = chunk_lines(text)
-        for i, (a, b) in enumerate(limited):
-            s_char = content[a][0]
-            e_char = content[b - 1][1]
+        line_starts = chunk_lines(text) if line_offset is not None else []
+        for i, (s_char, e_char) in enumerate(spans):
             chunks.append(Chunk(
                 file=file,
                 view=view,
@@ -111,6 +149,7 @@ class Chunker:
                 text=text[s_char:e_char],
                 start_char=s_char,
                 end_char=e_char,
-                start_line=line_at(line_starts, s_char),
+                start_line=(line_at(line_starts, s_char) + line_offset
+                            if line_offset is not None else None),
             ))
         return chunks, uncovered

@@ -16,17 +16,16 @@ Contract: `read.scan(path) → [Finding{file, chunk_id, score, layer, evidence}]
 
 ```bash
 python -m read scan <repo>            # human output (also: baitwatch-read scan <repo>)
+python -m read scan <repo> -v         # + every finding and the uncertain band
 python -m read scan <repo> --json     # verdict-engine input
 python -m read.scan <repo>            # same, module form
 python -m read selftest               # detector sanity scores
 ```
 
-Exit codes: `0` clean · `1` flagged findings · `2` scan error (caller must
-treat 2 as *not clean* — fail closed). Exit codes are a convenience for
-humans and scripts; automated consumers (hooks, verdict engine) must read
-`stats` from `--json` — an evidence-truncated scan (`truncated_scan`,
-`chunks_dropped`, `views_dropped` > 0) exits 0 with no flags but is **not**
-a clean verdict.
+Exit codes: `0` clean · `1` flagged findings · `2` scan error · `3`
+incomplete evidence (nothing flagged, but the scan could not cover
+everything — see `stats.incomplete_reasons`). Callers must treat 2 and 3 as
+*not clean* (fail closed).
 
 ## Public API
 
@@ -61,17 +60,28 @@ print(result.to_dict())                    # JSON for the verdict engine
 ```
 
 Wrapped by `ScanResult.to_dict()` as `{"findings": [...], "stats": {...},
-"read_verdict": "attack"|"clean"}`. `read_verdict` is the READ layer's opinion
-only — the fused ALLOW/ASK/BLOCK decision is Ashutosh's verdict engine.
+"read_verdict": "attack"|"incomplete"|"clean"}`. `read_verdict` is the READ
+layer's opinion only — the fused ALLOW/ASK/BLOCK decision is Ashutosh's
+verdict engine.
 
 Fail-closed semantics the engine can rely on:
 
 - Any error (unreadable file, detector failure, judge down/timeout/garbage,
-  budget or spend cap exhausted) produces a **flagged** finding — layer
-  `"system"` when BaitWatch itself is the problem — or a raised exception for
-  "couldn't scan at all". An error is never clean.
-- `stats.truncated_scan` / `stats.chunks_dropped` / `stats.files_truncated`
-  say when evidence is incomplete: treat as not-clean.
+  spend cap exhausted) produces a **flagged** finding — layer `"system"` when
+  BaitWatch itself is the problem — or a raised exception for "couldn't scan
+  at all". An error is never clean.
+- Evidence the scan could not cover makes `read_verdict` `"incomplete"`,
+  never `"clean"`; `stats.incomplete_reasons` says why: walker file cap,
+  decoded content past its cap, review-band chunks the per-scan judge budget
+  did not reach (`stats.judge_skipped`, status `"reviewed"` with a note),
+  decoder crashes, and — with `ReadConfig.strict_coverage` — oversized files.
+- Oversized files are scanned head + tail (`tail_bytes`, `tail_windows`);
+  the unscanned middle is reported in `stats.files_truncated` /
+  `stats.partial_files` / `stats.chunks_dropped`.
+- Base64/hex blobs and PEM blocks are masked before scoring; their readable
+  content is scored through the decoder views (base64 incl. `KEY=`/unpadded/
+  URL-safe/wrapped, hex, HTML comments, zero-width, variation selectors,
+  Unicode tags; nested two levels deep).
 - The judge can **escalate** (flag an uncertain chunk, raise a score) but can
   **never clear** a chunk the model flagged — at most it records its dissent
   in `explanation`. Inside the uncertain band (`review_low..flag_threshold`)

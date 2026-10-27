@@ -199,6 +199,7 @@ def train(data_dir: Path, base_model: Path, out_dir: Path,
                     break
 
         val_metrics = quick_val(model, val_loader, device) if val_rows else {}
+        model.train()   # quick_val switched to eval mode; later epochs need dropout back
         history.append({"epoch": epoch + 1, "val": val_metrics})
         print(f"epoch {epoch + 1} done: {val_metrics}", flush=True)
         if done:

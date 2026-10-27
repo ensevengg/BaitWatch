@@ -49,3 +49,29 @@ def test_defaults_without_pin(monkeypatch, tmp_path):
     cfg = rc.config_from_model_config()
     assert (cfg.flag_threshold, cfg.review_low, cfg.hard_high) == (0.8, 0.3, 0.9)
     assert cfg.walker.max_file_bytes > 0
+
+
+def test_quick_preset_uses_pinned_thresholds(monkeypatch, tmp_path):
+    pin = {"checkpoint_path": "/nowhere", "thresholds": {
+        "flag_threshold": 0.85, "review_low": 0.521, "hard_high": 0.9}}
+    monkeypatch.setattr(rc, "MODEL_CONFIG_PATH", tmp_path / "model_config.json")
+    (tmp_path / "model_config.json").write_text(json.dumps(pin))
+    cfg = rc.ReadConfig.quick()
+    assert (cfg.flag_threshold, cfg.review_low) == (0.85, 0.521)
+    assert cfg.walker.max_files == 400
+
+
+def test_missing_pinned_checkpoint_fails_loudly(monkeypatch, tmp_path):
+    import pytest
+
+    pin = {"tag": "v9", "checkpoint_path": str(tmp_path / "gone")}
+    monkeypatch.setattr(rc, "MODEL_CONFIG_PATH", tmp_path / "model_config.json")
+    (tmp_path / "model_config.json").write_text(json.dumps(pin))
+    monkeypatch.delenv("BAITWATCH_MODEL_PATH", raising=False)
+    base = tmp_path / "base-model"
+    base.mkdir()
+    monkeypatch.setattr(rc, "DEFAULT_MODEL_DIRS", (base,))
+    with pytest.raises(FileNotFoundError, match="pinned checkpoint missing"):
+        rc.resolve_model_path()
+    monkeypatch.setenv("BAITWATCH_MODEL_PATH", str(base))   # explicit override still works
+    assert rc.resolve_model_path() == base

@@ -5,6 +5,10 @@ against InjecAgent (the frozen eval set) and against any additional frozen
 payload list (Aditya's attack seeds, D3: "hash-check that none of Aditya's
 attack-repo payloads are in your training parquet").
 
+The real-world suite's attack fixtures (tests/read/fixtures/suite/attacks)
+are frozen too — every line of >= 5 words and every whole file — so suite
+results can only be reported for models that never trained on them.
+
 A row counts as leaked when its normalized text matches a frozen text exactly,
 or shares word 3-gram Jaccard >= 0.8 with one. Exact matches are reported
 separately from fuzzy ones because they mean different failure modes.
@@ -25,15 +29,37 @@ from read.data.prepare import MinHashDeduper, _shingle_hashes
 from read.data.schema import normalize_for_dedupe, read_parquet, text_sha256
 
 INJECAGENT_DIR = Path(__file__).resolve().parents[2] / "injectionagent" / "InjecAgent" / "data"
+SUITE_ATTACKS_DIR = (Path(__file__).resolve().parents[2] / "tests" / "read" / "fixtures"
+                     / "suite" / "attacks")
 TEST_CASE_FILES = (
     "test_cases_dh_base.json", "test_cases_dh_enhanced.json",
     "test_cases_ds_base.json", "test_cases_ds_enhanced.json",
 )
 
 
-def frozen_texts(extra: list[Path] | None = None) -> dict[str, list[str]]:
+def suite_attack_texts(suite_dir: Path = SUITE_ATTACKS_DIR) -> list[str]:
+    """Whole files and every >= 5-word line of the suite's attack fixtures."""
+    texts: list[str] = []
+    if not suite_dir.exists():
+        return texts
+    for path in sorted(p for p in suite_dir.rglob("*") if p.is_file()):
+        try:
+            body = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if body.strip():
+            texts.append(body)
+        texts.extend(ln.strip() for ln in body.splitlines()
+                     if len(normalize_for_dedupe(ln).split()) >= 5)
+    return texts
+
+
+def frozen_texts(extra: list[Path] | None = None,
+                 include_suite: bool = True) -> dict[str, list[str]]:
     """The texts that must never appear (even nearly) in a training split."""
     out: dict[str, list[str]] = {"injecagent": []}
+    if include_suite:
+        out["suite_attacks"] = suite_attack_texts()
     for name in TEST_CASE_FILES:
         p = INJECAGENT_DIR / name
         if not p.exists():

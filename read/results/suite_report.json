@@ -22,7 +22,7 @@
       ],
       "files": 3,
       "chunks": 5,
-      "latency_s": 3.883,
+      "latency_s": 3.844,
       "truncated": false,
       "views_dropped": 0
     },
@@ -40,7 +40,7 @@
       "layers": [],
       "files": 3,
       "chunks": 3,
-      "latency_s": 0.087,
+      "latency_s": 0.085,
       "truncated": false,
       "views_dropped": 0
     },
@@ -62,7 +62,7 @@
       ],
       "files": 2,
       "chunks": 2,
-      "latency_s": 0.065,
+      "latency_s": 0.068,
       "truncated": false,
       "views_dropped": 0
     },
@@ -80,7 +80,7 @@
       "layers": [],
       "files": 2,
       "chunks": 2,
-      "latency_s": 0.131,
+      "latency_s": 0.133,
       "truncated": false,
       "views_dropped": 0
     },
@@ -89,13 +89,14 @@
       "expected": "attack",
       "caught": true,
       "surfaced": true,
-      "n_reviewed": 1,
+      "n_reviewed": 0,
       "flagged_files": [
+        "README.md",
         "docs/issue-142-hotfix.md",
         "scripts/fetch-hotfix.sh"
       ],
-      "n_flagged_files": 2,
-      "n_findings": 2,
+      "n_flagged_files": 3,
+      "n_findings": 3,
       "max_score": 0.98,
       "decoders": [],
       "layers": [
@@ -112,12 +113,13 @@
       "expected": "attack",
       "caught": true,
       "surfaced": true,
-      "n_reviewed": 2,
+      "n_reviewed": 1,
       "flagged_files": [
+        "README.md",
         "docs/activation.md"
       ],
-      "n_flagged_files": 1,
-      "n_findings": 1,
+      "n_flagged_files": 2,
+      "n_findings": 2,
       "max_score": 0.986,
       "decoders": [],
       "layers": [
@@ -125,7 +127,7 @@
       ],
       "files": 3,
       "chunks": 3,
-      "latency_s": 0.009,
+      "latency_s": 0.008,
       "truncated": false,
       "views_dropped": 0
     },
@@ -147,7 +149,7 @@
       ],
       "files": 2,
       "chunks": 2,
-      "latency_s": 0.009,
+      "latency_s": 0.008,
       "truncated": false,
       "views_dropped": 0
     },
@@ -261,7 +263,7 @@
       ],
       "files": 2,
       "chunks": 2,
-      "latency_s": 0.008,
+      "latency_s": 0.009,
       "truncated": false,
       "views_dropped": 0
     },
@@ -351,7 +353,7 @@
       "layers": [],
       "files": 2,
       "chunks": 2,
-      "latency_s": 0.008,
+      "latency_s": 0.009,
       "truncated": false,
       "views_dropped": 0
     },
@@ -369,7 +371,7 @@
       "layers": [],
       "files": 2,
       "chunks": 2,
-      "latency_s": 0.009,
+      "latency_s": 0.008,
       "truncated": false,
       "views_dropped": 0
     },
@@ -386,8 +388,8 @@
       "decoders": [],
       "layers": [],
       "files": 4,
-      "chunks": 66,
-      "latency_s": 0.375,
+      "chunks": 67,
+      "latency_s": 0.357,
       "truncated": false,
       "views_dropped": 0
     },
@@ -405,7 +407,7 @@
       "layers": [],
       "files": 3,
       "chunks": 3,
-      "latency_s": 0.009,
+      "latency_s": 0.01,
       "truncated": false,
       "views_dropped": 0
     },
@@ -459,7 +461,7 @@
       "layers": [],
       "files": 3,
       "chunks": 3,
-      "latency_s": 0.009,
+      "latency_s": 0.008,
       "truncated": false,
       "views_dropped": 0
     },
@@ -492,8 +494,8 @@
     "benign_files_total": 32,
     "benign_files_flagged": 0,
     "benign_file_fpr": 0.0,
-    "attack_latency_mean_s": 0.353,
-    "benign_latency_mean_s": 0.039
+    "attack_latency_mean_s": 0.35,
+    "benign_latency_mean_s": 0.038
   },
   "attack_descriptions": {
     "cursor-rules-backdoor": "rules-file backdoor, zero-width-hidden payload",

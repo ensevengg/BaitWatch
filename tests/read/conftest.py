@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import base64
 import importlib
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
+
+# Tests must never write the user's real score cache (read/cache.py reads
+# this at import, so set it before any `read` module is imported).
+os.environ["BAITWATCH_SCORE_CACHE"] = str(
+    Path(tempfile.mkdtemp(prefix="bw-test-cache-")) / "scores.sqlite")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
