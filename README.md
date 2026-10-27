@@ -34,7 +34,7 @@ pip install -e ".[test]"             # add ".[train]" for the training pipeline
 git clone https://github.com/uiuc-kang-lab/InjecAgent injectionagent/InjecAgent   # frozen eval set
 baitwatch-read scan <repo>           # human-readable findings
 baitwatch-read scan <repo> --json    # input for the verdict engine
-pytest -m "not gpu"                  # CPU test suite
+pytest -m "not gpu" tests/read       # CPU test suite
 ```
 
 Detector checkpoint, thresholds and the full API: [`read/README.md`](read/README.md).

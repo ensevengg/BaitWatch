@@ -53,10 +53,11 @@ def capture_attached(
                 kept = chunk[:remaining]
                 captured[key.data].extend(kept)
                 remaining -= len(kept)
-                if len(chunk) > len(kept) and stopped_at is None:
+                if len(chunk) > len(kept):
                     result.output_truncated = True
-                    stopped_at = time.monotonic()
-                    stop_container()
+                    if stopped_at is None:
+                        stopped_at = time.monotonic()
+                        stop_container()
         try:
             result.exit_code = process.wait(timeout=3)
         except subprocess.TimeoutExpired:

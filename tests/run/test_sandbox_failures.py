@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from run.evidence import State
+from run.evidence import CommandResult, State
 from run.sandbox import Sandbox, SandboxConfig, SandboxError, detonate
 
 
@@ -59,6 +59,30 @@ def test_network_setup_failure_removes_staging(repo: Path):
     assert sandbox.evidence.errors
 
 
+def test_silent_exception_still_records_error_and_cleans_up(repo: Path):
+    client = fake_client()
+    client.networks.create.side_effect = TimeoutError()
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with pytest.raises(SandboxError), sandbox:
+        pytest.fail("a messageless exception must still fail the sandbox closed")
+    assert sandbox.evidence.errors[0].code == "SANDBOX_SETUP"
+    assert sandbox.evidence.errors[0].message
+    assert not sandbox.staged_path.parent.exists()
+    client.close.assert_called_once()
+
+
+def test_keyboard_interrupt_during_setup_still_cleans_up(repo: Path):
+    client = fake_client()
+    client.networks.create.side_effect = KeyboardInterrupt()
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with pytest.raises(KeyboardInterrupt), sandbox:
+        pytest.fail("setup must not swallow interrupts")
+    assert sandbox.evidence.status == "error"
+    assert sandbox.evidence.errors[0].code == "SANDBOX_SETUP"
+    assert not sandbox.staged_path.parent.exists()
+    client.close.assert_called_once()
+
+
 def test_exception_in_body_records_error_and_cleans_up(repo: Path):
     client = fake_client()
     sandbox = Sandbox(repo, client_factory=lambda: client)
@@ -84,3 +108,19 @@ def test_invalid_network_configuration_is_rejected():
         SandboxConfig(cage_ip="10.13.37.53")
     with pytest.raises(ValueError, match="positive"):
         SandboxConfig(max_output_bytes=0)
+
+
+def test_attach_client_exit_code_mismatch_is_recorded(repo: Path, monkeypatch):
+    client = fake_client()
+    cage = client.containers.create.return_value
+    cage.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=1),
+    )
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        result = sandbox.run_command(["true"])
+    assert result.exit_code == 0
+    assert sandbox.evidence.errors[0].code == "ATTACH_FAILED"
+    assert sandbox.evidence.components.sandbox != State.COMPLETE
