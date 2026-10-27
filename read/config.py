@@ -33,9 +33,11 @@ class WalkerConfig:
     max_file_bytes: int = 262_144          # larger text files are scanned as a prefix, marked truncated
     max_files: int = 5_000                 # beyond this the scan is marked truncated (fail-closed upstream)
     binary_sniff_bytes: int = 8_192
+    # .vscode/.idea are NOT skipped: workspace settings/tasks are a documented
+    # agent attack surface (auto-approve flags, folder-open tasks).
     excluded_dirs: frozenset[str] = frozenset({
         ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
-        ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".idea", ".vscode",
+        ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
         "dist", "build", ".next", ".parcel-cache", "target",
     })
     binary_extensions: frozenset[str] = frozenset({
@@ -47,6 +49,7 @@ class WalkerConfig:
         ".db", ".sqlite", ".sqlite3", ".mdb", ".parquet", ".arrow", ".feather",
         ".pkl", ".pickle", ".pt", ".pth", ".ckpt", ".safetensors", ".gguf", ".onnx",
         ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".ttc",
+        ".ai", ".psd", ".sketch",              # design files: binary streams
     })
 
 
