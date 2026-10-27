@@ -200,3 +200,17 @@ def test_build_seed_set_synthetic(tmp_path, monkeypatch):
     for split in ("train", "val", "test"):
         rows = read_parquet(out / f"{split}.parquet")
         assert all(r.split == split for r in rows)
+
+
+def test_suite_fixtures_are_frozen(tmp_path):
+    from read.data.leakage import check_split, frozen_texts
+
+    frozen = frozen_texts()
+    assert frozen.get("suite_attacks"), "suite attack fixtures must be frozen"
+    line = next(t for t in frozen["suite_attacks"] if "hidden step" in t)
+    p = tmp_path / "train.parquet"
+    write_parquet([Row(line, 1, "synthetic", SPLIT_TRAIN)], p)
+    report = check_split(p, {"suite_attacks": frozen["suite_attacks"]})
+    assert report["clean"] is False
+
+
