@@ -1,0 +1,74 @@
+"""External decoder plugin for ``read.scan``.
+
+``read.decoders.load_external_decoders`` loads this exact file
+(``<repo_root>/attacks/decoders.py``) during a scan and calls
+``register(registry)``.  It adds **only the channels the built-ins miss**:
+
+    rot13, zero_width_binary, bidi, markdown_image, js_eval, js_escapes
+
+Base64, hex, HTML comments, invisible-character stripping, Unicode tags and
+variation selectors already have built-in decoders; registering them again
+would produce duplicate views and double scan cost for no new coverage.
+
+The decode logic lives in :mod:`attacks.synth.transforms` so the encoder and
+the decoder can never drift apart: ``decode(encode(seed))`` is tested for
+every transform in ``tests/attacks/test_transforms.py``.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+from pathlib import Path
+from typing import Protocol
+
+
+class _Decoder(Protocol):
+    name: str
+
+    def decode(self, text: str) -> list[str]: ...
+
+
+def _load_transforms():
+    """Import the transform table, even when ``attacks`` is not on sys.path.
+
+    The scan loads this file by path with ``spec_from_file_location``, from a
+    process whose working directory is not necessarily the BaitWatch root.
+    The relative fallback keeps the plugin self-contained without ever
+    importing from the *scanned* repository.
+    """
+    try:
+        from attacks.synth.transforms import DECODER_TRANSFORMS, TRANSFORMS
+
+        return TRANSFORMS, DECODER_TRANSFORMS
+    except ModuleNotFoundError:
+        path = Path(__file__).resolve().parent / "synth" / "transforms.py"
+        spec = importlib.util.spec_from_file_location("_baitwatch_transforms", path)
+        if spec is None or spec.loader is None:  # pragma: no cover - packaging bug
+            raise
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module.TRANSFORMS, module.DECODER_TRANSFORMS
+
+
+class TransformDecoder:
+    """Expose one row of the transform table as a READ decoder."""
+
+    join_segments = True
+
+    def __init__(self, name: str, decode) -> None:
+        self.name = name
+        self._decode = decode
+
+    def decode(self, text: str) -> list[str]:
+        return self._decode(text)
+
+
+def register(registry: list[_Decoder]) -> None:
+    transforms, names = _load_transforms()
+    existing = {getattr(item, "name", None) for item in registry}
+    for name in names:
+        if name in existing:
+            continue
+        registry.append(TransformDecoder(name, transforms[name].decode))

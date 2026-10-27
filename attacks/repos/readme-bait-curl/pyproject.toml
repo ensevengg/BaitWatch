@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crucible-log"
+version = "0.3.1"
+description = "Bounded structured log shipping for gateways."
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+packages = ["crucible_log"]

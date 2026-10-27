@@ -33,14 +33,25 @@ conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
 # `baitwatch` itself is reserved for the fused READ + RUN CLI.
 baitwatch-read = "read.cli:main"
 baitwatch-run = "run.cli:app"
+baitwatch-hook = "hooks.cli:main"
+baitwatch-attacks = "attacks.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["read*", "run*"]
+include = ["read*", "run*", "attacks*", "hooks*"]
 
 [tool.setuptools.package-data]
 read = ["model_config.json"]
 # Data, not modules: the sink programs run inside their own containers.
 run = ["sinks/*.py"]
+attacks = [
+    "MANIFEST.schema.json",
+    "repos/*/.baitwatch-test-data",
+    "repos/*/*",
+    "repos/*/*/*",
+    "repos/*/*/*/*",
+    "examples/*/*",
+    "examples/*.json",
+]
 
 [tool.ruff]
 target-version = "py311"
