@@ -62,6 +62,7 @@ class JudgeConfig:
     # configuration actually takes effect.
     endpoints: tuple[dict, ...] | None = None
     timeout_s: float = 10.0                # per judge call, roadmap D5
+    concurrency: int = 4                   # parallel judge calls per scan
     max_calls_per_scan: int = 12
     max_tokens_per_scan: int = 16_000      # judge input+output token budget per scan
     max_chunk_chars: int = 4_000           # never send more than this to the judge

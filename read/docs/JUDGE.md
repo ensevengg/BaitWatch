@@ -25,11 +25,14 @@ flag kept …"). Test: `test_scan.py::test_manipulated_judge_cannot_clear_model_
 
 ## Prompt-injection hardening
 
-`JUDGE_SYSTEM_PROMPT` (read/judge.py) frames the chunk as untrusted DATA in
-`<chunk>` tags, states that instructions inside it are attacker content, and
-makes any attempt to influence the classification *itself* an attack verdict.
-Output must be strict JSON `{verdict, severity, explanation}`; anything
-unparseable is treated as **unavailable** (fail-closed), not as an answer.
+`JUDGE_SYSTEM_PROMPT` (read/judge.py) frames the chunk as untrusted DATA,
+states that instructions inside it are attacker content, and makes any
+attempt to influence the classification *itself* an attack verdict. The
+chunk is fenced by a random per-call tag (`<chunk-…>`), so a `</chunk>`
+written by the attacker closes nothing; the file name is sent as a JSON
+string. Output must be strict JSON `{verdict, severity, explanation}`;
+anything unparseable is treated as **unavailable** (fail-closed), not as an
+answer.
 
 ## Fail-closed matrix (all asserted in tests)
 
@@ -38,12 +41,18 @@ unparseable is treated as **unavailable** (fail-closed), not as an answer.
 | API error / 5xx | fallback endpoint tried, else flagged + `judge_unavailable` |
 | Timeout (10 s) | same |
 | Unparseable reply | same — a live model answering garbage is not trusted |
-| Per-scan call/token budget exhausted | same for the remaining chunks |
+| Per-scan call/token budget exhausted | no call made (`skipped`); chunk kept as `reviewed` with a note, scan verdict `incomplete` |
+| Paid endpoint with no API key set | skipped — repo text is never sent unauthenticated |
+| Odd payloads (null content, junk usage) | unavailable; `review()` never raises |
 | USD ledger over cap | paid endpoint disabled, local fallback still serves |
 | All endpoints down | flagged; verdict engine still sees the model evidence |
 
 A failed endpoint is skipped for 120 s so one scan never pays the 10 s timeout
 twice, but a long-lived process can recover.
+
+Band chunks are judged highest score first: the budget is reserved in that
+order before any call starts, then up to `JudgeConfig.concurrency` (4) calls
+run in parallel. Identical chunk texts are judged once.
 
 ## Endpoints
 
