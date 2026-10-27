@@ -1,4 +1,5 @@
 import ipaddress
+import math
 import os
 import random
 import shutil
@@ -66,8 +67,10 @@ class SandboxConfig:
             )
         ):
             raise ValueError("memory, cpu, pid, tmpfs, and output limits must be integers")
-        if type(self.timeout_seconds) not in (int, float):
-            raise ValueError("timeout_seconds must be an int or float")
+        if type(self.timeout_seconds) not in (int, float) or not math.isfinite(
+            self.timeout_seconds
+        ):
+            raise ValueError("timeout_seconds must be a finite int or float")
         if not self.image or any(
             value <= 0
             for value in (

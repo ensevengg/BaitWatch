@@ -257,6 +257,14 @@ def test_staging_limits_reject_non_integer_counts():
     assert StagingLimits(timeout_seconds=0.5).timeout_seconds == 0.5
 
 
+def test_non_finite_timeout_seconds_are_rejected():
+    for timeout in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="finite int or float"):
+            SandboxConfig(timeout_seconds=timeout)
+        with pytest.raises(ValueError, match="finite int or float"):
+            StagingLimits(timeout_seconds=timeout)
+
+
 def test_attach_client_exit_code_mismatch_is_recorded(repo: Path, monkeypatch):
     client = fake_client()
     cage = client.containers.create.return_value
