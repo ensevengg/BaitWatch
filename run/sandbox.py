@@ -1,5 +1,6 @@
 import ipaddress
 import os
+import random
 import shutil
 import tempfile
 from collections.abc import Callable, Sequence
@@ -7,14 +8,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import docker
-from docker.errors import DockerException, NotFound
+from docker.errors import APIError, DockerException, NotFound
 from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount
 
 from run.capture import capture_attached
 from run.evidence import CommandResult, RunError, RunEvidence, State
-from run.staging import StagingLimits, stage_repository
+from run.staging import StagingLimits, is_finite, stage_repository
 
 SCAN_LABEL = "org.baitwatch.scan-id"
+DEFAULT_SUBNET = "10.13.37.0/24"
+SUBNET_ATTEMPTS = 16
 
 
 class SandboxError(RuntimeError):
@@ -24,10 +27,13 @@ class SandboxError(RuntimeError):
 @dataclass(frozen=True)
 class SandboxConfig:
     image: str = "alpine:3.20"
-    subnet: str = "10.13.37.0/24"
-    cage_ip: str = "10.13.37.20"
-    dns_ip: str = "10.13.37.53"
-    http_ip: str = "10.13.37.9"
+    # None tries DEFAULT_SUBNET, then other 10.13.X.0/24 pools on overlap.
+    # An explicit subnet never falls back.
+    subnet: str | None = None
+    # Host offsets within the scan's /24; .1 stays unassigned in isolated mode.
+    cage_host: int = 20
+    dns_host: int = 53
+    http_host: int = 9
     memory_bytes: int = 256 * 1024 * 1024
     nano_cpus: int = 500_000_000
     pids_limit: int = 64
@@ -37,15 +43,32 @@ class SandboxConfig:
     staging: StagingLimits = field(default_factory=StagingLimits)
 
     def __post_init__(self) -> None:
-        network = ipaddress.IPv4Network(self.subnet)
-        addresses = [ipaddress.IPv4Address(x) for x in (self.cage_ip, self.dns_ip, self.http_ip)]
-        forbidden = {
-            network.network_address,
-            network.broadcast_address,
-            network.network_address + 1,
-        }
-        if len(set(addresses)) != 3 or any(x not in network or x in forbidden for x in addresses):
-            raise ValueError("cage and sink IPs must be distinct usable addresses in the subnet")
+        hosts = (self.cage_host, self.dns_host, self.http_host)
+        if (
+            any(type(host) is not int or not 2 <= host <= 254 for host in hosts)
+            or len(set(hosts)) != 3
+        ):
+            raise ValueError("cage and sink host offsets must be distinct integers in 2..254")
+        if self.subnet is not None:
+            try:
+                network = ipaddress.IPv4Network(self.subnet)
+            except ValueError as exc:
+                raise ValueError("an explicit subnet must be an IPv4 /24 network") from exc
+            if network.prefixlen != 24:
+                raise ValueError("an explicit subnet must be an IPv4 /24 network")
+        if any(
+            type(value) is not int
+            for value in (
+                self.memory_bytes,
+                self.nano_cpus,
+                self.pids_limit,
+                self.tmpfs_bytes,
+                self.max_output_bytes,
+            )
+        ):
+            raise ValueError("memory, cpu, pid, tmpfs, and output limits must be integers")
+        if type(self.timeout_seconds) not in (int, float) or not is_finite(self.timeout_seconds):
+            raise ValueError("timeout_seconds must be a finite int or float")
         if not self.image or any(
             value <= 0
             for value in (
@@ -85,6 +108,7 @@ class Sandbox:
         )
         self._client = None
         self._network = None
+        self._subnet: ipaddress.IPv4Network | None = None
         self._containers: list = []
         self._temporary: Path | None = None
         self._cage = None
@@ -107,12 +131,74 @@ class Sandbox:
             raise SandboxError("repository has not been staged")
         return self._temporary / "repo"
 
+    def _network_subnet(self) -> ipaddress.IPv4Network:
+        if self._subnet is None:
+            raise SandboxError("subnet addresses exist only after the network is created")
+        return self._subnet
+
+    @property
+    def subnet(self) -> str:
+        return str(self._network_subnet())
+
+    @property
+    def cage_ip(self) -> str:
+        return str(self._network_subnet().network_address + self.config.cage_host)
+
+    @property
+    def dns_ip(self) -> str:
+        return str(self._network_subnet().network_address + self.config.dns_host)
+
+    @property
+    def http_ip(self) -> str:
+        return str(self._network_subnet().network_address + self.config.http_host)
+
     def _error(self, code: str, message: str) -> None:
         # str(exc) can be empty (e.g. TimeoutError()); an empty message would
         # raise ValidationError here and skip the caller's cleanup.
         self.evidence.errors.append(RunError(code=code, message=message[:1000] or code))
         self.evidence.status = "error"
         self.evidence.components.sandbox = State.ERROR
+
+    def _create_network(self) -> ipaddress.IPv4Network:
+        if self.config.subnet is not None:
+            subnets = [self.config.subnet]
+        else:
+            fallbacks = random.SystemRandom().sample(
+                [octet for octet in range(256) if octet != 37], SUBNET_ATTEMPTS - 1
+            )
+            subnets = [DEFAULT_SUBNET, *(f"10.13.{octet}.0/24" for octet in fallbacks)]
+        overlap = ""
+        for subnet in subnets:
+            try:
+                self._network = self._client.networks.create(
+                    self.name,
+                    driver="bridge",
+                    internal=True,
+                    enable_ipv6=False,
+                    ipam=IPAMConfig(pool_configs=[IPAMPool(subnet=subnet)]),
+                    labels=self.labels,
+                    # Without this the host takes the gateway address and every host
+                    # service bound to 0.0.0.0 is reachable from the cage.
+                    options={"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
+                )
+            except APIError as exc:
+                if "overlaps" not in str(exc).lower():
+                    raise
+                overlap = str(exc)
+                continue
+            self._network.reload()
+            if any(pool.get("Gateway") for pool in self._network.attrs["IPAM"]["Config"]):
+                raise SandboxError(
+                    "cage network has a host gateway; needs Docker Engine 28+ isolated mode"
+                )
+            return ipaddress.IPv4Network(subnet)
+        if self.config.subnet is not None:
+            raise SandboxError(
+                f"requested subnet {self.config.subnet} overlaps an existing Docker network"
+            )
+        raise SandboxError(
+            f"all {SUBNET_ATTEMPTS} candidate subnets in 10.13.0.0/16 overlap: {overlap}"
+        )
 
     def __enter__(self) -> "Sandbox":
         if self._closed or self._open:
@@ -131,22 +217,7 @@ class Sandbox:
             self.evidence.staging_exclusions = stage_repository(
                 self.path, self.staged_path, self.config.staging
             )
-            self._network = self._client.networks.create(
-                self.name,
-                driver="bridge",
-                internal=True,
-                enable_ipv6=False,
-                ipam=IPAMConfig(pool_configs=[IPAMPool(subnet=self.config.subnet)]),
-                labels=self.labels,
-                # Without this the host takes the gateway address and every host
-                # service bound to 0.0.0.0 is reachable from the cage.
-                options={"com.docker.network.bridge.gateway_mode_ipv4": "isolated"},
-            )
-            self._network.reload()
-            if any(pool.get("Gateway") for pool in self._network.attrs["IPAM"]["Config"]):
-                raise SandboxError(
-                    "cage network has a host gateway; needs Docker Engine 28+ isolated mode"
-                )
+            self._subnet = self._create_network()
             self._open = True
             return self
         except BaseException as exc:
@@ -172,7 +243,7 @@ class Sandbox:
             labels=self.labels,
             network=self._network.name,
             networking_config={self._network.name: endpoint},
-            dns=[config.dns_ip],
+            dns=[self.dns_ip],
             dns_opt=["timeout:1", "attempts:1"],
             dns_search=["."],
             user="65532:65532",
@@ -200,7 +271,7 @@ class Sandbox:
         """Starting a sink container never marks that sink complete."""
         if role not in {"dns", "http"} or role in self._service_roles:
             raise SandboxError("service role must be a unique dns or http sink")
-        ip = self.config.dns_ip if role == "dns" else self.config.http_ip
+        ip = self.dns_ip if role == "dns" else self.http_ip
         try:
             container = self._create(image, command, role, ip, repo=False)
             container.start()
@@ -222,9 +293,7 @@ class Sandbox:
         self._command_started = True
         result = CommandResult(command=list(command))
         try:
-            self._cage = self._create(
-                self.config.image, command, "cage", self.config.cage_ip, repo=True
-            )
+            self._cage = self._create(self.config.image, command, "cage", self.cage_ip, repo=True)
 
             def stop() -> None:
                 try:
