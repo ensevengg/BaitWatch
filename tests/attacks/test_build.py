@@ -41,6 +41,28 @@ def test_generated_files_use_lf() -> None:
             assert b"\r\n" not in path.read_bytes(), path
 
 
+def test_package_data_covers_every_generated_file() -> None:
+    """Wheel data globs skip dotfiles; every artifact needs an explicit match."""
+    import glob
+    import tomllib
+
+    config = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    patterns = config["tool"]["setuptools"]["package-data"]["attacks"]
+    covered: set[str] = set()
+    for pattern in patterns:
+        for hit in glob.glob(str(ATTACKS / pattern)):
+            cover = Path(hit)
+            if cover.is_file() and "__pycache__" not in cover.parts:
+                covered.add(cover.relative_to(ATTACKS).as_posix())
+
+    missing = sorted(
+        rel
+        for rel in (path.relative_to(ATTACKS).as_posix() for path in build.build_tree())
+        if rel not in covered
+    )
+    assert missing == []
+
+
 def test_manifests_are_json_objects() -> None:
     import json
 

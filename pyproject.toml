@@ -43,9 +43,13 @@ include = ["read*", "run*", "attacks*", "hooks*"]
 read = ["model_config.json"]
 # Data, not modules: the sink programs run inside their own containers.
 run = ["sinks/*.py"]
+# Setuptools globs skip leading dots, so dotfiles and dot-directories need
+# explicit patterns. Without them the wheel loses `.cursorrules`, `.mcp.json`,
+# `.vscode/`, `.claude/`, `.github/`, `.env.example` and the test-data markers.
 attacks = [
     "MANIFEST.schema.json",
-    "repos/*/.baitwatch-test-data",
+    "repos/*/.*",
+    "repos/*/.*/*",
     "repos/*/*",
     "repos/*/*/*",
     "repos/*/*/*/*",
