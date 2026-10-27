@@ -108,7 +108,9 @@ class Sandbox:
         return self._temporary / "repo"
 
     def _error(self, code: str, message: str) -> None:
-        self.evidence.errors.append(RunError(code=code, message=message[:1000]))
+        # str(exc) can be empty (e.g. TimeoutError()); an empty message would
+        # raise ValidationError here and skip the caller's cleanup.
+        self.evidence.errors.append(RunError(code=code, message=message[:1000] or code))
         self.evidence.status = "error"
         self.evidence.components.sandbox = State.ERROR
 
@@ -147,9 +149,13 @@ class Sandbox:
                 )
             self._open = True
             return self
-        except Exception as exc:
+        except BaseException as exc:
+            # __exit__ never runs when __enter__ raises, so cleanup happens here
+            # even for interrupts; those must propagate unchanged.
             self._error("SANDBOX_SETUP", str(exc))
             self.close()
+            if not isinstance(exc, Exception):
+                raise
             raise SandboxError(str(exc)) from exc
 
     def _create(self, image: str, command: Sequence[str], role: str, ip: str, *, repo: bool):
@@ -242,6 +248,18 @@ class Sandbox:
             if state["Status"] not in {"exited", "dead"}:
                 self._error("CONTAINER_STATE", "command did not reach a terminal container state")
             else:
+                # Timeouts and truncation already kill the attach client, so only
+                # a mismatch on a clean run means its stream failed.
+                if (
+                    not result.timed_out
+                    and not result.output_truncated
+                    and result.exit_code != state["ExitCode"]
+                ):
+                    self._error(
+                        "ATTACH_FAILED",
+                        f"attach client exited {result.exit_code}, "
+                        f"container exited {state['ExitCode']}",
+                    )
                 result.exit_code = state["ExitCode"]
                 if state.get("OOMKilled"):
                     self._error("CONTAINER_OOM", "container exhausted its memory limit")
