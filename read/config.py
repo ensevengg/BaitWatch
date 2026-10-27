@@ -130,7 +130,9 @@ class ReadConfig:
         cfg.max_chunks_per_file = 8
         cfg.max_file_tokens = 8_000
         cfg.batch_size = 128
-        return cfg
+        # The pinned checkpoint's thresholds, not the class defaults: the
+        # hook must judge with the same cutoffs as a full scan.
+        return config_from_model_config(cfg)
 
 
 def model_config_path() -> Path:
@@ -163,6 +165,12 @@ def resolve_model_path(explicit: Path | str | None = None) -> Path:
         p = Path(pinned["checkpoint_path"])
         if p.exists():
             return p
+        # Never fall back silently: the pinned thresholds belong to the pinned
+        # checkpoint, and the base model under them is a different detector.
+        raise FileNotFoundError(
+            f"pinned checkpoint missing: {p} (read/model_config.json, tag "
+            f"{pinned.get('tag')!r}). Restore it, re-pin with read.training.pin, "
+            "or set BAITWATCH_MODEL_PATH explicitly.")
     for p in DEFAULT_MODEL_DIRS:
         if p.exists():
             return p
