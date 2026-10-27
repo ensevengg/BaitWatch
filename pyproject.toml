@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "baitwatch"
+version = "0.1.0"
+description = "Catches prompt-injection attacks aimed at AI coding agents before they run in a repo."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["numpy", "torch", "transformers>=5.0"]
+
+[project.optional-dependencies]
+train = ["pyarrow", "scikit-learn"]
+test = ["pytest"]
+
+[project.scripts]
+# `baitwatch` itself is reserved for the fused READ + RUN CLI.
+baitwatch-read = "read.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["read*"]
+
+[tool.setuptools.package-data]
+read = ["model_config.json"]

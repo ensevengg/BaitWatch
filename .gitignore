@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+/build/
+/dist/
+
+# InjecAgent (frozen eval set) is cloned on demand, never vendored:
+#   git clone https://github.com/uiuc-kang-lab/InjecAgent injectionagent/InjecAgent
+injectionagent/
