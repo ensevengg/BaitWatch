@@ -24,4 +24,4 @@ The proposed `VerdictReport` has three verdicts, `ALLOW`, `FLAG` and `BLOCK`, an
 
 The READ finding fields are left out on purpose. Manan owns that part of the contract. The team should agree on the finding format and on what counts as complete before any component depends on this proposal.
 
-Regenerate `docs/verdict.schema.json` with `uv run python -m run.schemas`. A test fails if the committed schema differs from the generator's output.
+Regenerate `docs/verdict.schema.json` with `uv run --no-sync python -m run.schemas`. A test fails if the committed schema differs from the generator's output.

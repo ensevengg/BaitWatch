@@ -22,6 +22,12 @@ dependencies = [
 train = ["pyarrow", "scikit-learn"]
 test = ["pytest"]
 dev = ["pytest>=8.3,<10", "pytest-timeout>=2.3,<3", "jsonschema>=4.23,<5", "ruff>=0.11,<1"]
+# uv only: `--extra cpu` selects the CPU torch build; otherwise torch comes from PyPI as with pip.
+cpu = ["torch"]
+cuda = ["torch"]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
 
 [project.scripts]
 # `baitwatch` itself is reserved for the fused READ + RUN CLI.
@@ -41,11 +47,19 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
-# uv only (pip ignores this): CPU torch keeps the RUN gate and CI free of the CUDA stack.
+# An extra-scoped source needs a conflicting pair, hence the cuda extra pointing at PyPI.
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pypi", extra = "cuda" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
 explicit = true

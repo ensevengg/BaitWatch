@@ -44,12 +44,14 @@ Detector checkpoint, thresholds and the full API: [`read/README.md`](read/README
 Needs Linux, Docker Engine 28 or later, and uv.
 
 ```bash
-uv sync --frozen --extra dev
+uv sync --frozen --extra dev --extra cpu
 docker pull alpine:3.20
 docker pull python:3.12-alpine
 bash run/check.sh                    # lint, format and RUN tests, including Docker isolation
 baitwatch-run sandbox <repo> -- echo hello
 ```
+
+Plain `uv sync` or pip installs the default torch, which is CUDA-capable on Linux; `--extra cpu` keeps the CPU build for CI and machines without a GPU.
 
 Sandbox boundary, evidence contract and known limits: [`run/README.md`](run/README.md).
 

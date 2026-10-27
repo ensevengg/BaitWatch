@@ -9,25 +9,27 @@ This branch builds the first RUN milestone. It copies the repository with limits
 Install Python 3.12 or later, uv, Docker Engine 28 or later and the Docker CLI. Your user needs access to a local Linux Docker daemon. Then run:
 
 ```bash
-uv sync --frozen --extra dev
+uv sync --frozen --extra dev --extra cpu
 docker pull alpine:3.20
 docker pull python:3.12-alpine
-uv run ruff check run tests/run
-uv run ruff format --check run tests/run
-uv run pytest -m "not gpu" tests/run
+uv run --no-sync ruff check run tests/run
+uv run --no-sync ruff format --check run tests/run
+uv run --no-sync pytest -m "not gpu" tests/run
 ```
+
+Plain `uv sync` or pip installs the default torch, which is CUDA-capable on Linux; `--extra cpu` keeps the CPU build for CI and machines without a GPU.
 
 `bash run/check.sh` runs the same steps. `bash run/check.sh unit` runs only the unit tests.
 
-On a machine without Docker, run the unit tests with `uv run pytest -m "not docker and not gpu" tests/run`. The full gate needs Docker. If the daemon or an image is missing, the Docker tests fail instead of skipping.
+On a machine without Docker, run the unit tests with `uv run --no-sync pytest -m "not docker and not gpu" tests/run`. The full gate needs Docker. If the daemon or an image is missing, the Docker tests fail instead of skipping.
 
 Every scan uses the fixed subnet `10.13.37.0/24`, so scans and tests on one daemon must run one at a time. If the subnet is already taken, the scan records an error. It never deletes another scan's network to free the subnet.
 
 ## Diagnostic command
 
 ```bash
-uv run baitwatch-run sandbox /path/to/repo -- echo hello
-uv run baitwatch-run sandbox --image python:3.12-alpine /path/to/repo -- python -c 'print("hello")'
+uv run --no-sync baitwatch-run sandbox /path/to/repo -- echo hello
+uv run --no-sync baitwatch-run sandbox --image python:3.12-alpine /path/to/repo -- python -c 'print("hello")'
 ```
 
 Only the arguments after `--` run, and they run inside the container. The host shell does not expand them. To use shell syntax, pass a shell command explicitly, for example `sh -c 'echo hello'`.
