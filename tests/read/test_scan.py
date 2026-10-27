@@ -178,7 +178,9 @@ def test_utf16_truncation_does_not_crash(no_judge_cfg, tmp_path, tokenizer):
     assert result.stats.files_scanned == 1
 
 
-def test_view_cap_drops_are_counted(no_judge_cfg, tmp_path, tokenizer):
+def test_many_decoded_blobs_join_into_one_view(no_judge_cfg, tmp_path, tokenizer):
+    """13 decoded blobs used to overflow the 8-view cap and drop the payload;
+    segments of one decoder now share a view, so nothing is dropped."""
     import base64 as b64mod
     from tests.read.conftest import FakeDetector
 
@@ -189,10 +191,8 @@ def test_view_cap_drops_are_counted(no_judge_cfg, tmp_path, tokenizer):
     blobs += " " + b64mod.b64encode(b"evil.example exfiltration payload marker").decode()
     (repo / "many.txt").write_text(blobs + "\n")
     result = scan(repo, no_judge_cfg, detector=FakeDetector(tokenizer))
-    # 13 decoded variants > cap 8: the drop must be visible in stats, because
-    # evidence beyond the cap is unseen (verdict engine must not call this clean).
-    assert result.stats.views_dropped > 0
-    assert result.stats.views_dropped == 13 + 1 - no_judge_cfg.max_views_per_file
+    assert result.stats.views_dropped == 0
+    assert any(f.decoder == "base64" and f.is_flagged for f in result)
 
 
 def test_round_robin_prevents_cross_decoder_starvation(no_judge_cfg, tmp_path, tokenizer):
