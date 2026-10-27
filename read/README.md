@@ -16,6 +16,7 @@ Contract: `read.scan(path) → [Finding{file, chunk_id, score, layer, evidence}]
 
 ```bash
 python -m read scan <repo>            # human output (also: baitwatch-read scan <repo>)
+python -m read scan <repo> -v         # + every finding and the uncertain band
 python -m read scan <repo> --json     # verdict-engine input
 python -m read.scan <repo>            # same, module form
 python -m read selftest               # detector sanity scores

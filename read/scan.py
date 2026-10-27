@@ -496,7 +496,7 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
                     findings.append(system_finding(
                         chunk.file,
                         f"judge unavailable, fail-closed: {result.error}",
-                        chunk_id=chunk.chunk_id,
+                        chunk_id=chunk.chunk_id, evidence=evidence, decoder=decoder,
                     ))
 
         # Flagged chunks still owed an explanation get judged last, by score.
@@ -530,7 +530,9 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
         for chunk in chunks:
             findings.append(system_finding(
                 chunk.file, "detector inference failed, fail-closed",
-                chunk_id=chunk.chunk_id))
+                chunk_id=chunk.chunk_id,
+                evidence={"text": _snippet(chunk.text), "line": chunk.start_line},
+                decoder=chunk.view if chunk.view != "original" else None))
 
     if walk_result is not None and cfg.on_file_error == "flag":
         # lstat-level failures never reached the read loop; flag them too.

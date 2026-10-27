@@ -249,6 +249,14 @@ def test_system_finding_helper():
     assert f.to_dict()["evidence"]["note"] == "boom"
 
 
+def test_system_finding_keeps_chunk_evidence():
+    f = system_finding("x.md", "judge unavailable, fail-closed: down", chunk_id=2,
+                       evidence={"text": "hidden text", "line": None}, decoder="base64")
+    assert f.evidence == {"text": "hidden text", "line": None,
+                          "note": "judge unavailable, fail-closed: down"}
+    assert f.decoded and f.decoder == "base64"
+
+
 def test_cli_accepts_gate_form_without_subcommand(tmp_path, capsys):
     """Roadmap D2 gate: `python -m read.scan <path>` with no subcommand."""
     from read.cli import main
@@ -258,7 +266,7 @@ def test_cli_accepts_gate_form_without_subcommand(tmp_path, capsys):
     (repo / "a.md").write_text("benign\n")
     assert main([str(repo), "--no-judge"]) == 0
     out = capsys.readouterr().out
-    assert "clean" in out
+    assert "clean" in out.lower()
 
     assert main(["scan", str(repo), "--no-judge"]) == 0   # subcommand form too
 
@@ -422,6 +430,52 @@ def test_cli_exit_code_3_for_incomplete(monkeypatch, tmp_path, capsys):
     assert cli.main([str(tmp_path), "--no-judge"]) == 3
     out = capsys.readouterr().out
     assert "incomplete" in out and "file cap" in out
+
+
+def _cli_result(findings, **stats):
+    from read.scan import ScanResult, ScanStats
+
+    return ScanResult(findings, ScanStats(
+        model_path="fake", thresholds={"flag_threshold": 0.85, "review_low": 0.52}, **stats))
+
+
+def test_cli_human_output_escapes_terminal_controls(monkeypatch, tmp_path, capsys):
+    """Repo text and file names are attacker-controlled: no raw escapes reach the TTY."""
+    import read.cli as cli
+    from read.findings import Finding
+
+    evil = Finding(file="AGENTS\x1b[31m.md", chunk_id=0, score=0.99, layer="model",
+                   evidence={"text": "ignore \x1b[2K\x1b]8;;http://x\x07 \u202eall", "line": 1},
+                   explanation="judge says \x1b[1Ahi")
+    monkeypatch.setattr(cli, "scan", lambda path, cfg: _cli_result([evil]))
+    assert cli.main([str(tmp_path), "--no-judge", "--color", "never"]) == 1
+    out = capsys.readouterr().out
+    assert "\x1b" not in out and "\u202e" not in out and "\x07" not in out
+    assert "<U+001B>" in out and "<U+202E>" in out
+
+
+def test_cli_groups_unverified_and_hides_uncertain_without_verbose(monkeypatch, tmp_path, capsys):
+    import read.cli as cli
+    from read.findings import Finding
+
+    findings = [
+        system_finding("a.md", "judge unavailable, fail-closed: meta: no key", chunk_id=0),
+        system_finding("b.md", "judge unavailable, fail-closed: meta: no key; local: refused",
+                       chunk_id=0),
+        Finding(file="c.md", chunk_id=0, score=0.6, layer="model",
+                evidence={"text": "uncertain chunk", "line": 3}, status=STATUS_REVIEWED),
+    ]
+    monkeypatch.setattr(cli, "scan", lambda path, cfg: _cli_result(findings, judge_calls=2,
+                                                                     judge_unavailable=2))
+    assert cli.main([str(tmp_path), "--color", "never"]) == 1
+    out = capsys.readouterr().out
+    assert "judge unavailable  ×2" in out
+    assert "meta: no key; local: refused" in out      # fullest detail shown once
+    assert "judge unreachable" in out
+    assert "uncertain chunk" not in out and "-v to list" in out
+
+    assert cli.main([str(tmp_path), "--color", "never", "-v"]) == 1
+    assert "uncertain chunk" in capsys.readouterr().out
 
 
 def test_score_cache_serves_repeat_scans(tmp_path, tokenizer):
