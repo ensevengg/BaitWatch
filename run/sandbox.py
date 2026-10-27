@@ -276,26 +276,77 @@ class Sandbox:
         self.evidence.tool_log.append(result)
         return result
 
+    def _remove_container(self, container, handled: set) -> bool:
+        handled.add(container.id)
+        try:
+            container.remove(force=True, v=True)
+        except NotFound:
+            pass
+        except Exception as exc:
+            self._error("CONTAINER_CLEANUP", str(exc))
+            return False
+        return True
+
+    def _sweep_labelled_containers(self, handled: set) -> bool:
+        if self._client is None:
+            return True
+        try:
+            strays = self._client.containers.list(
+                all=True, filters={"label": f"{SCAN_LABEL}={self.evidence.scan_id}"}
+            )
+        except Exception as exc:
+            self._error("CONTAINER_CLEANUP", str(exc))
+            return False
+        all_removed = True
+        for container in strays:
+            if container.id in handled:
+                continue
+            if not self._remove_container(container, handled):
+                all_removed = False
+        return all_removed
+
+    def _sweep_labelled_networks(self, handled: set) -> None:
+        if self._client is None:
+            return
+        try:
+            strays = self._client.networks.list(
+                filters={"label": f"{SCAN_LABEL}={self.evidence.scan_id}"}
+            )
+        except Exception as exc:
+            self._error("NETWORK_CLEANUP", str(exc))
+            return
+        for network in strays:
+            if network.id in handled:
+                continue
+            try:
+                network.remove()
+            except NotFound:
+                pass
+            except Exception as exc:
+                self._error("NETWORK_CLEANUP", str(exc))
+
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         all_removed = True
+        handled: set = set()
         for container in reversed(self._containers):
-            try:
-                container.remove(force=True, v=True)
-            except NotFound:
-                pass
-            except Exception as exc:
+            if not self._remove_container(container, handled):
                 all_removed = False
-                self._error("CONTAINER_CLEANUP", str(exc))
+        # A create call can lose its reply while the daemon still makes the
+        # resource, so sweep for anything left carrying this scan's label.
+        if not self._sweep_labelled_containers(handled):
+            all_removed = False
         if self._network is not None:
+            handled.add(self._network.id)
             try:
                 self._network.remove()
             except NotFound:
                 pass
             except Exception as exc:
                 self._error("NETWORK_CLEANUP", str(exc))
+        self._sweep_labelled_networks(handled)
         if self._temporary is not None and all_removed:
             try:
                 shutil.rmtree(self._temporary)
