@@ -155,6 +155,7 @@ def build_all(root: Path) -> dict[str, Path]:
 def run_stress(quick: bool = False) -> dict:
     cfg = config_from_model_config(ReadConfig.quick() if quick else ReadConfig())
     cfg.judge.enabled = False
+    cfg.score_cache = False   # measure real inference latency, never cached scores
     results = []
     with tempfile.TemporaryDirectory(prefix="bw-stress-") as td:
         repos = build_all(Path(td))

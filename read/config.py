@@ -117,6 +117,11 @@ class ReadConfig:
     # Oversized files are covered head + tail; with strict_coverage the
     # unscanned middle also makes the READ verdict "incomplete".
     strict_coverage: bool = False
+    # Persistent chunk-score cache (read/cache.py); only used when scan()
+    # loads the detector itself. None path = BAITWATCH_SCORE_CACHE or
+    # ~/.cache/baitwatch/scores.sqlite.
+    score_cache: bool = True
+    score_cache_path: Path | None = None
     on_file_error: str = "flag"            # "flag" (fail-closed) or "skip"
     enable_decoders: bool = True
     judge: JudgeConfig = field(default_factory=JudgeConfig)

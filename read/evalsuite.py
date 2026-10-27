@@ -48,6 +48,7 @@ def run_suite(quick: bool = False, suite_dir: Path | None = None) -> dict:
     suite_dir = suite_dir or SUITE_DIR
     cfg = config_from_model_config(ReadConfig.quick() if quick else ReadConfig())
     cfg.judge.enabled = False
+    cfg.score_cache = False   # measure real inference latency, never cached scores
 
     cases = []
     for expected in ("attacks", "benign"):

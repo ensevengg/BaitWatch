@@ -30,6 +30,7 @@ from typing import Iterator
 
 import numpy as np
 
+from read.cache import DEFAULT_CACHE_PATH, ScoreCache, model_identity
 from read.chunking import Chunk, Chunker
 from read.config import ReadConfig, config_from_model_config, resolve_model_path
 from read.decoders import (builtin_decoders, load_external_decoders,
@@ -60,6 +61,7 @@ class ScanStats:
     partial_files: int = 0          # files with any unscanned span (byte or chunk caps)
     chunks_scored: int = 0
     chunks_unique: int = 0          # distinct chunk texts
+    chunks_cached: int = 0          # distinct chunk texts served by the score cache
     chunks_dropped: int = 0         # windows skipped by per-file caps (approx.)
     views_decoded: int = 0
     views_dropped: int = 0          # decoded views/segments cut by caps
@@ -213,6 +215,17 @@ def _load_detector(cfg: ReadConfig, cache: dict) -> Detector:
     return cache[resolved]
 
 
+def _score_cache(cfg: ReadConfig, det, cache: dict) -> ScoreCache | None:
+    path = Path(cfg.score_cache_path or DEFAULT_CACHE_PATH)
+    ident = model_identity(str(det.model_path), str(getattr(det, "device", "?")),
+                           str(getattr(det, "dtype", "?")))
+    key = ("score_cache", str(path), ident)
+    if key not in cache:
+        cache[key] = ScoreCache(path, ident)
+    sc = cache[key]
+    return sc if sc.enabled else None
+
+
 def _judge_all(judge, items: list[tuple[str, str, float]], budget: ScanBudget | None,
                concurrency: int, stats: ScanStats) -> list[JudgeResult]:
     """Judge (text, file, score) items in the given priority order.
@@ -301,6 +314,9 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
             decoder_errors.append(("external", f"decoder plugin failed to load: {exc}"))
 
     det = detector if detector is not None else _load_detector(cfg, _GLOBAL_CACHE)
+    # Injected detectors (tests, harnesses) never touch the persistent cache.
+    score_cache = (_score_cache(cfg, det, _GLOBAL_CACHE)
+                   if detector is None and cfg.score_cache else None)
     chunker = Chunker(
         det.tokenizer,
         window_tokens=cfg.window_tokens,
@@ -392,14 +408,23 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
                 index[c.text] = len(unique)
                 unique.append(c.text)
         stats.chunks_unique = len(unique)
+        cached = score_cache.get_many(unique) if score_cache is not None else {}
+        stats.chunks_cached = len(cached)
+        todo = [t for t in unique if t not in cached]
         try:
-            u_scores = np.asarray(det.scores(unique), dtype=np.float32)
-            if len(u_scores) != len(unique):
+            fresh = np.asarray(det.scores(todo), dtype=np.float32) if todo else \
+                np.empty(0, dtype=np.float32)
+            if len(fresh) != len(todo):
                 raise RuntimeError(
-                    f"detector returned {len(u_scores)} scores for {len(unique)} chunks")
-            if not np.isfinite(u_scores).all():
+                    f"detector returned {len(fresh)} scores for {len(todo)} chunks")
+            if not np.isfinite(fresh).all():
                 stats.detector_error = "non-finite score(s) from detector"
             else:
+                new = dict(zip(todo, (float(x) for x in fresh)))
+                if score_cache is not None:
+                    score_cache.put_many(new)
+                new.update(cached)
+                u_scores = np.asarray([new[t] for t in unique], dtype=np.float32)
                 scores = u_scores[[index[c.text] for c in chunks]]
         except Exception as exc:   # noqa: BLE001 - fail closed on any inference error
             stats.detector_error = str(exc)
