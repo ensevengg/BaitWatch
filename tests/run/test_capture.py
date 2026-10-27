@@ -42,3 +42,16 @@ def test_deadline_signals_stop():
     assert result.timed_out
     assert stopped == [True]
     assert result.duration_seconds < 3
+
+
+def test_overflow_after_deadline_still_marks_truncation():
+    result = capture_attached(
+        [sys.executable, "-c", "import time; time.sleep(0.4); print('x' * 100000)"],
+        ["container command"],
+        timeout_seconds=0.05,
+        max_output_bytes=1000,
+        stop_container=lambda: None,
+    )
+    assert result.timed_out
+    assert result.output_truncated
+    assert len(result.stdout.encode()) + len(result.stderr.encode()) <= 1000
