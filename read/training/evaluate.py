@@ -4,8 +4,9 @@
   the realistic variant — the instruction embedded in the tool response —
   across all four case files (dh/ds x base/enhanced), with per-Attack-Type
   breakdown on the base sets.
-- Benign corpus (local clones, see read.data.benign_corpus): file-level FPR
-  through the *shipped* pipeline (decoders on, judge off).
+- Benign corpus (local clones, see read.data.benign_corpus): file- and
+  repo-level FPR through the *shipped* pipeline — ``read.scan`` itself
+  (decoders, blob masking, caps; judge off), one scan per corpus repo.
 - Test split: per-source precision/recall/F1 at the pinned threshold.
 
     python -m read.training.evaluate <checkpoint> --out read/results/v1_metrics.json
@@ -22,11 +23,9 @@ from pathlib import Path
 import numpy as np
 
 from read.chunking import Chunker
-from read.config import ReadConfig
+from read.config import ReadConfig, config_from_model_config
 from read.data.schema import SPLIT_TEST, read_parquet
-from read.decoders import builtin_decoders, produce_views
 from read.detector import Detector
-from read.walk import walk
 
 INJECAGENT_DIR = Path(__file__).resolve().parents[2] / "injectionagent" / "InjecAgent" / "data"
 CASE_FILES = {
@@ -88,39 +87,58 @@ def injecagent_recall(det: Detector, threshold: float) -> dict:
     return out
 
 
-def benign_fpr(det: Detector, chunker: Chunker, corpus_dir: Path,
-               threshold: float, max_file_bytes: int = 262_144) -> dict:
-    files = walk(corpus_dir).files
-    chunk_texts: list[str] = []
-    chunk_owner: list[str] = []
-    for f in files:
-        raw = f.path.read_bytes()[:max_file_bytes]
-        try:
-            text = raw.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            continue
-        views = produce_views(text, builtin_decoders())
-        for v in views:
-            chunks, _ = chunker.chunk(v.text, f.rel_path, view=v.decoder or "original")
-            for c in chunks:
-                chunk_texts.append(c.text)
-                chunk_owner.append(f.rel_path)
+def benign_fpr(det: Detector, chunker: Chunker | None, corpus_dir: Path,
+               threshold: float, review_low: float | None = None) -> dict:
+    """FPR through ``read.scan`` (judge off), one scan per corpus repo.
 
-    if not chunk_texts:
+    ``corpus_dir`` holding repo directories is scanned repo by repo (the
+    hook's unit of decision); a directory with files at its top level is
+    scanned as a single repo. ``chunker`` is unused (kept for callers).
+    """
+    from read.scan import scan
+
+    corpus_dir = Path(corpus_dir)
+    cfg = config_from_model_config(ReadConfig())
+    cfg.judge.enabled = False
+    cfg.walker.max_files = 1_000_000
+    cfg.flag_threshold = threshold
+    if review_low is not None:
+        cfg.review_low = review_low
+    has_top_files = any(p.is_file() for p in corpus_dir.iterdir())
+    repos = [corpus_dir] if has_top_files else sorted(
+        p for p in corpus_dir.iterdir() if p.is_dir() and not p.name.startswith("."))
+
+    files = chunks = flagged_chunks = band_chunks = 0
+    flagged_files: list[str] = []
+    per_repo: dict[str, dict] = {}
+    for repo in repos:
+        result = scan(repo, cfg, detector=det)
+        prefix = "" if repo == corpus_dir else f"{repo.name}/"
+        repo_flagged = sorted({prefix + f.file for f in result.flagged})
+        flagged_files.extend(repo_flagged)
+        files += result.stats.files_scanned
+        chunks += result.stats.chunks_scored
+        flagged_chunks += len(result.flagged)
+        band_chunks += result.stats.reviewed
+        per_repo[repo.name] = {
+            "files": result.stats.files_scanned,
+            "flagged_files": len(repo_flagged),
+            "review_band_chunks": result.stats.reviewed,
+            "elapsed_s": result.stats.elapsed_s,
+        }
+    if not files:
         return {"files": 0, "error": "no scannable files"}
-    scores = det.scores(chunk_texts)
-    per_file = defaultdict(float)
-    for owner, s in zip(chunk_owner, scores):
-        per_file[owner] = max(per_file[owner], float(s))
-    flagged_files = [name for name, s in per_file.items() if s >= threshold]
-    flagged_chunks = int((scores >= threshold).sum())
     return {
-        "files": len(files),
-        "chunks": len(chunk_texts),
+        "files": files,
+        "chunks": chunks,
         "flagged_files": len(flagged_files),
-        "file_fpr": round(len(flagged_files) / max(1, len(files)), 4),
-        "chunk_fpr": round(flagged_chunks / len(chunk_texts), 4),
-        "flagged_file_list": flagged_files[:20],
+        "file_fpr": round(len(flagged_files) / files, 4),
+        "chunk_fpr": round(flagged_chunks / max(1, chunks), 4),
+        "repos": len(repos),
+        "repos_flagged": sum(1 for r in per_repo.values() if r["flagged_files"]),
+        "review_band_chunks": band_chunks,
+        "per_repo": per_repo,
+        "flagged_file_list": flagged_files[:40],
     }
 
 
@@ -133,14 +151,24 @@ def test_split_metrics(det: Detector, data_dir: Path, threshold: float) -> dict:
     preds = (scores >= threshold).astype(int)
 
     def prf(pred, truth):
+        """P/R/F1 when the slice has attacks; FPR when it has benign rows.
+
+        A benign-only source (e.g. opencodeinstruct) has no recall to speak
+        of — reporting P=R=0 there read as a failure; its FPR is the number.
+        """
         tp = int(((pred == 1) & (truth == 1)).sum())
         fp = int(((pred == 1) & (truth == 0)).sum())
         fn = int(((pred == 0) & (truth == 1)).sum())
-        p = tp / max(1, tp + fp)
-        r = tp / max(1, tp + fn)
-        f1 = 2 * p * r / max(1e-9, p + r)
-        return {"precision": round(p, 4), "recall": round(r, 4), "f1": round(f1, 4),
-                "support": int(len(truth))}
+        n_pos, n_neg = int((truth == 1).sum()), int((truth == 0).sum())
+        out = {"support": int(len(truth)), "attacks": n_pos, "benign": n_neg}
+        if n_pos:
+            p = tp / max(1, tp + fp)
+            r = tp / n_pos
+            out.update(precision=round(p, 4), recall=round(r, 4),
+                       f1=round(2 * p * r / max(1e-9, p + r), 4))
+        if n_neg:
+            out["fpr"] = round(fp / n_neg, 4)
+        return out
 
     by_source = defaultdict(lambda: ([], []))
     for r, p, l in zip(rows, preds, labels):
@@ -173,7 +201,8 @@ def evaluate(checkpoint: Path, data_dir: Path, corpus_dir: Path | None,
         "test_split": test_split_metrics(det, Path(data_dir), flag),
     }
     if corpus_dir is not None and Path(corpus_dir).exists():
-        result["benign_corpus"] = benign_fpr(det, chunker, Path(corpus_dir), flag)
+        result["benign_corpus"] = benign_fpr(det, chunker, Path(corpus_dir), flag,
+                                             review_low=th.get("review_low"))
     result["elapsed_s"] = round(time.time() - started, 1)
     return result
 

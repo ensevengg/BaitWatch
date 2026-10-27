@@ -214,3 +214,19 @@ def test_suite_fixtures_are_frozen(tmp_path):
     assert report["clean"] is False
 
 
+def test_benign_only_source_reports_fpr_not_recall(tmp_path):
+    import numpy as np
+
+    from read.training.evaluate import test_split_metrics
+
+    class Stub:
+        def scores(self, texts):
+            return np.asarray([0.9 if "attack" in t else 0.1 for t in texts])
+
+    rows = [Row("plain code here", 0, "opencodeinstruct", SPLIT_TEST),
+            Row("an attack row", 0, "opencodeinstruct", SPLIT_TEST),
+            Row("an attack row two", 1, "prodnull", SPLIT_TEST)]
+    write_parquet(rows, tmp_path / "test.parquet")
+    out = test_split_metrics(Stub(), tmp_path, 0.5)["by_source"]
+    assert out["opencodeinstruct"]["fpr"] == 0.5 and "recall" not in out["opencodeinstruct"]
+    assert out["prodnull"]["recall"] == 1.0
