@@ -110,7 +110,13 @@ class ReadConfig:
     overlap_tokens: int = 64
     max_file_tokens: int = 24_000
     max_chunks_per_file: int = 64         # 64*384 covers the 24k-token cap
-    max_views_per_file: int = 8           # original + decoded variants, capped
+    max_views_per_file: int = 8           # original + one view per decoder, capped
+    tail_bytes: int = 16_384              # oversized files: the last bytes are scanned too
+    tail_windows: int = 2                 # chunk-capped files: last windows always scored
+    mask_blobs: bool = True               # base64/hex blobs -> placeholder before scoring
+    # Oversized files are covered head + tail; with strict_coverage the
+    # unscanned middle also makes the READ verdict "incomplete".
+    strict_coverage: bool = False
     on_file_error: str = "flag"            # "flag" (fail-closed) or "skip"
     enable_decoders: bool = True
     judge: JudgeConfig = field(default_factory=JudgeConfig)

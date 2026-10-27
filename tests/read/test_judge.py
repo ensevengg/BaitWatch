@@ -283,3 +283,14 @@ def test_budget_reservations_are_thread_safe():
     assert granted.count(True) == 5
 
 
+def test_parallel_judging_spends_budget_on_top_priority(mock_api, tmp_path):
+    from read.scan import ScanStats, _judge_all
+
+    judge = make_judge(mock_api, tmp_path, behaviour="echo-benign")
+    items = [(f"chunk text number {i}", "f", 0.9 - i * 0.05) for i in range(6)]
+    results = _judge_all(judge, items, ScanBudget(max_calls=2, max_tokens=1_000_000),
+                         concurrency=4, stats=ScanStats(model_path="x"))
+    assert [r.verdict for r in results] == ["benign", "benign"] + ["skipped"] * 4
+    sent = " ".join(r["messages"][1]["content"] for r in MockAPI.requests)
+    assert len(MockAPI.requests) == 2
+    assert "number 0" in sent and "number 1" in sent

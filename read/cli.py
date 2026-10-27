@@ -5,9 +5,10 @@
     python -m read selftest                   (model sanity, roadmap D0 numbers)
     python -m read judge "<text>"             (one judge round-trip, D5 tool)
 
-Exit codes: 0 = no flagged findings, 1 = flagged findings, 2 = scan error.
-This is the READ layer only; ``baitwatch scan`` (Ashutosh) wraps it with the
-RUN layer and the fused verdict.
+Exit codes: 0 = clean, 1 = flagged findings, 2 = scan error,
+3 = incomplete evidence (nothing flagged, but part of the repo or the judge
+budget was not covered — never treat as clean). This is the READ layer only;
+``baitwatch scan`` (Ashutosh) wraps it with the RUN layer and the fused verdict.
 """
 
 from __future__ import annotations
@@ -33,10 +34,10 @@ def _print_human(result, verbose: bool) -> None:
     s = result.stats
     print(f"READ scan · model {Path(s.model_path).name} · {s.elapsed_s:.2f}s · "
           f"{s.files_scanned} files, {s.chunks_scored} chunks")
-    if s.truncated_scan:
-        print("  ! scan truncated: file cap hit, not everything was inspected")
-    if s.chunks_dropped:
-        print(f"  ! {s.chunks_dropped} chunks dropped by per-file caps")
+    for reason in s.incomplete_reasons:
+        print(f"  ! incomplete: {reason}")
+    if s.partial_files and not any(r.startswith("partial") for r in s.incomplete_reasons):
+        print(f"  · {s.partial_files} oversized file(s) scanned head + tail only")
     if s.detector_error:
         print(f"  ! detector failure (fail-closed): {s.detector_error}")
     for err in s.decoder_errors:
@@ -52,6 +53,8 @@ def _print_human(result, verbose: bool) -> None:
     flagged = len(result.flagged)
     if flagged:
         print(f"→ {flagged} flagged finding(s); READ layer says: attack")
+    elif result.read_verdict == "incomplete":
+        print("→ no flagged findings, but evidence is incomplete; READ layer says: incomplete")
     else:
         print("→ no flagged findings; READ layer says: clean")
 
@@ -121,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result.to_dict(), indent=2))
     else:
         _print_human(result, verbose=False)
-    return 1 if result.flagged else 0
+    return {"attack": 1, "incomplete": 3}.get(result.read_verdict, 0)
 
 
 if __name__ == "__main__":
