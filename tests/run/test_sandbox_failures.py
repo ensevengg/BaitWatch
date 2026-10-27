@@ -179,7 +179,9 @@ def test_container_the_daemon_kept_is_swept_before_the_network(repo: Path):
     with sandbox:
         sandbox.run_command(["true"])
     client.containers.list.assert_called_once_with(
-        all=True, filters={"label": f"{SCAN_LABEL}={sandbox.evidence.scan_id}"}
+        all=True,
+        filters={"label": f"{SCAN_LABEL}={sandbox.evidence.scan_id}"},
+        ignore_removed=True,
     )
     assert order == [("container", {"force": True, "v": True}), "network"]
     assert not sandbox.staged_path.parent.exists()
@@ -203,7 +205,9 @@ def test_sweep_dedupes_against_tracked_resources(repo: Path, monkeypatch):
     assert result.exit_code == 0
     assert not sandbox.evidence.errors
     client.containers.list.assert_called_once_with(
-        all=True, filters={"label": f"{SCAN_LABEL}={sandbox.evidence.scan_id}"}
+        all=True,
+        filters={"label": f"{SCAN_LABEL}={sandbox.evidence.scan_id}"},
+        ignore_removed=True,
     )
     client.networks.list.assert_called_once_with(
         filters={"label": f"{SCAN_LABEL}={sandbox.evidence.scan_id}"}

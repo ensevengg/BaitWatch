@@ -292,7 +292,9 @@ class Sandbox:
             return True
         try:
             strays = self._client.containers.list(
-                all=True, filters={"label": f"{SCAN_LABEL}={self.evidence.scan_id}"}
+                all=True,
+                filters={"label": f"{SCAN_LABEL}={self.evidence.scan_id}"},
+                ignore_removed=True,
             )
         except Exception as exc:
             self._error("CONTAINER_CLEANUP", str(exc))
