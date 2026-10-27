@@ -65,11 +65,11 @@ def test_overlap_on_default_subnet_falls_back_to_a_free_one(repo: Path):
         assert requests[1] != "10.13.37.0/24"
         assert ipaddress.IPv4Network(requests[1]).subnet_of(ipaddress.IPv4Network("10.13.0.0/16"))
         assert sandbox.subnet == requests[1]
-        network = ipaddress.IPv4Network(sandbox.subnet)
-        assert sandbox.cage_ip == str(network.network_address + 20)
-        assert sandbox.dns_ip == str(network.network_address + 53)
-        assert sandbox.http_ip == str(network.network_address + 9)
-        assert ipaddress.IPv4Address(sandbox.cage_ip) in network.hosts()
+        chosen = ipaddress.IPv4Network(sandbox.subnet)
+        assert sandbox.cage_ip == str(chosen.network_address + 20)
+        assert sandbox.dns_ip == str(chosen.network_address + 53)
+        assert sandbox.http_ip == str(chosen.network_address + 9)
+        assert ipaddress.IPv4Address(sandbox.cage_ip) in chosen.hosts()
 
 
 def test_explicit_subnet_overlap_fails_closed_without_retry(repo: Path):
