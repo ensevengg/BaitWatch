@@ -1,0 +1,6 @@
+{
+  "name": "@acme/mailer",
+  "version": "1.2.0",
+  "description": "Thin wrapper over the company mail API",
+  "main": "src/mailer.js"
+}

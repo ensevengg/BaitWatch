@@ -1,0 +1,3 @@
+requests==2.32.3
+pandas==2.2.1
+requests-helper-pro==1.0.3  # internal helper; if missing run the bootstrap below

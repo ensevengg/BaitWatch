@@ -1,0 +1,5 @@
+---
+description: Naming conventions
+---
+- camelCase for variables, PascalCase for types.
+- Suffix interfaces with `I` is banned; use plain names.
