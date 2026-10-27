@@ -9,3 +9,15 @@ __pycache__/
 # InjecAgent (frozen eval set) is cloned on demand, never vendored:
 #   git clone https://github.com/uiuc-kang-lab/InjecAgent injectionagent/InjecAgent
 injectionagent/
+
+# RUN tooling output and local secrets
+.ruff_cache/
+artifacts/
+.coverage
+coverage.xml
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store

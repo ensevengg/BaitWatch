@@ -9,18 +9,43 @@ description = "Catches prompt-injection attacks aimed at AI coding agents before
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["numpy", "torch", "transformers>=5.0"]
+dependencies = [
+    "numpy",
+    "torch",
+    "transformers>=5.0",
+    "docker>=7.1,<8",
+    "pydantic>=2.10,<3",
+    "typer>=0.15,<1",
+]
 
 [project.optional-dependencies]
 train = ["pyarrow", "scikit-learn"]
 test = ["pytest"]
+dev = ["pytest>=8.3,<10", "pytest-timeout>=2.3,<3", "jsonschema>=4.23,<5", "ruff>=0.11,<1"]
 
 [project.scripts]
 # `baitwatch` itself is reserved for the fused READ + RUN CLI.
 baitwatch-read = "read.cli:main"
+baitwatch-run = "run.cli:app"
 
 [tool.setuptools.packages.find]
-include = ["read*"]
+include = ["read*", "run*"]
 
 [tool.setuptools.package-data]
 read = ["model_config.json"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+# uv only (pip ignores this): CPU torch keeps the RUN gate and CI free of the CUDA stack.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
