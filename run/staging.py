@@ -38,10 +38,16 @@ class StagingLimits:
             for value in (self.max_entries, self.max_bytes, self.max_file_bytes, self.max_depth)
         ):
             raise ValueError("staging entry, byte, and depth limits must be integers")
-        if type(self.timeout_seconds) not in (int, float) or not math.isfinite(
-            self.timeout_seconds
-        ):
+        if type(self.timeout_seconds) not in (int, float) or not is_finite(self.timeout_seconds):
             raise ValueError("staging timeout_seconds must be a finite int or float")
+
+
+def is_finite(value: float) -> bool:
+    # A huge int overflows float conversion and would never trip the deadline.
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def stage_repository(source: Path, destination: Path, limits: StagingLimits) -> list[str]:

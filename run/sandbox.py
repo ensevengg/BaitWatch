@@ -1,5 +1,4 @@
 import ipaddress
-import math
 import os
 import random
 import shutil
@@ -14,7 +13,7 @@ from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount
 
 from run.capture import capture_attached
 from run.evidence import CommandResult, RunError, RunEvidence, State
-from run.staging import StagingLimits, stage_repository
+from run.staging import StagingLimits, is_finite, stage_repository
 
 SCAN_LABEL = "org.baitwatch.scan-id"
 DEFAULT_SUBNET = "10.13.37.0/24"
@@ -45,8 +44,9 @@ class SandboxConfig:
 
     def __post_init__(self) -> None:
         hosts = (self.cage_host, self.dns_host, self.http_host)
-        if len(set(hosts)) != 3 or any(
-            type(host) is not int or not 2 <= host <= 254 for host in hosts
+        if (
+            any(type(host) is not int or not 2 <= host <= 254 for host in hosts)
+            or len(set(hosts)) != 3
         ):
             raise ValueError("cage and sink host offsets must be distinct integers in 2..254")
         if self.subnet is not None:
@@ -67,9 +67,7 @@ class SandboxConfig:
             )
         ):
             raise ValueError("memory, cpu, pid, tmpfs, and output limits must be integers")
-        if type(self.timeout_seconds) not in (int, float) or not math.isfinite(
-            self.timeout_seconds
-        ):
+        if type(self.timeout_seconds) not in (int, float) or not is_finite(self.timeout_seconds):
             raise ValueError("timeout_seconds must be a finite int or float")
         if not self.image or any(
             value <= 0

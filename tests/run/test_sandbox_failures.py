@@ -421,3 +421,12 @@ def test_network_sweep_failure_still_removes_the_tracked_network(repo: Path):
     client.networks.create.return_value.remove.assert_called_once()
     assert not sandbox.staged_path.parent.exists()
     client.close.assert_called_once()
+
+
+def test_malformed_config_values_raise_value_error():
+    with pytest.raises(ValueError, match="distinct integers"):
+        SandboxConfig(cage_host=[20])
+    with pytest.raises(ValueError, match="finite"):
+        SandboxConfig(timeout_seconds=10**400)
+    with pytest.raises(ValueError, match="finite"):
+        StagingLimits(timeout_seconds=10**400)
