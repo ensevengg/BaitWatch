@@ -44,7 +44,9 @@ class SandboxConfig:
 
     def __post_init__(self) -> None:
         hosts = (self.cage_host, self.dns_host, self.http_host)
-        if len(set(hosts)) != 3 or any(not 2 <= host <= 254 for host in hosts):
+        if len(set(hosts)) != 3 or any(
+            type(host) is not int or not 2 <= host <= 254 for host in hosts
+        ):
             raise ValueError("cage and sink host offsets must be distinct integers in 2..254")
         if self.subnet is not None:
             try:
@@ -53,6 +55,19 @@ class SandboxConfig:
                 raise ValueError("an explicit subnet must be an IPv4 /24 network") from exc
             if network.prefixlen != 24:
                 raise ValueError("an explicit subnet must be an IPv4 /24 network")
+        if any(
+            type(value) is not int
+            for value in (
+                self.memory_bytes,
+                self.nano_cpus,
+                self.pids_limit,
+                self.tmpfs_bytes,
+                self.max_output_bytes,
+            )
+        ):
+            raise ValueError("memory, cpu, pid, tmpfs, and output limits must be integers")
+        if type(self.timeout_seconds) not in (int, float):
+            raise ValueError("timeout_seconds must be an int or float")
         if not self.image or any(
             value <= 0
             for value in (

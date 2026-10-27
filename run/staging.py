@@ -31,6 +31,15 @@ class StagingLimits:
         ".gnupg",
     )
 
+    def __post_init__(self) -> None:
+        if any(
+            type(value) is not int
+            for value in (self.max_entries, self.max_bytes, self.max_file_bytes, self.max_depth)
+        ):
+            raise ValueError("staging entry, byte, and depth limits must be integers")
+        if type(self.timeout_seconds) not in (int, float):
+            raise ValueError("staging timeout_seconds must be an int or float")
+
 
 def stage_repository(source: Path, destination: Path, limits: StagingLimits) -> list[str]:
     """Linux fd-relative traversal; stripped modes apply only to the disposable copy.

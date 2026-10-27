@@ -15,6 +15,7 @@ from run.sandbox import (
     SandboxError,
     detonate,
 )
+from run.staging import StagingLimits
 
 OVERLAP = "Pool overlaps with other one on this address space"
 
@@ -208,6 +209,52 @@ def test_invalid_network_configuration_is_rejected():
         SandboxConfig(subnet="not-a-network")
     with pytest.raises(ValueError, match="positive"):
         SandboxConfig(max_output_bytes=0)
+
+
+def test_non_integer_host_offsets_are_rejected():
+    with pytest.raises(ValueError, match="distinct integers"):
+        SandboxConfig(cage_host=20.5)
+    with pytest.raises(ValueError, match="distinct integers"):
+        SandboxConfig(dns_host=53.0)
+    with pytest.raises(ValueError, match="distinct integers"):
+        SandboxConfig(http_host=True)
+    with pytest.raises(ValueError, match="distinct integers"):
+        SandboxConfig(cage_host="20")
+
+
+def test_non_integer_resource_limits_are_rejected():
+    with pytest.raises(ValueError, match="integers"):
+        SandboxConfig(memory_bytes=256.0 * 1024 * 1024)
+    with pytest.raises(ValueError, match="integers"):
+        SandboxConfig(nano_cpus=True)
+    with pytest.raises(ValueError, match="integers"):
+        SandboxConfig(pids_limit=64.0)
+    with pytest.raises(ValueError, match="integers"):
+        SandboxConfig(tmpfs_bytes="32m")
+    with pytest.raises(ValueError, match="integers"):
+        SandboxConfig(max_output_bytes=True)
+
+
+def test_timeout_seconds_accepts_float_but_not_bool_or_string():
+    assert SandboxConfig(timeout_seconds=0.5).timeout_seconds == 0.5
+    with pytest.raises(ValueError, match="int or float"):
+        SandboxConfig(timeout_seconds=True)
+    with pytest.raises(ValueError, match="int or float"):
+        SandboxConfig(timeout_seconds="20")
+
+
+def test_staging_limits_reject_non_integer_counts():
+    with pytest.raises(ValueError, match="integers"):
+        StagingLimits(max_entries=10_000.0)
+    with pytest.raises(ValueError, match="integers"):
+        StagingLimits(max_bytes=True)
+    with pytest.raises(ValueError, match="integers"):
+        StagingLimits(max_file_bytes=float("inf"))
+    with pytest.raises(ValueError, match="integers"):
+        StagingLimits(max_depth="64")
+    with pytest.raises(ValueError, match="int or float"):
+        StagingLimits(timeout_seconds=True)
+    assert StagingLimits(timeout_seconds=0.5).timeout_seconds == 0.5
 
 
 def test_attach_client_exit_code_mismatch_is_recorded(repo: Path, monkeypatch):
