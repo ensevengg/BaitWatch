@@ -56,9 +56,20 @@ def _check() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="python -m attacks")
     parser.add_argument("command", choices=("build", "lint", "harness", "leakage", "check"))
+    # argparse answers `--help` at the dispatcher level and exits before we can
+    # route it, so `python -m attacks harness --help` would show the wrong page.
+    help_requested = any(arg in ("-h", "--help") for arg in argv[1:])
+    if help_requested:
+        argv = [arg for arg in argv if arg not in ("-h", "--help")]
     args, rest = parser.parse_known_args(argv)
+    if help_requested:
+        if args.command == "check":
+            parser.print_help()
+            return 0
+        rest.append("--help")
     if args.command == "build":
         return build.main(rest)
     if args.command == "lint":
