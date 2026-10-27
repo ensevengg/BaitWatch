@@ -221,12 +221,19 @@ def read_scanner(root: str | Path) -> ScanOutcome:
         from read.scan import scan
     except ModuleNotFoundError as exc:  # pragma: no cover - GPU machines only
         raise RuntimeError(
-            "the READ scanner needs torch, transformers and a Prompt Guard "
-            "checkpoint; use --scanner keyword on CPU"
+            f"the READ scanner is missing a dependency ({exc}); install "
+            "torch and transformers, or use --scanner keyword on CPU"
         ) from exc
     cfg = ReadConfig.quick()
     cfg.judge.enabled = False  # deterministic, no network in harness
-    result = scan(Path(root), cfg=cfg)
+    try:
+        result = scan(Path(root), cfg=cfg)
+    except FileNotFoundError as exc:  # pragma: no cover - needs the checkpoint
+        raise RuntimeError(
+            f"READ checkpoint unavailable ({exc}). Set BAITWATCH_MODEL_PATH "
+            "or copy the pinned checkpoint from the training machine; use "
+            "--scanner keyword for the CPU gate"
+        ) from exc
     outcome = ScanOutcome(
         flagged={finding.file: finding.score for finding in result.flagged},
         incomplete=result.read_verdict == "incomplete",

@@ -104,16 +104,24 @@ decoders stay in lockstep.
 
 ## Run it
 
+CPU-only (what CI and the demo use):
+
 ```bash
 python -m attacks build --check      # generated tree matches generate.py
 python -m attacks lint               # no real hosts, IPs, keys, dotenv files
 python -m attacks harness            # five repos, READ gate, keyword scanner
 python -m attacks harness --layer RUN
-python -m attacks harness --scanner read   # needs torch + checkpoint
+python -m attacks harness --scanner read   # needs torch + transformers + checkpoint
 python -m attacks leakage            # skips when no corpus is present
 python -m attacks check              # lint + drift + READ gate
 pytest tests/attacks -q
 ```
+
+Extra packages for the full path: `torch` (CPU wheel is enough),
+`transformers>=5.0`, `pyarrow` (parquet leakage check) and `scikit-learn`
+(training extras). The real scanner additionally needs the pinned
+`v15f_22m` checkpoint; without it the harness prints an error and the hook
+fails closed. See `docs/HOOKS.md`.
 
 The keyword scanner is a deterministic CPU stand-in: it runs the real decoder
 registry over every file and matches a small set of attack markers. The real

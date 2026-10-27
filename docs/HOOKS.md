@@ -70,6 +70,13 @@ The generated hook entries look like this:
 Restart the agent after installing. The command uses the interpreter that ran
 the installer; pass `--python PATH` to pin another one.
 
+The real scanner needs the pinned checkpoint (`v15f_22m`). When it is absent,
+`python -m attacks harness --scanner read` prints an actionable error and the
+hook fails closed (`source: error`). Set `BAITWATCH_MODEL_PATH` to the
+checkpoint directory, or use `BAITWATCH_HOOK_SCANNER=keyword` for the CPU
+stand-in. The checkpoint is copied from the training machine; it is not
+downloaded by the installer.
+
 ## Wire format
 
 One JSON object on stdin:

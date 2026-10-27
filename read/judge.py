@@ -26,7 +26,10 @@ the READ side installs with zero extra dependencies.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ModuleNotFoundError:  # Windows dev boxes: flock is POSIX-only
+    fcntl = None
 import http.client
 import json
 import os
@@ -119,7 +122,8 @@ class SpendLedger:
         # cannot each start from the same total and silently overrun the cap.
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, open(self.path, "a+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+            if fcntl is not None:
+                fcntl.flock(f, fcntl.LOCK_EX)
             f.seek(0)
             try:
                 data = json.loads(f.read() or "{}")
@@ -135,7 +139,8 @@ class SpendLedger:
                 "usd_cap": self.usd_cap,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             }))
-            fcntl.flock(f, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(f, fcntl.LOCK_UN)
         return cost
 
 
