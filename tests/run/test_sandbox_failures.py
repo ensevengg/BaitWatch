@@ -1,10 +1,12 @@
+import shutil
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from docker.errors import NotFound
 
 from run.evidence import CommandResult, State
-from run.sandbox import Sandbox, SandboxConfig, SandboxError, detonate
+from run.sandbox import SCAN_LABEL, Sandbox, SandboxConfig, SandboxError, detonate
 
 
 def fake_client(gateway: str = ""):
@@ -13,6 +15,8 @@ def fake_client(gateway: str = ""):
     client.networks.create.return_value.attrs = {
         "IPAM": {"Config": [{"Subnet": "10.13.37.0/24", "Gateway": gateway}]}
     }
+    client.containers.list.return_value = []
+    client.networks.list.return_value = []
     return client
 
 
@@ -124,3 +128,145 @@ def test_attach_client_exit_code_mismatch_is_recorded(repo: Path, monkeypatch):
     assert result.exit_code == 0
     assert sandbox.evidence.errors[0].code == "ATTACH_FAILED"
     assert sandbox.evidence.components.sandbox != State.COMPLETE
+
+
+def test_network_the_daemon_kept_is_swept_by_label(repo: Path):
+    client = fake_client()
+    stray = MagicMock()
+    stray.id = "net-stray"
+    client.networks.create.side_effect = TimeoutError()
+    client.networks.list.return_value = [stray]
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with pytest.raises(SandboxError), sandbox:
+        pytest.fail("a network the daemon kept must not outlive the sandbox")
+    client.networks.list.assert_called_once_with(
+        filters={"label": f"{SCAN_LABEL}={sandbox.evidence.scan_id}"}
+    )
+    stray.remove.assert_called_once()
+    assert sandbox.evidence.status == "error"
+    assert sandbox.evidence.errors[0].code == "SANDBOX_SETUP"
+    assert not sandbox.staged_path.parent.exists()
+    client.close.assert_called_once()
+
+
+def test_keyboard_interrupt_during_network_create_still_sweeps(repo: Path):
+    client = fake_client()
+    stray = MagicMock()
+    stray.id = "net-stray"
+    interrupt = KeyboardInterrupt()
+    client.networks.create.side_effect = interrupt
+    client.networks.list.return_value = [stray]
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with pytest.raises(KeyboardInterrupt) as excinfo, sandbox:
+        pytest.fail("setup must not swallow interrupts")
+    assert excinfo.value is interrupt
+    stray.remove.assert_called_once()
+    assert sandbox.evidence.status == "error"
+    assert not sandbox.staged_path.parent.exists()
+    client.close.assert_called_once()
+
+
+def test_container_the_daemon_kept_is_swept_before_the_network(repo: Path):
+    client = fake_client()
+    stray = MagicMock()
+    stray.id = "cage-stray"
+    client.containers.create.side_effect = RuntimeError("create call lost")
+    client.containers.list.return_value = [stray]
+    order = []
+    stray.remove.side_effect = lambda **kwargs: order.append(("container", kwargs))
+    client.networks.create.return_value.remove.side_effect = lambda: order.append("network")
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.run_command(["true"])
+    client.containers.list.assert_called_once_with(
+        all=True,
+        filters={"label": f"{SCAN_LABEL}={sandbox.evidence.scan_id}"},
+        ignore_removed=True,
+    )
+    assert order == [("container", {"force": True, "v": True}), "network"]
+    assert not sandbox.staged_path.parent.exists()
+    client.close.assert_called_once()
+
+
+def test_sweep_dedupes_against_tracked_resources(repo: Path, monkeypatch):
+    client = fake_client()
+    net = client.networks.create.return_value
+    cage = client.containers.create.return_value
+    cage.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+    client.containers.list.return_value = [cage]
+    client.networks.list.return_value = [net]
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        result = sandbox.run_command(["true"])
+    assert result.exit_code == 0
+    assert not sandbox.evidence.errors
+    client.containers.list.assert_called_once_with(
+        all=True,
+        filters={"label": f"{SCAN_LABEL}={sandbox.evidence.scan_id}"},
+        ignore_removed=True,
+    )
+    client.networks.list.assert_called_once_with(
+        filters={"label": f"{SCAN_LABEL}={sandbox.evidence.scan_id}"}
+    )
+    assert cage.remove.call_count == 1
+    assert net.remove.call_count == 1
+    assert not sandbox.staged_path.parent.exists()
+
+
+def test_sweep_ignores_resources_that_are_already_gone(repo: Path):
+    client = fake_client()
+    ghost_container = MagicMock()
+    ghost_container.id = "cage-ghost"
+    ghost_container.remove.side_effect = NotFound("already removed")
+    ghost_network = MagicMock()
+    ghost_network.id = "net-ghost"
+    ghost_network.remove.side_effect = NotFound("already removed")
+    client.networks.create.side_effect = TimeoutError()
+    client.containers.list.return_value = [ghost_container]
+    client.networks.list.return_value = [ghost_network]
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with pytest.raises(SandboxError), sandbox:
+        pytest.fail("setup must fail closed")
+    ghost_container.remove.assert_called_once()
+    ghost_network.remove.assert_called_once()
+    assert not [error for error in sandbox.evidence.errors if error.code.endswith("_CLEANUP")]
+    # A vanished container counts as removed, so the staging dir still goes.
+    assert not sandbox.staged_path.parent.exists()
+
+
+def test_container_sweep_failure_keeps_the_staging_dir(repo: Path, monkeypatch):
+    client = fake_client()
+    cage = client.containers.create.return_value
+    cage.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+    client.containers.list.side_effect = RuntimeError("label listing failed")
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.run_command(["true"])
+    codes = [error.code for error in sandbox.evidence.errors]
+    assert "CONTAINER_CLEANUP" in codes
+    assert sandbox.evidence.status == "error"
+    assert sandbox.evidence.components.sandbox != State.COMPLETE
+    client.networks.create.return_value.remove.assert_called_once()
+    assert sandbox.staged_path.parent.exists()
+    shutil.rmtree(sandbox.staged_path.parent)
+    client.close.assert_called_once()
+
+
+def test_network_sweep_failure_still_removes_the_tracked_network(repo: Path):
+    client = fake_client()
+    client.networks.list.side_effect = RuntimeError("label listing failed")
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        pass
+    assert sandbox.evidence.errors[0].code == "NETWORK_CLEANUP"
+    client.networks.create.return_value.remove.assert_called_once()
+    assert not sandbox.staged_path.parent.exists()
+    client.close.assert_called_once()
