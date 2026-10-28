@@ -121,9 +121,12 @@ def decode_label(label):
     candidates = []
     if len(body) % 2 == 0 and all(ch in HEX_ALPHABET for ch in body):
         candidates.append(("hex", bytes.fromhex(body)))
-    padded8 = body + "=" * (-len(body) % 8)
+    # Base32 must ignore label case: DNS names are case-insensitive and
+    # resolvers may randomize it (0x20). Base64 alphabets stay case-sensitive.
+    upper = body.upper()
+    padded8 = upper + "=" * (-len(upper) % 8)
     padded4 = body + "=" * (-len(body) % 4)
-    if all(ch in B32_ALPHABET for ch in body):
+    if all(ch in B32_ALPHABET for ch in upper):
         with contextlib.suppress(binascii.Error, ValueError):
             candidates.append(("base32", base64.b32decode(padded8)))
     if all(ch in B64URL_ALPHABET for ch in body):

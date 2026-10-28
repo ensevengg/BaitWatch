@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from run.evidence import NetworkHit
-from run.sink_logs import read_sink_log
+from run.sink_logs import SinkLog, read_sink_log
 
 
 def write_log(path: Path, records) -> Path:
@@ -228,6 +230,137 @@ def test_record_after_the_stopped_marker_is_a_problem(tmp_path):
     assert log.stopped
     assert log.problems == ["line 3: record after the stopped marker"]
     assert not log.dns_hits
+
+
+BAD_STRINGS = [None, 1, 1.5, True, [], {}, ["dns"], {"sink": "dns"}]
+BAD_NUMBERS = ["now", None, True, [], {}]
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        *[ready(sink=value) for value in BAD_STRINGS],
+        *[{"kind": "ready", "ts": value, "sink": "dns"} for value in BAD_NUMBERS],
+        *[{"kind": "stopped", "ts": 1.0, "sink": value} for value in BAD_STRINGS],
+        *[{"kind": "stopped", "ts": value, "sink": "dns"} for value in BAD_NUMBERS],
+        *[{"kind": "log_truncated", "ts": value} for value in BAD_NUMBERS],
+        *[{"kind": "refused", "ts": 1.0, "source_ip": value} for value in BAD_STRINGS],
+        *[{"kind": "refused", "ts": value, "source_ip": "10.13.37.20"} for value in BAD_NUMBERS],
+        *[dns_record(source_ip=value) for value in BAD_STRINGS],
+        *[dns_record(qname=value) for value in BAD_STRINGS],
+        *[dns_record(qtype=value) for value in [None, 1.5, True, False, [], {}]],
+        *[dns_record(ts=value) for value in BAD_NUMBERS],
+        *[dns_record(decoded=value) for value in [None, 1, 1.5, True, "text", {}, {"a": 1}]],
+        *[dns_record(decoded=[value]) for value in [None, 1, "text", [], {}]],
+        *[dns_record(decoded=[{"text": value}]) for value in BAD_STRINGS],
+        *[
+            dns_record(decoded=[{"text": "ok", "label": value}])
+            for value in [1, 1.5, True, None, [], {}]
+        ],
+        *[
+            dns_record(decoded=[{"text": "ok", "encoding": value}])
+            for value in [1, 1.5, True, None, [], {}]
+        ],
+        *[http_record(source_ip=value) for value in BAD_STRINGS],
+        *[http_record(method=value) for value in BAD_STRINGS],
+        *[http_record(path=value) for value in BAD_STRINGS],
+        *[http_record(host=value) for value in BAD_STRINGS],
+        *[http_record(body=value) for value in BAD_STRINGS],
+        *[http_record(body_truncated=value) for value in [1, 0, "yes", None, [], {}]],
+        *[http_record(raw=value) for value in [42, 1.5, True, [], {}]],
+        *[
+            http_record(headers=value)
+            for value in [None, 1, "headers", [], [{"host": "x"}], {"host": 1}, {"host": None}]
+        ],
+        *[http_record(headers={"host": value}) for value in [1, 1.5, True, None, [], {}]],
+        *[http_record(ts=value) for value in BAD_NUMBERS],
+        *[tls_record(source_ip=value) for value in BAD_STRINGS],
+        *[tls_record(sni=value) for value in [7, 1.5, True, [], {}]],
+        *[tls_record(ts=value) for value in BAD_NUMBERS],
+    ],
+)
+def test_wrong_typed_fields_become_line_problems_and_parsing_continues(tmp_path, record):
+    path = write_log(tmp_path / "sink.jsonl", [record, dns_record()])
+    log = read_sink_log(path)
+    assert len(log.problems) == 1
+    assert log.problems[0].startswith("line 1: ")
+    assert not log.ready and not log.stopped and not log.truncated
+    assert not log.http_hits and not log.tls_hits
+    assert len(log.dns_hits) == 1
+
+
+ARBITRARY_JSON = [
+    None,
+    True,
+    False,
+    0,
+    -1,
+    1.5,
+    "",
+    "text",
+    [],
+    [1, "x", None, {"a": []}],
+    {},
+    {"a": 1},
+    {"kind": ["dns"]},
+    {"kind": {"name": "dns"}},
+    [[[[["deep"]]]]],
+    {"nested": {"list": [1, {"x": None}]}},
+]
+
+
+def test_read_sink_log_never_raises_for_arbitrary_json_values(tmp_path):
+    candidates = []
+    for value in ARBITRARY_JSON:
+        candidates.extend(
+            [
+                value,
+                {"kind": value},
+                ready(sink=value),
+                {"kind": "stopped", "ts": value, "sink": value},
+                {"kind": "log_truncated", "ts": value},
+                {"kind": "refused", "ts": value, "source_ip": value},
+                dns_record(source_ip=value),
+                dns_record(qname=value),
+                dns_record(qtype=value),
+                dns_record(decoded=value),
+                dns_record(decoded=[value]),
+                dns_record(decoded=[{"text": value, "label": value, "encoding": value}]),
+                dns_record(ts=value),
+                http_record(source_ip=value),
+                http_record(method=value),
+                http_record(path=value),
+                http_record(host=value),
+                http_record(headers=value),
+                http_record(body=value),
+                http_record(body_truncated=value),
+                http_record(raw=value),
+                http_record(ts=value),
+                tls_record(source_ip=value),
+                tls_record(sni=value),
+                tls_record(ts=value),
+            ]
+        )
+    path = tmp_path / "sink.jsonl"
+    for candidate in candidates:
+        write_log(path, [candidate])
+        assert isinstance(read_sink_log(path), SinkLog)
+
+
+def test_read_sink_log_never_raises_for_hostile_json_lines(tmp_path):
+    lines = [
+        "[" * 10000 + "]" * 10000,
+        '{"kind":"dns","ts":' + "9" * 5000 + "}",
+        '{"kind":"ready","sink":"dns","ts":' + "9" * 5000 + "}",
+        '{"kind":"dns","decoded":[{"text":"ok","label":' + "9" * 5000 + "}]}",
+    ]
+    path = tmp_path / "sink.jsonl"
+    for line in lines:
+        write_log(path, [line, dns_record()])
+        log = read_sink_log(path)
+        assert isinstance(log, SinkLog)
+        assert log.problems and log.problems[0].startswith("line 1: ")
+        assert len(log.dns_hits) == 1
 
 
 def test_log_without_a_trailing_newline_is_a_problem(tmp_path):

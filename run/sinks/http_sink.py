@@ -155,7 +155,14 @@ def parse_sni(buf):
 def read_head(conn):
     """(head, None) once a request head arrives, else (None, raw bytes seen)."""
     buffer = bytearray()
-    while b"\r\n\r\n" not in buffer and len(buffer) <= HEAD_LIMIT:
+    while True:
+        head, separator, rest = bytes(buffer).partition(b"\r\n\r\n")
+        if separator:
+            if len(head) + len(separator) > HEAD_LIMIT:
+                return None, bytes(buffer)
+            return (head, separator, rest), None
+        if len(buffer) > HEAD_LIMIT:
+            return None, bytes(buffer)
         try:
             chunk = conn.recv(4096)
         except OSError:
@@ -163,10 +170,7 @@ def read_head(conn):
         if not chunk:
             break
         buffer.extend(chunk)
-    if b"\r\n\r\n" not in buffer or len(buffer) > HEAD_LIMIT:
-        return None, bytes(buffer)
-    head = bytes(buffer).partition(b"\r\n\r\n")
-    return head, None
+    return None, bytes(buffer)
 
 
 def raw_preview(data: bytes) -> str:
@@ -287,13 +291,22 @@ class Sink:
         self._threads: set[threading.Thread] = set()
         self._stopping = threading.Event()
 
-    def _track(self, conn, thread):
+    def _track_and_start(self, conn, thread):
+        # Starting under the lock means stop() can never snapshot a tracked
+        # worker that has not been started yet.
         with self._lock:
             if self._stopping.is_set() or self._active >= MAX_CONNECTIONS:
                 return False
             self._active += 1
             self._connections.add(conn)
             self._threads.add(thread)
+            try:
+                thread.start()
+            except BaseException:
+                self._active -= 1
+                self._connections.discard(conn)
+                self._threads.discard(thread)
+                raise
             return True
 
     def _release(self, conn):
@@ -311,14 +324,13 @@ class Sink:
             except OSError:
                 os._exit(1)  # a dead listener must not look like a clean stop
             thread = threading.Thread(target=self._serve, args=(conn, addr, handler), daemon=True)
-            if not self._track(conn, thread):
+            if not self._track_and_start(conn, thread):
                 # A dropped contact must stay evidence; the host turns the
                 # refusal into a log problem so the component cannot look complete.
                 self.log.write({"kind": "refused", "ts": time.time(), "source_ip": addr[0]})
                 with contextlib.suppress(OSError):
                     conn.close()
                 continue
-            thread.start()
 
     def _serve(self, conn, addr, handler):
         try:
@@ -343,7 +355,8 @@ class Sink:
             with contextlib.suppress(OSError):
                 conn.shutdown(socket.SHUT_RDWR)
         for thread in threads:
-            thread.join(SHUTDOWN_SECONDS)
+            if thread.ident is not None:  # ident is None until the thread is started
+                thread.join(SHUTDOWN_SECONDS)
         with self._lock:
             remaining = list(self._threads)
         return not any(thread.is_alive() for thread in remaining)
