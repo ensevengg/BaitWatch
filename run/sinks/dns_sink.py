@@ -24,6 +24,7 @@ MIN_DECODED_BYTES = 4
 MIN_LABEL_CHARS = 8
 PRINTABLE_RATIO = 0.9
 TCP_TIMEOUT = 5.0
+TCP_MAX_FRAMES = 16
 POLL_SECONDS = 0.2
 SHUTDOWN_SECONDS = 1.5
 
@@ -223,15 +224,20 @@ def log_query(log, source_ip, packet, parsed):
 
 
 def handle_query(log, sock, answer, packet, source):
+    logged = False
     try:
         parsed = parse_query(packet)
         if parsed is None:
+            log_unparsed(log, source[0], packet)
             return
         log_query(log, source[0], packet, parsed)
+        logged = True
         sock.sendto(build_response(packet[:2], parsed[0], parsed[2], answer), source)
     except Exception:
-        # Attacker-controlled input must never stop the sink; this query is lost.
-        pass
+        # Attacker-controlled input must never stop the sink or vanish unlogged.
+        if not logged:
+            with contextlib.suppress(Exception):
+                log_unparsed(log, source[0], packet)
 
 
 def serve(log, sock, answer, stopping):
@@ -276,23 +282,24 @@ def raw_preview(data):
     )[:RAW_LIMIT]
 
 
-def log_unparsed(log, source_ip, data):
-    log.write(
-        {
-            "kind": "dns",
-            "ts": time.time(),
-            "source_ip": source_ip,
-            "qname": "<unparsed>",
-            "qtype": "unknown",
-            "decoded": [],
-            "raw": raw_preview(data),
-        }
-    )
+def log_unparsed(log, source_ip, data, *, capture_incomplete=False):
+    record = {
+        "kind": "dns",
+        "ts": time.time(),
+        "source_ip": source_ip,
+        "qname": "<unparsed>",
+        "qtype": "unknown",
+        "decoded": [],
+        "raw": raw_preview(data),
+    }
+    if capture_incomplete:
+        record["capture_incomplete"] = True
+    log.write(record)
 
 
 def serve_tcp(log, listener, answer, stopping, active, active_lock):
-    """DNS over TCP on the same port: 2-byte length framing, one query per
-    connection, sequentially so a stalled peer cannot pile up handlers."""
+    """DNS over TCP on the same port: 2-byte length framing, successive frames
+    on one connection, sequentially so a stalled peer cannot pile up handlers."""
     while not stopping.is_set():
         try:
             conn, source = listener.accept()
@@ -304,42 +311,54 @@ def serve_tcp(log, listener, answer, stopping, active, active_lock):
             os._exit(1)  # a dead listener must not look like a clean stop
         with active_lock:
             active.add(conn)
-        prefix = b""
-        packet = b""
-        logged = False
         try:
             conn.settimeout(TCP_TIMEOUT)
-            prefix = read_exact(conn, 2)
-            if len(prefix) < 2:
-                log_unparsed(log, source[0], prefix)
-                logged = True
-                continue
-            length = int.from_bytes(prefix, "big")
-            if length < 12 or length > TCP_PACKET_LIMIT:
-                packet = read_exact(conn, length) if 0 < length < 12 else b""
-                log_unparsed(log, source[0], packet or prefix)
-                logged = True
-                continue
-            # TCP framing carries up to 64 KiB, unlike the UDP datagram bound.
-            packet = read_exact(conn, length)
-            if len(packet) < length:
-                log_unparsed(log, source[0], packet)
-                logged = True
-                continue
-            parsed = parse_query(packet)
-            if parsed is None:
-                log_unparsed(log, source[0], packet)
-                logged = True
-                continue
-            log_query(log, source[0], packet, parsed)
-            logged = True
-            response = build_response(packet[:2], parsed[0], parsed[2], answer)
-            conn.sendall(len(response).to_bytes(2, "big") + response)
-        except Exception:
-            if not logged:
-                # Attacker-controlled input must never stop the sink or vanish.
-                with contextlib.suppress(Exception):
-                    log_unparsed(log, source[0], packet or prefix)
+            frames = 0
+            while True:
+                if frames >= TCP_MAX_FRAMES:
+                    # Only flag incomplete capture when another frame actually arrived.
+                    extra = read_exact(conn, 2)
+                    if extra:
+                        log_unparsed(log, source[0], extra, capture_incomplete=True)
+                    break
+                prefix = b""
+                packet = b""
+                logged = False
+                try:
+                    prefix = read_exact(conn, 2)
+                    if len(prefix) < 2:
+                        if prefix or frames == 0:
+                            log_unparsed(log, source[0], prefix)
+                        break
+                    length = int.from_bytes(prefix, "big")
+                    if length > TCP_PACKET_LIMIT:
+                        log_unparsed(log, source[0], prefix)
+                        break
+                    if length < 12:
+                        packet = read_exact(conn, length) if length else b""
+                        log_unparsed(log, source[0], packet or prefix)
+                        frames += 1
+                        continue
+                    # TCP framing carries up to 64 KiB, unlike the UDP datagram bound.
+                    packet = read_exact(conn, length)
+                    if len(packet) < length:
+                        log_unparsed(log, source[0], packet)
+                        break
+                    frames += 1
+                    parsed = parse_query(packet)
+                    if parsed is None:
+                        log_unparsed(log, source[0], packet)
+                        continue
+                    log_query(log, source[0], packet, parsed)
+                    logged = True
+                    response = build_response(packet[:2], parsed[0], parsed[2], answer)
+                    conn.sendall(len(response).to_bytes(2, "big") + response)
+                except Exception:
+                    if not logged:
+                        # Attacker-controlled input must never stop the sink or vanish.
+                        with contextlib.suppress(Exception):
+                            log_unparsed(log, source[0], packet or prefix)
+                    break
         finally:
             with active_lock:
                 active.discard(conn)

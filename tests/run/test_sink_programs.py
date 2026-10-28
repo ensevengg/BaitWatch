@@ -839,3 +839,75 @@ def test_dns_stop_tcp_tolerates_an_unstarted_accept_thread():
     assert module.stop_tcp(listener, thread, stopping, set(), threading.Lock()) is True
     assert stopping.is_set()
     assert listener.closed
+
+
+def test_dns_udp_question_truncated_before_qclass_is_logged_as_unparsed(dns_sink):
+    packet = build_dns_query(b"\x31\x32", "truncated-secret.evil.example")[:-2]
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.sendto(packet, ("127.0.0.1", dns_sink["port"]))
+    dns_query(dns_sink["port"], "after-truncated.evil.example")
+    hits = read_records(dns_sink["log"], "dns")
+    assert [hit["qname"] for hit in hits] == ["<unparsed>", "after-truncated.evil.example"]
+    assert hits[0]["source_ip"] == "127.0.0.1"
+    assert hits[0]["qtype"] == "unknown"
+    assert "truncated-secret" in hits[0]["raw"]
+
+
+def test_dns_udp_random_garbage_is_logged_as_unparsed(dns_sink):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.sendto(b"\x99\x88\x77\x66garbagegarbage", ("127.0.0.1", dns_sink["port"]))
+    dns_query(dns_sink["port"], "after-garbage.evil.example")
+    hits = read_records(dns_sink["log"], "dns")
+    assert [hit["qname"] for hit in hits] == ["<unparsed>", "after-garbage.evil.example"]
+    assert hits[0]["source_ip"] == "127.0.0.1"
+    assert hits[0]["qtype"] == "unknown"
+    assert hits[0]["raw"].startswith("\\x99\\x88wfgarbage")
+
+
+def tcp_frame(payload: bytes) -> bytes:
+    return len(payload).to_bytes(2, "big") + payload
+
+
+def test_dns_over_tcp_two_queries_on_one_connection_are_answered_and_logged(dns_sink):
+    first = build_dns_query(b"\x41\x01", "first-tcp.evil.example")
+    second = build_dns_query(b"\x41\x02", "second-tcp.evil.example")
+    with socket.create_connection(("127.0.0.1", dns_sink["port"]), timeout=SINK_TIMEOUT) as sock:
+        sock.sendall(tcp_frame(first) + tcp_frame(second))
+        responses = []
+        for _ in range(2):
+            length = int.from_bytes(recv_exact(sock, 2), "big")
+            responses.append(recv_exact(sock, length))
+    assert [response[:2] for response in responses] == [b"\x41\x01", b"\x41\x02"]
+    assert all(response[-4:] == socket.inet_aton(SINK_ANSWER) for response in responses)
+    hits = read_records(dns_sink["log"], "dns")
+    assert [hit["qname"] for hit in hits] == ["first-tcp.evil.example", "second-tcp.evil.example"]
+    assert all(hit["source_ip"] == "127.0.0.1" for hit in hits)
+
+
+def test_dns_over_tcp_frames_past_the_budget_flag_incomplete_capture(dns_sink):
+    module = load_sink_module("dns_sink.py")
+    budget = module.TCP_MAX_FRAMES
+    queries = [
+        build_dns_query(index.to_bytes(2, "big"), f"bulk-{index}.evil.example")
+        for index in range(budget + 1)
+    ]
+    with socket.create_connection(("127.0.0.1", dns_sink["port"]), timeout=SINK_TIMEOUT) as sock:
+        sock.sendall(b"".join(tcp_frame(query) for query in queries))
+        for _ in range(budget):
+            length = int.from_bytes(recv_exact(sock, 2), "big")
+            recv_exact(sock, length)
+    deadline = time.monotonic() + SINK_TIMEOUT
+    hits = read_records(dns_sink["log"], "dns")
+    while time.monotonic() < deadline and not any(
+        hit.get("capture_incomplete") is True for hit in hits
+    ):
+        time.sleep(0.05)
+        hits = read_records(dns_sink["log"], "dns")
+    parsed = [hit for hit in hits if hit["qname"] != "<unparsed>"]
+    unparsed = [hit for hit in hits if hit["qname"] == "<unparsed>"]
+    assert [hit["qname"] for hit in parsed] == [
+        f"bulk-{index}.evil.example" for index in range(budget)
+    ]
+    assert len(unparsed) == 1
+    assert unparsed[0]["capture_incomplete"] is True
+    assert unparsed[0]["source_ip"] == "127.0.0.1"

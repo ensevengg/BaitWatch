@@ -426,3 +426,34 @@ def test_dns_record_with_a_non_string_raw_is_a_problem(tmp_path):
     assert not log.dns_hits
     assert len(log.problems) == 1
     assert "raw is not a string" in log.problems[0]
+
+
+def test_dns_capture_incomplete_record_is_a_hit_and_a_problem(tmp_path):
+    path = write_log(
+        tmp_path / "sink.jsonl",
+        [
+            ready(),
+            dns_record(
+                qname="<unparsed>",
+                qtype="unknown",
+                decoded=[],
+                raw="\\x00\\x21",
+                capture_incomplete=True,
+            ),
+        ],
+    )
+    log = read_sink_log(path)
+    assert len(log.dns_hits) == 1
+    assert log.dns_hits[0].destination == "<unparsed>"
+    assert "capture_incomplete" in log.dns_hits[0].detail
+    assert len(log.problems) == 1
+    assert "capture is incomplete" in log.problems[0]
+
+
+@pytest.mark.parametrize("value", [1, 0, "yes", None, [], {}])
+def test_dns_capture_incomplete_wrong_type_is_a_problem(tmp_path, value):
+    path = write_log(tmp_path / "sink.jsonl", [ready(), dns_record(capture_incomplete=value)])
+    log = read_sink_log(path)
+    assert not log.dns_hits
+    assert len(log.problems) == 1
+    assert "capture_incomplete is not a boolean" in log.problems[0]

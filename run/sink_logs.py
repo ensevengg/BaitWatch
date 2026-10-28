@@ -77,6 +77,11 @@ def _dns_hit(record) -> NetworkHit:
         raise SinkLogLineError("raw is not a string")
     if raw:
         detail += f" raw={raw[:BODY_PREVIEW_CHARS]}"
+    capture_incomplete = record.get("capture_incomplete", False)
+    if not isinstance(capture_incomplete, bool):
+        raise SinkLogLineError("capture_incomplete is not a boolean")
+    if capture_incomplete:
+        detail += " capture_incomplete"
     return NetworkHit(
         source_ip=_text(record, "source_ip"),
         destination=qname,
@@ -191,7 +196,13 @@ def read_sink_log(path: Path, *, max_bytes: int = DEFAULT_MAX_BYTES) -> SinkLog:
                     f"line {number}: sink refused a connection; that contact was not captured"
                 )
             elif kind == "dns":
+                hits_before = len(dns_hits)
                 _append(dns_hits, problems, number, _dns_hit, record)
+                if len(dns_hits) > hits_before and record.get("capture_incomplete") is True:
+                    problems.append(
+                        f"line {number}: dns capture is incomplete; "
+                        "frames past the per-connection budget were not captured"
+                    )
             elif kind == "http":
                 _append(http_hits, problems, number, _http_hit, record)
             elif kind == "tls":
