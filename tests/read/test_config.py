@@ -61,6 +61,16 @@ def test_quick_preset_uses_pinned_thresholds(monkeypatch, tmp_path):
     assert cfg.walker.max_files == 400
 
 
+def test_judge_defaults_match_the_live_meta_api(monkeypatch):
+    # Checked against api.meta.ai on 2026-10-28: the old llama.com base URL
+    # returns 404 and `muse-spark` returns model_not_found.
+    monkeypatch.delenv("BAITWATCH_JUDGE_BASE_URL", raising=False)
+    monkeypatch.delenv("BAITWATCH_JUDGE_MODEL", raising=False)
+    muse = rc.JudgeConfig().endpoints[0]
+    assert muse["base_url"] == "https://api.meta.ai/v1"
+    assert muse["model"] == "muse-spark-1.3"
+
+
 def test_quick_preset_disables_judge():
     cfg = rc.ReadConfig.quick()
     assert cfg.judge.enabled is False, "the inline hook must not block on judge calls"

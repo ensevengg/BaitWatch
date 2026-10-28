@@ -58,9 +58,10 @@ run in parallel. Identical chunk texts are judged once.
 
 1. **Primary — Meta Model API (Muse Spark).** OpenAI-compatible base URL and
    model id are configurable (`BAITWATCH_JUDGE_BASE_URL`, `BAITWATCH_JUDGE_MODEL`,
-   default `https://api.llama.com/compatible/v1` + `muse-spark`); key comes
-   from `META_API_KEY`. Confirm the exact model id when the API console is
-   checked on D5.
+   default `https://api.meta.ai/v1` + `muse-spark-1.3`); key comes from
+   `META_API_KEY`. Both values were checked against the live API on 2026-10-28:
+   `api.llama.com/compatible/v1` returns HTTP 404 and `muse-spark` returns
+   `model_not_found`; `api.meta.ai/v1` with `muse-spark-1.3` returns 200.
 2. **Fallback — local llama-server.** `llama-server -m
    /mnt/d/hf_models/Llama-3.2-3B-Instruct/Llama-3.2-3B-Instruct-Q6_K.gguf
    -ngl 99 -c 8192 --jinja --port 8080` (OpenAI dialect at

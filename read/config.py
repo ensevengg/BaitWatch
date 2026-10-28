@@ -85,8 +85,8 @@ class JudgeConfig:
                 {
                     "name": "muse_spark",
                     "base_url": os.environ.get("BAITWATCH_JUDGE_BASE_URL",
-                                               "https://api.llama.com/compatible/v1"),
-                    "model": os.environ.get("BAITWATCH_JUDGE_MODEL", "muse-spark"),
+                                               "https://api.meta.ai/v1"),
+                    "model": os.environ.get("BAITWATCH_JUDGE_MODEL", "muse-spark-1.3"),
                     "api_key_env": "META_API_KEY",
                 },
                 {
