@@ -199,12 +199,22 @@ def _looks_like_repo(path: Path) -> bool:
     return any((path / marker).exists() for marker in markers)
 
 
+def _gate_label(gate: str) -> str:
+    """One casing on every path: success and crash must agree."""
+    value = str(gate).strip().lower()
+    if value in ("a", "prompt", "userpromptsubmit"):
+        return "A"
+    if value in ("b", "tool", "pretooluse"):
+        return "B"
+    return str(gate).strip().upper()
+
+
 def error_decision(gate: str, exc: BaseException, duration_ms: float = 0.0) -> Decision:
     """Fail closed: a broken hook must never become an allow."""
     mode = os.environ.get("BAITWATCH_ON_ERROR", "deny").strip().lower()
     verdict = "ask" if mode == "ask" else "block"
     return Decision(
-        gate=gate,
+        gate=_gate_label(gate),
         verdict=verdict,
         reason=f"BaitWatch hook failed ({type(exc).__name__}: {exc}); "
         f"failing {'open to a prompt' if verdict == 'ask' else 'closed'}",

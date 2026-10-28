@@ -129,6 +129,12 @@ def test_crash_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert error_decision("B", RuntimeError("offline")).verdict == "ask"
 
 
+def test_error_decision_normalizes_the_gate_label() -> None:
+    assert error_decision("a", RuntimeError("offline")).gate == "A"
+    assert error_decision("b", RuntimeError("offline")).gate == "B"
+    assert error_decision("pretooluse", RuntimeError("offline")).gate == "B"
+
+
 def test_keyword_hook_scans_and_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BAITWATCH_HOOK_SCANNER", "keyword")
     cache = ScanCache(tmp_path / "cache.json")
