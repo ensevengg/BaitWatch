@@ -82,7 +82,7 @@ class ScriptedBackend:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError) as exc:
             raise LLMError(f"cannot read scripted tool script: {exc}") from None
-        except json.JSONDecodeError as exc:
+        except (ValueError, RecursionError) as exc:
             raise LLMError(f"scripted tool script is not valid JSON: {exc}") from None
         if not isinstance(data, list):
             raise LLMError("scripted tool script must be a list of steps")
@@ -240,7 +240,9 @@ def _read_bounded(response: http.client.HTTPResponse, limit: int, deadline: floa
 def _parse_reply(raw: bytes) -> LLMReply:
     try:
         data = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (ValueError, RecursionError):
+        # A model endpoint can serve arbitrarily nested JSON or over-long
+        # integer literals; both raise before decoding, neither a JSONDecodeError.
         raise LLMError("LLM response is not valid JSON") from None
     if not isinstance(data, dict):
         raise LLMError("LLM response must be a JSON object")
@@ -251,8 +253,12 @@ def _parse_reply(raw: bytes) -> LLMReply:
     if not isinstance(choice, dict):
         raise LLMError("LLM response choice is malformed")
     finish_reason = choice.get("finish_reason")
-    if finish_reason in ("length", "content_filter"):
-        raise LLMError(f"LLM response did not finish: finish_reason={finish_reason}")
+    # An allowlist, not a denylist: only a plain stop and a tool step are finished
+    # replies. Some OpenAI-compatible servers send stop alongside tool calls, so
+    # a missing reason accepts either shape; everything else — length,
+    # content_filter, max_tokens, undocumented or non-string values — is not.
+    if finish_reason is not None and finish_reason not in ("stop", "tool_calls"):
+        raise LLMError(f"LLM response did not finish: finish_reason={finish_reason!r}")
     message = choice.get("message")
     if not isinstance(message, dict):
         raise LLMError("LLM response message is malformed")
@@ -268,7 +274,10 @@ def _parse_reply(raw: bytes) -> LLMReply:
         raw_calls = []
     if not isinstance(raw_calls, list):
         raise LLMError("LLM response tool_calls must be a list")
-    return LLMReply(text=text, tool_calls=[_parse_tool_call(call) for call in raw_calls])
+    calls = [_parse_tool_call(call) for call in raw_calls]
+    if not calls and finish_reason == "tool_calls":
+        raise LLMError("LLM response promised tool calls but carried none")
+    return LLMReply(text=text, tool_calls=calls)
 
 
 def _parse_tool_call(raw: object) -> ToolCall:
@@ -285,7 +294,7 @@ def _parse_tool_call(raw: object) -> ToolCall:
         raise LLMError("LLM tool call arguments must be a JSON string")
     try:
         arguments = json.loads(arguments_json)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         raise LLMError("LLM tool call arguments are not valid JSON") from None
     if not isinstance(arguments, dict):
         raise LLMError("LLM tool call arguments must be a JSON object")

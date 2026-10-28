@@ -6,9 +6,11 @@ from pathlib import Path
 import pytest
 
 from run.trace import (
+    Entry,
     TraceError,
     TraceLimits,
     diff,
+    error_paths,
     manifest_from_json,
     manifest_to_json,
     snapshot,
@@ -316,3 +318,13 @@ def test_limit_validation_rejects_bad_values(kwargs: dict):
 def test_manifest_from_json_rejects_deeply_nested_input():
     with pytest.raises(TraceError):
         manifest_from_json("[" * 100_000 + "]" * 100_000)
+
+
+def test_error_paths_lists_sorted_paths_with_markers():
+    manifest = {
+        "clean.txt": Entry(kind="file", mode=0o644, sha256=GOOD_DIGEST),
+        "b/locked": Entry(kind="dir", mode=0, error="EACCES"),
+        "a/unreadable": Entry(kind="file", mode=0o600, error="EPERM"),
+    }
+    assert error_paths(manifest) == ["a/unreadable", "b/locked"]
+    assert error_paths({}) == []

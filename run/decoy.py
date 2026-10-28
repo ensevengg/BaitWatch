@@ -173,10 +173,11 @@ def run_decoy(
     seconds = getattr(config, "decoy_seconds", None)
     deadline = time.monotonic() + seconds if type(seconds) in (int, float) and seconds > 0 else None
     messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt(task)}]
+    tools = _tools()
     try:
         for _ in range(max_steps):
             _check_cage(sandbox, deadline)
-            reply = backend.chat(messages, _tools())
+            reply = backend.chat(messages, tools)
             _check_cage(sandbox, deadline)
             if not reply.tool_calls:
                 break

@@ -15,12 +15,12 @@ import docker
 from docker.errors import APIError, DockerException, NotFound
 from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount
 
-from run.capture import capture_attached
+from run.capture import capture_attached, capture_exec
 from run.evidence import CommandResult, FileDiff, RunError, RunEvidence, State
 from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
-from run.trace import TraceError, diff, manifest_from_json
+from run.trace import TraceError, diff, error_paths, manifest_from_json
 
 SCAN_LABEL = "org.baitwatch.scan-id"
 DEFAULT_SUBNET = "10.13.37.0/24"
@@ -58,6 +58,17 @@ KILL_TIMEOUT_SECONDS = 10
 # Printed by the in-cage wrapper before the tool starts; its absence means the
 # docker exec never reached the cage, so its exit code is not the tool's.
 EXEC_START_MARKER = "baitwatch-exec-started"
+# A snapshot can carry error markers for thousands of paths; the trace error
+# names only a bounded few.
+TRACE_PATH_LIMIT = 5
+TRACE_PATH_CHARS = 150
+
+
+def _bounded_paths(paths: Sequence[str]) -> str:
+    shown = ", ".join(path[:TRACE_PATH_CHARS] for path in paths[:TRACE_PATH_LIMIT])
+    if len(paths) > TRACE_PATH_LIMIT:
+        return f"{shown} (+{len(paths) - TRACE_PATH_LIMIT} more)"
+    return shown
 
 
 class SandboxError(RuntimeError):
@@ -181,6 +192,7 @@ class Sandbox:
         self._service_roles: set[str] = set()
         self._sinks: dict[str, object] = {}
         self._sink_logs: dict[str, Path] = {}
+        self._sinks_collected: set[str] = set()
         self._trace_before: dict | None = None
 
     @property
@@ -481,7 +493,21 @@ class Sandbox:
         return False, None
 
     def _collect_sink(self, role: str) -> tuple[str | None, str | None]:
-        sink_log = read_sink_log(self._sink_logs[role])
+        """Read one sink's log into evidence, then judge it.
+
+        The hits are extended before any problem is decided: a failed sink
+        still captured real contacts, and evidence is never dropped because
+        its component errored.
+        """
+        try:
+            sink_log = read_sink_log(self._sink_logs[role])
+        except Exception as exc:
+            return f"could not read the sink log: {exc}", "SINK_LOG"
+        if role == "dns":
+            self.evidence.dns_hits.extend(sink_log.dns_hits)
+        else:
+            self.evidence.http_hits.extend(sink_log.http_hits)
+            self.evidence.tls_hits.extend(sink_log.tls_hits)
         if not sink_log.ready:
             return f"{role} sink log has no ready record", "SINK_FAILED"
         if sink_log.problems:
@@ -490,20 +516,19 @@ class Sandbox:
             return f"{role} sink log stopped at its size cap", "SINK_LOG"
         if not sink_log.stopped:
             return f"{role} sink log has no stopped record", "SINK_LOG"
-        if role == "dns":
-            self.evidence.dns_hits.extend(sink_log.dns_hits)
-        else:
-            self.evidence.http_hits.extend(sink_log.http_hits)
-            self.evidence.tls_hits.extend(sink_log.tls_hits)
         return None, None
 
     def collect_sinks(self) -> None:
         """Stop each sink, then read its log. A component is complete only when
-        the sink acknowledged the stop after draining everything it accepted."""
+        the sink acknowledged the stop after draining everything it accepted;
+        the log's hits land in evidence whatever the component's state."""
         for role in ("dns", "http"):
             container = self._sinks.get(role)
             if container is None:
                 continue  # never started, or its start already failed closed
+            if role in self._sinks_collected:
+                continue  # a second collection must not duplicate the hits
+            self._sinks_collected.add(role)
             components = self._sink_components(role)
             if not self._container_running(container):
                 problem, code = f"{role} sink container is not running at collection", "SINK_FAILED"
@@ -516,11 +541,14 @@ class Sandbox:
                     problem = f"{role} sink exited with code {exit_code} after stopping"
                     code = "SINK_FAILED"
                 else:
-                    problem, code = self._collect_sink(role)
-                if problem is None:
-                    for component in components:
-                        setattr(self.evidence.components, component, State.COMPLETE)
-                    continue
+                    problem, code = None, None
+            log_problem, log_code = self._collect_sink(role)
+            problem = problem or log_problem
+            code = code or log_code
+            if problem is None:
+                for component in components:
+                    setattr(self.evidence.components, component, State.COMPLETE)
+                continue
             for component in components:
                 setattr(self.evidence.components, component, State.ERROR)
             self.evidence.errors.append(RunError(code=code, message=f"{role}: {problem}"[:1000]))
@@ -589,6 +617,16 @@ class Sandbox:
         self.evidence.file_diffs = [
             FileDiff(path=path, change=change) for path, change in diff(self._trace_before, after)
         ]
+        marked = sorted(set(error_paths(self._trace_before)) | set(error_paths(after)))
+        if marked:
+            # The diffs are still evidence, but a snapshot that could not read
+            # every path cannot promise the diff is whole.
+            self._error(
+                "TRACE_INCOMPLETE",
+                f"a snapshot could not read: {_bounded_paths(marked)}",
+                component="trace",
+            )
+            return
         self.evidence.components.trace = State.COMPLETE
 
     def open_cage(self) -> None:
@@ -624,12 +662,7 @@ class Sandbox:
         return self._cage.attrs["State"]["Status"] == "running"
 
     def cage_running(self) -> bool:
-        if self._cage is None:
-            return False
-        try:
-            return self._cage_running()
-        except Exception:
-            return False
+        return self._cage is not None and self._container_running(self._cage)
 
     def _kill_lingering(self) -> None:
         """Kill every live cage process except PID 1 and the killer itself.
@@ -664,15 +697,53 @@ class Sandbox:
         if result.timed_out or result.output_truncated or result.exit_code != 0:
             self._error("EXEC_KILL_FAILED", "could not kill lingering processes inside the cage")
 
+    def _confirm_exec(self, exec_id, result: CommandResult, reached: bool, failure) -> None:
+        """Docker's own exec record is the only proof a stream end was the exit.
+
+        The stream's end proves nothing — docker-py turns a broken connection
+        into a clean end of stream, and the marker only proves the call
+        started — so the record must show the exec finished, and its ExitCode
+        is the code the scan reports. Timeout and output-cap stops are our own
+        kills and keep their existing error paths instead.
+        """
+        if result.timed_out or result.output_truncated:
+            return
+        try:
+            record = self._client.api.exec_inspect(exec_id)
+        except Exception as exc:
+            self._error("EXEC_TRANSPORT_FAILED", f"docker's exec record could not be read: {exc}")
+            return
+        if not isinstance(record, dict) or record.get("Running") is not False:
+            self._error(
+                "EXEC_TRANSPORT_FAILED",
+                "docker's exec record does not confirm the exec finished",
+            )
+            return
+        exit_code = record.get("ExitCode")
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+            self._error(
+                "EXEC_TRANSPORT_FAILED",
+                f"docker's exec record has no exit code ({exit_code!r})",
+            )
+            return
+        result.exit_code = exit_code
+        if failure is not None:
+            self._error("EXEC_TRANSPORT_FAILED", f"the exec stream broke mid-call: {failure}")
+        elif not reached:
+            self._error(
+                "EXEC_TRANSPORT_FAILED",
+                f"docker exec did not reach the cage (exit {exit_code})",
+            )
+
     def exec(self, argv: Sequence[str]) -> CommandResult:
-        """Run argv inside the open cage via docker exec; the cage itself stays up.
+        """Run argv inside the open cage via the SDK exec API; the cage stays up.
 
         The image's `timeout -s KILL` wrapper is the in-container kill on the
         tool deadline: the cage must survive the call, so the deadline cannot
         stop the container the way run_command's deadline does. That wrapper
         kills only its direct child, so every call then runs a trusted
         kill of every other live cage process (see _kill_lingering). The host
-        capture deadline is only a backstop for a hung exec client, and exit
+        capture deadline is only a backstop for a hung exec stream, and exit
         137 is the busybox wrapper's KILL result.
         """
         if (
@@ -703,21 +774,33 @@ class Sandbox:
             *argv,
         ]
         try:
-            result = capture_attached(
-                ["docker", "--host", self._docker_host, "exec", self._cage.id, *wrapped],
+            exec_id = self._client.api.exec_create(
+                self._cage.id,
+                wrapped,
+                user="65532:65532",
+                workdir="/repo",
+                privileged=False,
+                stdin=False,
+                tty=False,
+            )["Id"]
+        except Exception as exc:
+            self._error("EXEC_ERROR", str(exc))
+            raise SandboxError(str(exc)) from exc
+        try:
+            result, stream_failure = capture_exec(
+                self._client.api,
+                exec_id,
                 argv,
                 timeout_seconds=self.config.tool_timeout_seconds + 3,
                 max_output_bytes=self.config.max_output_bytes,
-                # The in-container wrapper owns process kills and the cage must
-                # not be stopped, so the backstop only reaps the attach client.
-                stop_container=lambda: None,
             )
         except Exception as exc:
             self._error("EXEC_ERROR", str(exc))
             raise SandboxError(str(exc)) from exc
+        reached = result.stderr.startswith(EXEC_START_MARKER)
+        self._confirm_exec(exec_id, result, reached, stream_failure)
         if result.exit_code == 137 and not result.timed_out:
             result.timed_out = True
-        reached = result.stderr.startswith(EXEC_START_MARKER)
         if reached:
             result.stderr = result.stderr[len(EXEC_START_MARKER) :].removeprefix("\n")
         try:
@@ -740,11 +823,6 @@ class Sandbox:
                 self._error(
                     "EXEC_OUTPUT_TRUNCATED",
                     f"tool call exceeded its {self.config.max_output_bytes} byte output limit",
-                )
-            if not reached and not result.timed_out and not result.output_truncated:
-                self._error(
-                    "EXEC_TRANSPORT_FAILED",
-                    f"docker exec did not reach the cage (exit {result.exit_code})",
                 )
         return result
 

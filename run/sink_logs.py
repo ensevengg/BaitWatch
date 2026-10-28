@@ -212,7 +212,17 @@ def read_sink_log(path: Path, *, max_bytes: int = DEFAULT_MAX_BYTES) -> SinkLog:
                         "frames past the per-connection budget were not captured"
                     )
             elif kind == "http":
+                hits_before = len(http_hits)
                 _append(http_hits, problems, number, _http_hit, record)
+                if len(http_hits) > hits_before and (
+                    record.get("body_truncated") is True or record.get("headers_truncated") is True
+                ):
+                    # A truncated capture is incomplete evidence, like a cut DNS
+                    # or TLS frame; the hit stays and so does this problem.
+                    problems.append(
+                        f"line {number}: http capture is incomplete; "
+                        "the request head or body was cut at a capture limit"
+                    )
             elif kind == "tls":
                 hits_before = len(tls_hits)
                 _append(tls_hits, problems, number, _tls_hit, record)

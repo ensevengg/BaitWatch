@@ -290,3 +290,17 @@ def test_tool_timeout_kills_the_process_inside_the_cage(repo: Path, engine):
     assert evidence.status == "error"
     assert "sleep 100" not in live
     assert_no_leftovers(engine, evidence)
+
+
+def test_a_tool_exit_code_is_confirmed_by_dockers_own_record(repo: Path, engine):
+    sandbox = Sandbox(repo, SandboxConfig(image=PYTHON_IMAGE, decoy_seconds=90))
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sh", "-c", "echo out; echo err >&2; exit 3"])
+    errors = sandbox.evidence.errors
+    assert not errors, [error.model_dump_json() for error in errors]
+    assert result.exit_code == 3  # from exec_inspect, not the streaming client
+    assert result.stdout == "out\n"
+    assert result.stderr == "err\n"
+    assert not result.timed_out
+    assert_no_leftovers(engine, sandbox.evidence)

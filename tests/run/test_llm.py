@@ -1,4 +1,5 @@
 import json
+import random
 import socket
 import threading
 import time
@@ -6,6 +7,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 import pytest
 
@@ -15,6 +17,7 @@ from run.llm import (
     OpenAICompatBackend,
     ScriptedBackend,
     ToolCall,
+    _parse_reply,
     make_backend,
 )
 
@@ -241,12 +244,57 @@ def test_openai_unfinished_replies_raise(finish_reason, with_tool_calls):
             backend.chat([], [])
 
 
-@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls", None])
+@pytest.mark.parametrize("finish_reason", ["stop", None, "missing"])
 def test_openai_finished_replies_are_accepted(finish_reason):
-    payload = {"choices": [{"finish_reason": finish_reason, "message": {"content": "done"}}]}
+    choice: dict[str, object] = {"message": {"content": "done"}}
+    if finish_reason != "missing":
+        choice["finish_reason"] = finish_reason
+    payload = {"choices": [choice]}
     with fake_server(reply(payload)) as server:
         backend = OpenAICompatBackend(server.base_url, "m")
         assert backend.chat([], []) == LLMReply(text="done")
+
+
+@pytest.mark.parametrize(
+    "finish_reason",
+    ["length", "content_filter", "max_tokens", "error", "tool_use", "bogus", "", 5, True, [], {}],
+)
+@pytest.mark.parametrize("with_tool_calls", [False, True])
+def test_openai_any_other_finish_reason_raises(finish_reason, with_tool_calls):
+    message: dict[str, object] = {"content": "partial"}
+    if with_tool_calls:
+        message["tool_calls"] = [{"id": "call_1", "function": {"name": "noop", "arguments": "{}"}}]
+    payload = {"choices": [{"finish_reason": finish_reason, "message": message}]}
+    with fake_server(reply(payload)) as server:
+        backend = OpenAICompatBackend(server.base_url, "m")
+        with pytest.raises(LLMError, match="did not finish"):
+            backend.chat([], [])
+
+
+def test_openai_tool_calls_reason_without_calls_raises():
+    payload = {"choices": [{"finish_reason": "tool_calls", "message": {"content": "no calls"}}]}
+    with fake_server(reply(payload)) as server:
+        backend = OpenAICompatBackend(server.base_url, "m")
+        with pytest.raises(LLMError, match="tool calls"):
+            backend.chat([], [])
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls", None, "missing"])
+def test_openai_replies_with_calls_are_tool_steps_whatever_stop_servers_send(finish_reason):
+    message = {
+        "content": None,
+        "tool_calls": [
+            {"id": "call_1", "type": "function", "function": {"name": "noop", "arguments": "{}"}}
+        ],
+    }
+    choice: dict[str, object] = {"message": message}
+    if finish_reason != "missing":
+        choice["finish_reason"] = finish_reason
+    with fake_server(reply({"choices": [choice]})) as server:
+        backend = OpenAICompatBackend(server.base_url, "m")
+        assert backend.chat([], []) == LLMReply(
+            tool_calls=[ToolCall(name="noop", arguments={}, id="call_1")]
+        )
 
 
 def test_openai_text_reply_without_calls_or_key(monkeypatch):
@@ -520,3 +568,198 @@ def test_make_backend_openai():
 def test_make_backend_rejects_bad_specs(spec):
     with pytest.raises(ValueError):
         make_backend(spec)
+
+
+def _random_json_value(rng: random.Random, depth: int = 0) -> Any:
+    kinds = ["str", "int", "float", "bool", "none"]
+    if depth < 4:
+        kinds += ["dict", "list"]
+    kind = rng.choice(kinds)
+    if kind == "str":
+        return "".join(rng.choice('ab"\\\n\t xé\U0001f600') for _ in range(rng.randrange(0, 12)))
+    if kind == "int":
+        return rng.randrange(-(10**12), 10**12)
+    if kind == "float":
+        return rng.choice([0.5, -1.25, 1e300])
+    if kind == "bool":
+        return rng.choice([True, False])
+    if kind == "none":
+        return None
+    if kind == "dict":
+        return {
+            rng.choice("abc"): _random_json_value(rng, depth + 1)
+            for _ in range(rng.randrange(0, 4))
+        }
+    return [_random_json_value(rng, depth + 1) for _ in range(rng.randrange(0, 4))]
+
+
+def _random_arguments_json(rng: random.Random) -> str:
+    roll = rng.random()
+    if roll < 0.5:
+        return json.dumps(_random_json_value(rng))
+    if roll < 0.7:
+        return "{" * rng.randrange(1, 10)
+    if roll < 0.9:
+        return "9" * rng.randrange(1, 6000)
+    return "[" * 250000 + "]" * 250000
+
+
+def _random_body(rng: random.Random) -> bytes:
+    roll = rng.random()
+    if roll < 0.4:
+        return json.dumps(_random_json_value(rng)).encode()
+    if roll < 0.9:
+        message: dict[str, Any] = {}
+        if rng.random() < 0.8:
+            message["content"] = rng.choice([None, "text", 5, ["list"]])
+        if rng.random() < 0.8:
+            message["tool_calls"] = rng.choice(
+                [
+                    {},
+                    "no",
+                    [
+                        rng.choice(
+                            [
+                                None,
+                                5,
+                                {"id": rng.choice(["c1", 5, None])},
+                                {"function": rng.choice([None, {}, "f"])},
+                                {
+                                    "function": {
+                                        "name": rng.choice(["t", "", 5]),
+                                        "arguments": _random_arguments_json(rng),
+                                    }
+                                },
+                            ]
+                        )
+                        for _ in range(rng.randrange(0, 3))
+                    ],
+                ]
+            )
+        choice: dict[str, Any] = {"message": message}
+        if rng.random() < 0.7:
+            choice["finish_reason"] = rng.choice(
+                ["stop", "tool_calls", None, "length", "content_filter", 5]
+            )
+        return json.dumps({"choices": rng.choice([[choice], [], ["x"], [choice, choice]])}).encode()
+    if roll < 0.95:
+        return ("[" * 250000 + "]" * 250000).encode()
+    return ("9" * rng.randrange(1, 6000)).encode()
+
+
+def test_parse_reply_returns_a_reply_or_an_llm_error_never_anything_else():
+    rng = random.Random(20261028)
+    for case in range(300):
+        body = _random_body(rng)
+        try:
+            reply = _parse_reply(body)
+        except LLMError:
+            continue
+        except Exception as exc:
+            pytest.fail(f"case {case}: _parse_reply raised {type(exc).__name__}: {exc}")
+        assert isinstance(reply, LLMReply)
+        assert isinstance(reply.text, str)
+        for call in reply.tool_calls:
+            assert isinstance(call, ToolCall)
+            assert isinstance(call.name, str) and call.name
+            assert isinstance(call.arguments, dict)
+            assert isinstance(call.id, str)
+
+
+def test_parse_reply_roundtrips_tool_names_and_arguments():
+    rng = random.Random(20261029)
+    for _ in range(300):
+        text = rng.choice([None, "", "checking", "a€\U0001f600b"])
+        calls = [
+            {
+                "id": f"call-{index}",
+                "type": "function",
+                "function": {
+                    "name": rng.choice(["read_file", "run_cmd", "tél"]),
+                    "arguments": json.dumps(
+                        {
+                            rng.choice("abc"): _random_json_value(rng, 2)
+                            for _ in range(rng.randrange(0, 4))
+                        }
+                    ),
+                },
+            }
+            for index in range(rng.randrange(0, 4))
+        ]
+        message = {"tool_calls": calls} if calls else {"content": text}
+        content_sent = not calls
+        if calls and rng.random() < 0.5:
+            message["content"] = text
+            content_sent = True
+        finish_reason = "tool_calls" if calls else rng.choice(["stop", None])
+        body = json.dumps(
+            {"choices": [{"finish_reason": finish_reason, "message": message}]}
+        ).encode()
+        reply = _parse_reply(body)
+        assert isinstance(reply, LLMReply)
+        assert reply.text == ((text or "") if content_sent else "")
+        for parsed, raw in zip(reply.tool_calls, calls, strict=True):
+            assert parsed.name == raw["function"]["name"]
+            assert parsed.id == raw["id"]
+            assert parsed.arguments == json.loads(raw["function"]["arguments"])
+
+
+def _mutate(rng: random.Random, text: str) -> str:
+    for _ in range(rng.randrange(0, 4)):
+        if not text:
+            text = rng.choice(":#sox")
+            continue
+        position = rng.randrange(len(text))
+        action = rng.random()
+        if action < 0.4:
+            text = text[:position] + rng.choice(":#/\\ .téx") + text[position:]
+        elif action < 0.8:
+            text = text[:position] + text[position + 1 :]
+        else:
+            text = text[:position] + rng.choice(":x#") + text[position + 1 :]
+    return text
+
+
+def test_make_backend_returns_or_raises_only_value_error_or_llm_error(monkeypatch):
+    monkeypatch.setenv(ENV, SECRET)
+    templates = [
+        "",
+        ":",
+        "scripted",
+        "scripted:",
+        "scripted:/tmp/does-not-exist.json",
+        "ollama:",
+        "ollama:llama3.1:8b",
+        "openai:",
+        "openai:http://127.0.0.1:1/v1#m",
+        f"openai:http://127.0.0.1:1/v1#m#{ENV}",
+        "openai:ftp://127.0.0.1:1/v1#m#env",
+        "unknown:whatever",
+    ]
+    rng = random.Random(20261030)
+    specs = [_mutate(rng, rng.choice(templates)) for _ in range(300)]
+    specs += [
+        "".join(rng.choice(":#/\\ab01 .\t") for _ in range(rng.randrange(0, 24)))
+        for _ in range(200)
+    ]
+    for spec in specs:
+        try:
+            backend = make_backend(spec)
+        except (ValueError, LLMError) as exc:
+            assert SECRET not in str(exc)
+        except Exception as exc:
+            pytest.fail(f"make_backend({spec!r}) raised {type(exc).__name__}: {exc}")
+        else:
+            assert callable(backend.chat)
+            assert SECRET not in repr(backend)
+
+
+def test_make_backend_rejects_hostile_scripted_files(tmp_path):
+    deep = tmp_path / "deep.json"
+    deep.write_text("[" * 250000 + "]" * 250000)
+    with pytest.raises(LLMError):
+        make_backend(f"scripted:{deep}")
+    huge = tmp_path / "huge.json"
+    huge.write_text("[9" + "9" * 5000 + "]")
+    with pytest.raises(LLMError):
+        make_backend(f"scripted:{huge}")

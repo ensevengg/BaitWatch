@@ -1,5 +1,6 @@
 """Decoy loop unit tests; fakes only, nothing runs in Docker or on the host."""
 
+import random
 import time
 from types import SimpleNamespace
 
@@ -7,7 +8,7 @@ import pytest
 from typer.testing import CliRunner
 
 from run.cli import app
-from run.decoy import DEFAULT_TASK, FEEDBACK_CHARS, READ_BYTES, run_decoy
+from run.decoy import DEFAULT_TASK, FEEDBACK_CHARS, READ_BYTES, _feedback, _run_tool, run_decoy
 from run.evidence import CommandResult, RunComponents, RunError, RunEvidence, State
 from run.llm import LLMError, LLMReply, ToolCall
 from run.sandbox import SandboxError
@@ -307,3 +308,131 @@ def test_decoy_cli_error_exits_three(monkeypatch, tmp_path):
     monkeypatch.setattr("run.cli.detonate", lambda *args, **kwargs: evidence)
     result = runner.invoke(app, ["decoy", str(tmp_path), "--llm", "scripted:steps.json"])
     assert result.exit_code == 3
+
+
+def test_feedback_is_bounded_and_never_empty_for_arbitrary_output():
+    # Code points, not UTF-16 units or bytes, must set the bound: astral characters
+    # are one slice element each in Python but two in a wire encoding.
+    pool = "axé\U0001f600\n\r\t\x00\x7f- "
+    rng = random.Random(20261028)
+    for _ in range(300):
+        result = CommandResult(
+            command=["sh"],
+            stdout="".join(rng.choice(pool) for _ in range(rng.randrange(0, 2 * FEEDBACK_CHARS))),
+            stderr="".join(rng.choice(pool) for _ in range(rng.randrange(0, FEEDBACK_CHARS))),
+            exit_code=rng.choice([None, 0, 1, 137]),
+            timed_out=rng.random() < 0.3,
+        )
+        feedback = _feedback(result)
+        assert isinstance(feedback, str)
+        assert feedback
+        assert len(feedback) <= FEEDBACK_CHARS + 100
+        full = "\n".join([text for text in (result.stdout, result.stderr) if text])
+        assert feedback.startswith(full[:FEEDBACK_CHARS])
+        if len(full) > FEEDBACK_CHARS:
+            assert "[truncated" in feedback
+
+
+_TOOL_ARGUMENTS = [
+    {},
+    {"path": ""},
+    {"path": "README.md"},
+    {"path": "-rf /"},
+    {"path": "a\0b"},
+    {"path": 5},
+    {"path": None},
+    {"command": "echo hi"},
+    {"command": ""},
+    {"command": "\0"},
+    {"command": ["echo", "hi"]},
+    {"command": {"k": "v"}},
+    "not-a-dict",
+    None,
+    7,
+]
+
+
+def test_run_tool_never_raises_and_only_execs_known_argv():
+    names = ["read_file", "list_files", "run_cmd", "rm_rf", "", " read_file", 5, None, True]
+
+    class Recording:
+        def __init__(self):
+            self.evidence = RunEvidence()
+            self.argv: list[str] | None = None
+            self.config = SimpleNamespace(decoy_seconds=120)
+            self.alive = True
+
+        def cage_running(self):
+            return True
+
+        def exec(self, argv):
+            self.argv = list(argv)
+            return CommandResult(command=list(argv))
+
+    rng = random.Random(20261029)
+    for _ in range(300):
+        name = rng.choice(names)
+        call = ToolCall(name=name, arguments=rng.choice(_TOOL_ARGUMENTS), id="c")
+        sandbox = Recording()
+        result, feedback = _run_tool(sandbox, call)
+        assert isinstance(result, CommandResult) and result.command
+        assert isinstance(feedback, str) and feedback
+        if sandbox.argv is None:
+            assert feedback.startswith("tool error:")
+            assert result.exit_code is None
+            continue
+        argv = sandbox.argv
+        value = argv[-1]
+        assert isinstance(value, str) and value and "\0" not in value
+        assert result.command == [name, value]
+        if name == "read_file":
+            assert argv == ["head", "-c", str(READ_BYTES), "--", value]
+        elif name == "list_files":
+            assert argv == ["ls", "-la", "--", value]
+        else:
+            assert name == "run_cmd" and argv == ["sh", "-c", value]
+
+
+def test_run_decoy_ends_complete_or_fails_closed_for_arbitrary_model_behaviour():
+    class Sequencing:
+        def __init__(self, replies):
+            self.replies = list(replies)
+            self.index = 0
+
+        def chat(self, messages, tools):
+            reply = self.replies[min(self.index, len(self.replies) - 1)]
+            self.index += 1
+            for message in messages:
+                assert message["role"] in {"system", "assistant", "tool"}
+            return reply
+
+    rng = random.Random(20261030)
+    for _ in range(150):
+        replies = []
+        for _ in range(rng.randrange(0, 3)):
+            if rng.random() < 0.25:
+                replies.append(LLMReply(text=rng.choice(["", "working", "done"])))
+            else:
+                replies.append(
+                    LLMReply(
+                        tool_calls=[
+                            ToolCall(
+                                name=rng.choice(["read_file", "list_files", "run_cmd", "bogus"]),
+                                arguments=rng.choice(_TOOL_ARGUMENTS),
+                                id=f"call-{index}",
+                            )
+                            for index in range(rng.randrange(1, 3))
+                        ]
+                    )
+                )
+        replies.append(LLMReply(text="done"))
+        sandbox = FakeSandbox()
+        run_decoy(sandbox, Sequencing(replies), max_steps=rng.randrange(1, 4))
+        evidence = sandbox.evidence
+        assert evidence.components.decoy in (State.COMPLETE, State.ERROR)
+        if evidence.components.decoy == State.ERROR:
+            assert evidence.errors and evidence.status == "error"
+        else:
+            assert not evidence.errors and evidence.status != "error"
+        for entry in evidence.tool_log:
+            assert entry.command
