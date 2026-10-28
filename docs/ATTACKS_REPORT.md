@@ -7,9 +7,9 @@
 **Report date:** 2026-10-29
 **Local commits:** `843282c`, `334df98`, `78e3ad5`, `cb2d012`, `0bd106c`,
 `c30cab9`, `3a029a5`, `228a1ae`, `52c3e32`, `acea601`, `9e4ce3e`, `72b2af6`,
-`b5622c8`, `6d9a59e`, plus the PR #13 review-fix commit. The tree was rebased
-onto `origin/main` twice (first onto `f9f7083`, then onto `1b8d7b8` after PR #10
-merged), so the hashes differ from the pre-rebase report.
+`b5622c8`, `6d9a59e`, and `ace52f7` (the PR #13 review fixes). The tree was
+rebased onto `origin/main` twice (first onto `f9f7083`, then onto `1b8d7b8` after
+PR #10 merged), so the hashes differ from the pre-rebase report.
 
 This report is the audit trail for the ATTACK side: every file, every contract,
 every command, and the exact verification result. Open it in Cursor with
@@ -979,9 +979,9 @@ Exit codes:
 
 | Check | Result |
 |---|---|
-| `git status` | clean after the review-fix commit |
+| `git status` | clean after the review-fix commit `ace52f7` |
 | branch | `main` = `origin/aditya/attack-slice`; PR #13 open |
-| CI | green on the review-fix commit (both jobs) |
+| CI | `ace52f7` green: runs `40789984001` and `40789987188`, both jobs `pass` |
 | ruff check | pass |
 | ruff format check | 61 files formatted |
 | generated tree | 57 files, no drift |
