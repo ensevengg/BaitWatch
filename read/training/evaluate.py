@@ -7,6 +7,8 @@
 - Benign corpus (local clones, see read.data.benign_corpus): file- and
   repo-level FPR through the *shipped* pipeline — ``read.scan`` itself
   (decoders, blob masking, caps; judge off), one scan per corpus repo.
+  ``--judge-benign-corpus`` measures the judge-on FPR instead; the two
+  numbers are not interchangeable.
 - Test split: per-source precision/recall/F1 at the pinned threshold.
 
     python -m read.training.evaluate <checkpoint> --out read/results/v1_metrics.json
@@ -88,18 +90,22 @@ def injecagent_recall(det: Detector, threshold: float) -> dict:
 
 
 def benign_fpr(det: Detector, chunker: Chunker | None, corpus_dir: Path,
-               threshold: float, review_low: float | None = None) -> dict:
-    """FPR through ``read.scan`` (judge off), one scan per corpus repo.
+               threshold: float, review_low: float | None = None,
+               judge: bool = False) -> dict:
+    """FPR through ``read.scan``, one scan per corpus repo.
 
-    ``corpus_dir`` holding repo directories is scanned repo by repo (the
-    hook's unit of decision); a directory with files at its top level is
-    scanned as a single repo. ``chunker`` is unused (kept for callers).
+    Judge off by default; with ``judge=True`` the judge is left enabled, so
+    the result is the judge-on FPR — a different number from the default
+    judge-off one. ``corpus_dir`` holding repo directories is scanned repo
+    by repo (the hook's unit of decision); a directory with files at its top
+    level is scanned as a single repo. ``chunker`` is unused (kept for
+    callers).
     """
     from read.scan import scan
 
     corpus_dir = Path(corpus_dir)
     cfg = config_from_model_config(ReadConfig())
-    cfg.judge.enabled = False
+    cfg.judge.enabled = judge
     cfg.walker.max_files = 1_000_000
     cfg.flag_threshold = threshold
     if review_low is not None:
@@ -124,6 +130,8 @@ def benign_fpr(det: Detector, chunker: Chunker | None, corpus_dir: Path,
             "files": result.stats.files_scanned,
             "flagged_files": len(repo_flagged),
             "review_band_chunks": result.stats.reviewed,
+            "judge_calls": result.stats.judge_calls,
+            "read_verdict": result.read_verdict,
             "elapsed_s": result.stats.elapsed_s,
         }
     if not files:
@@ -137,6 +145,7 @@ def benign_fpr(det: Detector, chunker: Chunker | None, corpus_dir: Path,
         "repos": len(repos),
         "repos_flagged": sum(1 for r in per_repo.values() if r["flagged_files"]),
         "review_band_chunks": band_chunks,
+        "judge_enabled": judge,
         "per_repo": per_repo,
         "flagged_file_list": flagged_files[:40],
     }
@@ -183,7 +192,8 @@ def test_split_metrics(det: Detector, data_dir: Path, threshold: float) -> dict:
 
 
 def evaluate(checkpoint: Path, data_dir: Path, corpus_dir: Path | None,
-             thresholds: dict | None = None, batch_size: int = 64) -> dict:
+             thresholds: dict | None = None, batch_size: int = 64,
+             judge_benign_corpus: bool = False) -> dict:
     cfg = ReadConfig()
     th = thresholds or {}
     flag = float(th.get("flag_threshold", cfg.flag_threshold))
@@ -201,8 +211,9 @@ def evaluate(checkpoint: Path, data_dir: Path, corpus_dir: Path | None,
         "test_split": test_split_metrics(det, Path(data_dir), flag),
     }
     if corpus_dir is not None and Path(corpus_dir).exists():
-        result["benign_corpus"] = benign_fpr(det, chunker, Path(corpus_dir), flag,
-                                             review_low=th.get("review_low"))
+        result["benign_corpus"] = benign_fpr(
+            det, chunker, Path(corpus_dir), flag,
+            review_low=th.get("review_low"), judge=judge_benign_corpus)
     result["elapsed_s"] = round(time.time() - started, 1)
     return result
 
@@ -216,13 +227,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="local clone of the benign corpus (optional)")
     parser.add_argument("--thresholds", default=None,
                         help="path to thresholds.json (defaults to checkpoint's)")
+    parser.add_argument("--judge-benign-corpus", action="store_true",
+                        help="measure the benign corpus with the judge enabled "
+                             "(default: judge off); the FPRs are not interchangeable")
     parser.add_argument("--out", default=None, help="write the JSON report here")
     args = parser.parse_args(argv)
 
     th_path = Path(args.thresholds) if args.thresholds else Path(args.checkpoint) / "thresholds.json"
     th = json.loads(th_path.read_text(encoding="utf-8")) if th_path.exists() else None
     result = evaluate(Path(args.checkpoint), Path(args.data_dir),
-                      Path(args.corpus_dir) if args.corpus_dir else None, th)
+                      Path(args.corpus_dir) if args.corpus_dir else None, th,
+                      judge_benign_corpus=args.judge_benign_corpus)
     text = json.dumps(result, indent=2)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
