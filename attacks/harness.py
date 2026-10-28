@@ -151,7 +151,12 @@ class GateReport:
 
     @property
     def ok(self) -> bool:
-        return not self.missed and not self.extra and not self.incomplete
+        return (
+            not self.missed
+            and not self.extra
+            and not self.incomplete
+            and self.recovered == self.recoverable
+        )
 
     def as_dict(self) -> dict:
         return {
@@ -219,7 +224,7 @@ def read_scanner(root: str | Path) -> ScanOutcome:
     try:
         from read.config import ReadConfig
         from read.scan import scan
-    except ModuleNotFoundError as exc:  # pragma: no cover - GPU machines only
+    except ModuleNotFoundError as exc:
         raise RuntimeError(
             f"the READ scanner is missing a dependency ({exc}); install "
             "torch and transformers, or use --scanner keyword on CPU"

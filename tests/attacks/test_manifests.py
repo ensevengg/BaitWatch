@@ -144,6 +144,14 @@ def test_bad_layer_is_rejected() -> None:
         validate_manifest(broken)
 
 
+def test_missing_decoded_hash_is_rejected() -> None:
+    _path, manifest = MANIFESTS[-1]
+    broken = deepcopy(manifest)
+    del broken["entries"][0]["decoded_sha256"]
+    with pytest.raises(ManifestError, match="decoded_sha256"):
+        validate_manifest(broken)
+
+
 def test_wrong_span_is_rejected() -> None:
     path, manifest = MANIFESTS[0]
     broken = deepcopy(manifest)

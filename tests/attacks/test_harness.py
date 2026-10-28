@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
@@ -83,11 +82,20 @@ def test_keyword_scanner_skips_manifest(tmp_path: Path) -> None:
     assert harness.keyword_scanner(tmp_path).flagged == {}
 
 
-def test_read_scanner_is_lazy_without_torch() -> None:
-    if importlib.util.find_spec("torch") is not None:
-        pytest.skip("torch is installed; the real scanner is available")
-    with pytest.raises(RuntimeError, match="needs torch"):
-        harness.read_scanner(REPOS / "readme-bait-curl")
+def test_read_scanner_reports_a_missing_dependency(monkeypatch, tmp_path: Path) -> None:
+    """The lazy import is the CI guard, so exercise it with or without torch."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name in ("read.config", "read.scan"):
+            raise ModuleNotFoundError("No module named 'torch'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(RuntimeError, match="missing a dependency.*install torch"):
+        harness.read_scanner(tmp_path)
 
 
 def test_cli_json_report(capsys: pytest.CaptureFixture[str]) -> None:
@@ -104,3 +112,26 @@ def test_recovery_counts_every_generated_payload() -> None:
         recovered, total = harness.recover_generated(name)
         assert total == len(repo.entries)
         assert recovered == total
+
+
+def test_gate_report_fails_when_recovery_is_incomplete() -> None:
+    report = harness.GateReport(
+        repo="demo",
+        layer="READ",
+        expected={"README.md"},
+        flagged={"README.md"},
+        missed=set(),
+        extra=set(),
+        incomplete=False,
+        recovered=1,
+        recoverable=2,
+        scanner="keyword",
+    )
+    assert not report.ok
+    report.recovered = 2
+    assert report.ok
+
+
+def test_cli_exits_nonzero_when_recovery_is_incomplete(monkeypatch) -> None:
+    monkeypatch.setattr(harness, "recover_generated", lambda _name: (0, 3))
+    assert harness.main(["--repo", "readme-bait-curl"]) == 1

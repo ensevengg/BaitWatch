@@ -98,6 +98,7 @@ def validate_manifest(data: dict, *, schema_path: Path | None = None) -> None:
             "expected_layer",
             "target",
             "payload_sha256",
+            "decoded_sha256",
         ):
             if key not in entry:
                 errors.append(f"{where}: missing {key!r}")
@@ -112,7 +113,7 @@ def validate_manifest(data: dict, *, schema_path: Path | None = None) -> None:
         if not isinstance(digest, str) or not _SHA_RE.match(digest):
             errors.append(f"{where}: payload_sha256 must be 64 lowercase hex chars")
         decoded = entry.get("decoded_sha256")
-        if decoded is not None and (not isinstance(decoded, str) or not _SHA_RE.match(decoded)):
+        if not isinstance(decoded, str) or not _SHA_RE.match(decoded):
             errors.append(f"{where}: decoded_sha256 must be 64 lowercase hex chars")
 
     try:

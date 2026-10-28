@@ -28,7 +28,8 @@
         "encoding",
         "expected_layer",
         "target",
-        "payload_sha256"
+        "payload_sha256",
+        "decoded_sha256"
       ],
       "properties": {
         "file": { "type": "string", "minLength": 1 },
