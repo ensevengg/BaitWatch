@@ -2,9 +2,14 @@
 
 **Owner:** Aditya (`Shellghostt`)
 **Repository:** `D:\Hackathon\BaitWatch` (clone of `ensevengg/BaitWatch`)
-**Branch:** `main`
+**Branch:** `main`, 11 commits ahead of `origin/main` (`1b8d7b8`), pushed as
+`aditya/attack-slice` (PR not opened yet)
 **Report date:** 2026-10-28
-**Local commits:** `3d33167`, `6f6478a`, `f2756d5`, `84b94e3` (not pushed)
+**Local commits:** `843282c`, `334df98`, `78e3ad5`, `cb2d012`, `0bd106c`,
+`c30cab9`, `3a029a5`, `228a1ae`, `52c3e32`, `acea601`, plus the commit that
+added this update. The tree was rebased onto `origin/main` twice (first onto
+`f9f7083`, then onto `1b8d7b8` after PR #10 merged), so the hashes differ from
+the pre-rebase report.
 
 This report is the audit trail for the ATTACK side: every file, every contract,
 every command, and the exact verification result. Open it in Cursor with
@@ -39,27 +44,36 @@ require the fine-tuned READ checkpoint or the training corpus.
 | Test-data marker | `.baitwatch-test-data` in every repo | `test_every_repo_is_marked_as_test_data` |
 | De-Caffeinator credit without external URLs | root README + `attacks/README.md` | `test_attack_readme_names_prior_work_without_a_url` |
 
-**Test result on this machine:** `148 collected`, `147 passed`, `1 skipped`,
+**Test result on this machine:** `153 collected`, `153 passed`, `0 skipped`,
 `0 failed`.
 
-The single skip is `test_read_scanner_is_lazy_without_torch`: it only runs when
-torch is **absent**, and torch is now installed. It is a guard test, not a
-failure.
+The former skip (`test_read_scanner_is_lazy_without_torch`) is gone. It was
+rewritten as `test_read_scanner_reports_a_missing_dependency`, which blocks
+`read.config`/`read.scan` through `builtins.__import__`, so the lazy-import
+guard runs on a machine with torch installed too.
 
 ---
 
 ## 2. Commit history
 
 ```text
-84b94e3  fix(attacks): forward --help to the subcommand
-f2756d5  fix(attacks): ship the corpus dotfiles in the wheel
-6f6478a  fix: real READ path on Windows and actionable checkpoint errors
-3d33167  feat(attacks): attack corpus, decoder plugin, and agent hook
-35b3df2  Merge pull request #3 from ensevengg/read/audit-fixes   (base)
+acea601  fix(attacks): shorten the missing-checkpoint error
+52c3e32  fix(read): refuse a POSIX pinned checkpoint on Windows
+228a1ae  fix(hooks): use one gate casing on the crash path
+3a029a5  fix(attacks): stop registering decoders READ already ships
+c30cab9  fix(attacks): make recovery and decoded hashes part of the gate contract
+0bd106c  docs: add the ATTACK slice verification report
+cb2d012  fix(attacks): forward --help to the subcommand
+78e3ad5  fix(attacks): ship the corpus dotfiles in the wheel
+334df98  fix: real READ path on Windows and actionable checkpoint errors
+843282c  feat(attacks): attack corpus, decoder plugin, and agent hook
+1b8d7b8  Merge PR #10: DNS/HTTP/TLS sinks and a file trace (base, origin/main)
 ```
 
-`git status --short` is clean at `84b94e3`; only this report is added after
-that commit.
+`git status --short` is clean after the report commit above. The work was
+rebased onto `origin/main` twice, so the branch is now `ahead 11, behind 0`.
+It is pushed as `aditya/attack-slice`, and CI run `40732966171` passed both
+jobs, including `ATTACK repos, decoders and hook`.
 
 ### 2.1 Files changed in the existing tree
 
@@ -69,10 +83,11 @@ that commit.
 | `pyproject.toml` | packages `attacks*`, `hooks*`; scripts `baitwatch-hook`, `baitwatch-attacks`; package data for the generated tree, with explicit dotfile patterns so the wheel ships all 57 artifacts |
 | `.github/workflows/ci.yml` | new `attacks-hooks` job (ruff, `attacks check`, `pytest tests/attacks`) |
 | `read/judge.py` | `fcntl` is optional on Windows; the spend ledger keeps the thread lock |
+| `read/config.py` | a POSIX pinned checkpoint is refused on Windows with the real path in the error instead of a `\home\...` Path |
 
-No changes were made to `read/decoders.py`, `read/scan.py`, `read/config.py`,
-`run/`, or `docs/verdict.schema.json`. The decoder plugin plugs into the
-existing documented extension point.
+No changes were made to `read/decoders.py`, `read/scan.py`, `run/`, or
+`docs/verdict.schema.json`. The decoder plugin plugs into the existing
+documented extension point.
 
 ---
 
@@ -106,8 +121,10 @@ existing documented extension point.
 | GPU | optional | CPU torch is enough for correctness, slower than real time |
 
 The READ scanner now **imports** on Windows, but a real scan still stops at
-`FileNotFoundError: pinned checkpoint missing`. That is data, not a code error.
-The harness turns it into one actionable line and the hook fails closed.
+the missing `v15f_22m` checkpoint. The pin stores a POSIX path, so Windows
+raises an explicit message instead of inventing `\home\enseven\...`; that is
+data, not a code error. The harness turns it into one actionable line and the
+hook fails closed.
 
 ---
 
@@ -121,11 +138,11 @@ The harness turns it into one actionable line and the hook fails closed.
 | `attacks/__main__.py` | 85 | `python -m attacks` dispatcher |
 | `attacks/build.py` | 144 | write / check / prune the generated tree |
 | `attacks/decoderlib.py` | 55 | load `read.decoders` without importing torch |
-| `attacks/decoders.py` | 74 | external READ plugin; registers only missing channels |
-| `attacks/harness.py` | 364 | stage repo, scan, compare against manifest, recovery count |
+| `attacks/decoders.py` | 100 | external READ plugin; registers only missing channels |
+| `attacks/harness.py` | 369 | stage repo, scan, compare against manifest, recovery count |
 | `attacks/leakage.py` | 361 | exact / embedded / fuzzy payload-vs-corpus check |
 | `attacks/lint.py` | 185 | URL, domain, IP, credential, `.env` safety lint |
-| `attacks/manifests.py` | 194 | load, validate, span hash, expected-file sets |
+| `attacks/manifests.py` | 195 | load, validate, span hash, expected-file sets |
 | `attacks/synth/generate.py` | 1097 | the single source of truth for repos, examples, manifests |
 | `attacks/synth/seeds.py` | 124 | three disjoint seed pools |
 | `attacks/synth/templates.py` | 84 | believable project shells |
@@ -146,7 +163,7 @@ Generated tree size: **57 files** (`build.build_tree()`), of which
 | `hooks/__main__.py` | 6 | `python -m hooks` entry |
 | `hooks/cache.py` | 129 | verdict cache keyed by repo + git HEAD + model tag |
 | `hooks/cli.py` | 305 | stdin/stdout protocol, selftest, status, install, cache |
-| `hooks/guard.py` | 492 | Gate A/B logic, tool policy, fail-closed |
+| `hooks/guard.py` | 502 | Gate A/B logic, tool policy, fail-closed |
 | `hooks/install.py` | 165 | Claude Code settings merge/uninstall |
 
 ### 4.3 `tests/attacks/` — CPU regression suite
@@ -155,16 +172,16 @@ Generated tree size: **57 files** (`build.build_tree()`), of which
 |---|---:|---|
 | `test_build.py` | 6 | determinism, drift, LF, manifest JSON, wheel cover |
 | `test_cli.py` | 2 | `--help` reaches the subcommand, top-level help |
-| `test_decoders.py` | 10 | plugin registration, each new channel, broken decoder isolation |
+| `test_decoders.py` | 11 | plugin registration, each new channel, builtin drift |
 | `test_docs.py` | 5 | docs exist, demo under 3:00, hook docs, credit |
-| `test_harness.py` | 11 | staging, recall, extras, incomplete, CLI |
-| `test_hooks.py` | 37 | tool policy, gates, cache, installer, CLI, timing |
+| `test_harness.py` | 13 | staging, recall, extras, incomplete, recovery, CLI |
+| `test_hooks.py` | 38 | tool policy, gates, cache, installer, CLI, timing |
 | `test_leakage.py` | 11 | exact/embedded/fuzzy, skip, parquet |
 | `test_lint.py` | 10 | URL/domain/IP/key/.env rules |
-| `test_manifests.py` | 14 | schema, hashes, spans, neutrality, coverage |
+| `test_manifests.py` | 15 | schema, hashes, spans, neutrality, coverage |
 | `test_repos.py` | 13 | 5 repos, markers, recovery, layers, encodings |
 | `test_transforms.py` | 29 | round trip per transform, invisibility, plugin set |
-| **Total** | **148** | |
+| **Total** | **153** | |
 
 ### 4.4 Other new paths
 
@@ -173,6 +190,7 @@ Generated tree size: **57 files** (`build.build_tree()`), of which
 | `demo/run_demo.sh` | executable three-minute beat sheet |
 | `demo/README.md` | beat table, expected output, notes |
 | `docs/HOOKS.md` | hook install, wire format, policy, fail-closed matrix |
+| `docs/DECOY_TRIAL.md` | Muse Spark 10-run decoy protocol (blocked on Linux + Docker) |
 | `docs/ATTACKS_REPORT.md` | this report |
 
 ---
@@ -298,9 +316,11 @@ Rules enforced by `attacks/manifests.py`:
 |---|---|
 | JSON object, required keys, `schema_version == 1` | `validate_manifest` |
 | `expected_layer` in `READ`, `RUN`, `both` | `validate_manifest` |
-| `payload_sha256` / `decoded_sha256` are 64 lowercase hex | `validate_manifest` |
+| **both** `payload_sha256` and `decoded_sha256` present | `validate_manifest`, JSON Schema `required` |
+| both hashes are 64 lowercase hex | `validate_manifest` |
 | `end_line >= line`, line within file | `span_text`, `verify_hashes` |
 | span hash matches disk | `verify_hashes` |
+| decoded hash matches the regenerated seed | `leakage._manifest_hashes` |
 | expected files for a layer | `expected_files` |
 | all answer-key files | `all_entry_files` |
 
@@ -323,7 +343,7 @@ seed in decode_payload(encode_seed(seed, channel), channel)
 | plain | no (built-in) | yes | identity |
 | base64 | no (built-in) | yes | runs of 24+ chars, validated |
 | hex | no (built-in) | yes | runs of 16+ bytes |
-| rot13 | **yes** | inside `js_eval` | line-level and whole-text candidate |
+| rot13 | no (built-in since v1.5f) | inside `js_eval` | line-level and whole-text candidate |
 | zero_width_binary | **yes** | yes | UTF-8 bits as U+200B / U+200C, U+2063 delimiter |
 | bidi | **yes** | yes | RLO … PDF over reversed text |
 | html_comment | no (built-in) | yes | `<!-- payload -->` |
@@ -333,22 +353,27 @@ seed in decode_payload(encode_seed(seed, channel), channel)
 | js_eval | **yes** | yes | `eval(atob(...))`, base64 around rot13 |
 | js_escapes | **yes** | examples/tests | `\xNN` / `\uNNNN` runs |
 
-The plugin registers exactly six channels:
+The plugin registers exactly five channels:
 
 ```
-rot13, zero_width_binary, bidi, markdown_image, js_eval, js_escapes
+zero_width_binary, bidi, markdown_image, js_eval, js_escapes
 ```
 
-Base64, hex, HTML comments, zero-width stripping, Unicode tags and variation
-selectors already have built-in decoders in `read/decoders.py`; registering
-them again would only duplicate views and scan cost.
+Base64, base32, hex, HTML comments and entities, zero-width stripping, Unicode
+tags, variation selectors, URL encoding, ROT13 and reversed text already have
+built-in decoders in `read/decoders.py`; registering them again would only
+duplicate views and scan cost. `attacks.decoders.BUILTIN_NAMES` mirrors that
+registry, `register()` skips those names even when the caller's registry is
+empty, and `test_builtin_names_match_the_read_registry` fails if READ adds a
+channel the plugin still claims. `rot13` stays in the transform table because
+`js_eval` composes it.
 
 `attacks/decoderlib.py` loads `read/decoders.py` **by file path** so CPU tests
 and hooks never import `read/__init__.py` (which imports torch). It also
 exposes `has_suspicious_invisibles` for the prompt gate.
 
 `attacks/decoders.py` loads the transform table either from the installed
-`attacks` package or from `synth/transforms.py` by path, and registers the six
+`attacks` package or from `synth/transforms.py` by path, and registers the five
 decoders idempotently.
 
 ---
@@ -404,6 +429,11 @@ as a secret.
 ```json
 {"gate":"B","verdict":"block","reason":"...","source":"repo","files":["README.md"],"duration_ms":34.7}
 ```
+
+The gate label is normalized on **every** path, including the crash path:
+`a`/`prompt`/`UserPromptSubmit` → `A`, `b`/`tool`/`PreToolUse` → `B`, anything
+else is uppercased. `test_error_decision_normalizes_the_gate_label` pins this,
+so a host can parse `gate` as a literal.
 
 `UserPromptSubmit` has no native "ask" primitive in Claude Code, so Gate A
 "ask" becomes additional context plus a system message. Gate B uses the real
@@ -577,20 +607,20 @@ selftest: 11/11
 
 ```text
 $ python -m pytest tests/attacks -q
-147 passed, 1 skipped
-
-SKIPPED tests/attacks/test_harness.py:88
-  torch is installed; the real scanner is available
+153 passed
 ```
+
+No test is skipped: the lazy-import guard is now exercised with torch present.
+The per-file split is in §4.3.
 
 READ-side smoke tests that the change touches:
 
 ```text
 $ python -m pytest tests/read/test_judge.py tests/read/test_config.py -q
-26 passed
+28 passed
 
 $ python -m pytest tests/read/test_decoders.py -q
-17 passed
+27 passed
 ```
 
 ### 11.6 Demo
@@ -614,22 +644,25 @@ narration script, not sleeps.
 ### 11.7 Windows real-READ behavior
 
 `read/judge.py` previously failed at import with `No module named 'fcntl'`.
-After the shim, `import read.scan` succeeds. The harness now prints:
+After the shim, `import read.scan` succeeds. A POSIX pin is refused instead of
+being turned into a Windows `Path`; the harness prints:
 
 ```text
-error: READ checkpoint unavailable (pinned checkpoint missing:
-\home\enseven\.local\share\baitwatch\models\v15f_22m ...).
-Set BAITWATCH_MODEL_PATH or copy the pinned checkpoint from the training
-machine; use --scanner keyword for the CPU gate
+error: READ checkpoint unavailable (pinned checkpoint path is POSIX
+(/home/enseven/.local/share/baitwatch/models/v15f_22m) and this is Windows
+(read/model_config.json, tag 'v1.5f'). Copy it to a Windows path and set
+BAITWATCH_MODEL_PATH explicitly.). The keyword scanner needs no model; use
+--scanner keyword for the CPU gate.
 ```
 
-The hook in real mode fails closed:
+The hook in real mode fails closed with the same normalized gate label:
 
 ```json
-{"gate":"b","verdict":"block","source":"error","reason":"BaitWatch hook failed (FileNotFoundError: pinned checkpoint missing ...); failing closed"}
+{"gate":"B","verdict":"block","source":"error","reason":"BaitWatch hook failed (FileNotFoundError: pinned checkpoint path is POSIX ...); failing closed"}
 ```
 
-Both are correct: missing model data must never become an allow.
+Both are correct: missing model data must never become an allow, and a crash
+must not change the casing of `gate`.
 
 ### 11.8 Wheel packaging
 
@@ -687,7 +720,7 @@ python -c "import glob,os,zipfile; w=sorted(glob.glob(os.path.join(os.environ['T
 ```
 
 Expected: no ruff output; `attack tree is up to date`; `safety lint clean`;
-five `ok` rows; `PASS`; `147 passed, 1 skipped`; `26 passed`; `17 passed`;
+five `ok` rows; `PASS`; `153 passed`; `28 passed`; `27 passed`;
 `selftest: 11/11`; `corpus files in wheel: 57`.
 
 ### 12.2 Git Bash / WSL (demo)
@@ -783,7 +816,8 @@ Use this as a file-by-file read. Each item names the exact symbol or assertion.
 ### 13.1 Contracts
 
 - [ ] `attacks/synth/transforms.py` — `TRANSFORMS` has 12 rows;
-      `DECODER_TRANSFORMS` has exactly the 6 non-builtin names.
+      `DECODER_TRANSFORMS` has 6 candidates; `register()` adds the 5 that are
+      not in `BUILTIN_NAMES`.
 - [ ] `attacks/synth/transforms.py` — every `*_encode` has a matching
       `*_decode` returning a list.
 - [ ] `attacks/synth/seeds.py` — `TRAINING_SEEDS`, `ATTACK_REPO_SEEDS`,
@@ -791,15 +825,16 @@ Use this as a file-by-file read. Each item names the exact symbol or assertion.
 - [ ] `attacks/synth/generate.py` — `FileBuilder.payload` records the exact
       `line`/`end_line`/`span`; `EntrySpec.as_manifest_entry` emits both
       hashes.
-- [ ] `attacks/MANIFEST.schema.json` — required fields and layer enum.
-- [ ] `attacks/manifests.py` — `span_text` is 1-based and exact;
-      `expected_files` returns unique files.
-- [ ] `attacks/decoders.py` — `register` skips names already in the registry;
-      `TransformDecoder.join_segments = True`.
+- [ ] `attacks/MANIFEST.schema.json` — both hashes are `required`; layer enum.
+- [ ] `attacks/manifests.py` — `span_text` is 1-based and exact; a missing
+      `decoded_sha256` is rejected; `expected_files` returns unique files.
+- [ ] `attacks/decoders.py` — `register` skips names already in the registry
+      **or** in `BUILTIN_NAMES`; `TransformDecoder.join_segments = True`.
 - [ ] `attacks/decoderlib.py` — imports `read.decoders` by path, not
       `import read`.
-- [ ] `hooks/guard.py` — `error_decision` default is `block`; `.env.example`
-      is excluded by `_SECRET`; `gate_b` short-circuits on a repo block.
+- [ ] `hooks/guard.py` — `error_decision` default is `block` and normalizes the
+      gate label; `.env.example` is excluded by `_SECRET`; `gate_b`
+      short-circuits on a repo block.
 - [ ] `hooks/cache.py` — key includes `repo_head`; TTL parse; corrupt JSON
       returns `None`.
 - [ ] `hooks/install.py` — merge keeps unrelated hooks/env; invalid JSON
@@ -829,8 +864,8 @@ Use this as a file-by-file read. Each item names the exact symbol or assertion.
 
 - [ ] Manifests contain no payload text — by design, not missing data.
 - [ ] The harness copies repos **without** `MANIFEST.json` — by design.
-- [ ] The plugin does not register base64/hex/comments/tags/selectors —
-      built-ins already cover them.
+- [ ] The plugin does not register any built-in channel — including `rot13`
+      and `reversed`, which READ added in v1.5f.
 - [ ] The keyword scanner is a stand-in; the product default is `read`.
 - [ ] Windows falls back to a thread lock without `fcntl`; multi-process
       spend locking is POSIX-only.
@@ -846,15 +881,15 @@ These are **not** bugs at this commit.
 
 | Observation | Why it is expected | How to close it |
 |---|---|---|
-| `test_harness.py::test_read_scanner_is_lazy_without_torch` skipped | torch is installed; test only runs without torch | run on a CPU-only env to exercise it |
-| `--scanner read` stops at `FileNotFoundError` | the fine-tuned `v15f_22m` checkpoint is not in this workspace | copy it, set `BAITWATCH_MODEL_PATH` |
+| `--scanner read` stops at `FileNotFoundError` | the fine-tuned `v15f_22m` checkpoint is not in this workspace, and its pin is a POSIX path | copy it, set `BAITWATCH_MODEL_PATH`; the message now names the POSIX pin instead of `\home\...` |
 | leakage prints `skipped` | no `train/val/test` corpus locally | `--data-dir` at the real corpus |
 | Gate A cold real scan can exceed 3 s | torch import + model load per process | warm scan/cache; keyword test proves the policy path |
 | `got > want` in the harness table | keyword scanner flags every payload file, including RUN-only ones that share a manifest | intentional; `extra == 0` is the failure condition |
 | `readme-bait-curl` shows `want 1` for 3 payloads | three entries share README.md; gates are file-level | `rec 3/3` proves per-payload recovery |
 | Muse Code target refused | host hook contract unconfirmed | integrate `gate-a`/`gate-b --host generic` once known |
-| CI job has not run yet | commits are local, not pushed | push `main`; `attacks-hooks` runs ruff + check + pytest |
-| Parquet test may skip on CI | `pyarrow` is in the `train` extra, CI syncs `dev` | run `uv sync --extra train` or install `pyarrow` |
+| CI is green, no PR yet | pushed to `aditya/attack-slice`; both jobs passed on run `40732966171` | open the PR when requested |
+| full `tests/read` reports 17 Windows failures | upstream path-separator and symlink assumptions (`skills\deploy\SKILL.md` vs `skills/deploy/SKILL.md`), plus the missing model/corpus | run on Linux; not part of the ATTACK slice. The targeted `test_judge`, `test_config` and `test_decoders` suites pass (28 + 27). |
+| `test_cli_accepts_gate_form_without_subcommand` fails on Windows | it expects a successful real scan, but the pinned checkpoint is POSIX and Windows now refuses it loudly | same data gap as the row above; the refusal is the intended fail-closed behavior |
 
 ---
 
@@ -914,21 +949,92 @@ Exit codes:
 
 | Check | Result |
 |---|---|
-| `git status` | clean at `84b94e3` |
+| `git status` | clean after the last commit (this report + `docs/DECOY_TRIAL.md`) |
+| branch | `main` = `origin/aditya/attack-slice`; 11 ahead / 0 behind `origin/main` (`1b8d7b8`) |
+| CI | run `40732966171`: RUN foundation and ATTACK jobs both success |
 | ruff check | pass |
 | ruff format check | 57 files formatted |
 | generated tree | 57 files, no drift |
 | safety lint | 61 files clean |
 | READ gate | 5/5 repos, 20/20 payloads recovered |
 | RUN coverage gate | 5/5 repos |
-| tests | 147 passed, 1 skipped (148 collected) |
-| READ judge/config | 26 passed |
-| READ decoders | 17 passed |
+| tests | 153 passed (153 collected, 0 skipped) |
+| READ judge/config | 28 passed |
+| READ decoders | 27 passed |
 | hook selftest | 11/11 |
 | demo | all beats, ~4 s |
 | packaging | wheel 57/57 corpus files, 6 manifests, 5 markers, no `__pycache__` |
 | `pip check` | clean |
 
-Everything above was executed at commit `84b94e3` on this machine. The only
-unverifiable items are the fine-tuned checkpoint and the training corpus,
-both explicitly tracked in §14.
+Everything above was executed after the review fixes on this machine. The only
+unverifiable items are the fine-tuned checkpoint, the training corpus, and the
+Muse Spark decoy trial (Docker is not installed here; see §19).
+
+---
+
+## 18. Review response (Cursor findings)
+
+Every finding from the code review is closed in a dedicated commit, with a
+regression test that fails on the old behavior.
+
+| Finding | Fix | Test |
+|---|---|---|
+| lazy-import test is wrong and always skips | `test_read_scanner_reports_a_missing_dependency` blocks `read.config`/`read.scan` via `builtins.__import__` and matches the real message | `tests/attacks/test_harness.py` |
+| `GateReport.ok` ignores decoder recovery | `ok` now requires `recovered == recoverable` | `test_gate_report_fails_when_recovery_is_incomplete` |
+| CLI can print `ok yes` with `rec 0/N` | same property drives `main`'s exit code | `test_cli_exits_nonzero_when_recovery_is_incomplete` |
+| `decoded_sha256` is optional | JSON Schema `required` **and** `validate_manifest` reject a missing hash | `test_missing_decoded_hash_is_rejected` |
+| crash path uses lowercase `gate` | `_gate_label` normalizes every path to `A`/`B` | `test_error_decision_normalizes_the_gate_label` |
+| Windows turns a POSIX pin into `\home\...` | explicit `FileNotFoundError` naming the POSIX path, tag and override | `test_windows_pin_reports_the_posix_path` |
+| report snapshot stale / README line 15 | this report rewritten at the rebased commit; sample manifest says line 12 | docs review; `attacks check` |
+| plugin now collides with built-in `rot13` | `BUILTIN_NAMES`, five registered channels, drift test | `test_builtin_names_match_the_read_registry` |
+
+The rebase also picked up upstream READ changes that created the decoder
+collision; that is why the plugin count moved from six to five. The transform
+table itself is unchanged.
+
+---
+
+## 19. Branch, PR and decoy-trial status
+
+### 19.1 Cross-branch snapshot
+
+| Ref | State |
+|---|---|
+| `origin/main` | `1b8d7b8`; PR #10 (sinks) merged after the first rebase |
+| local `main` | last commit is this report; **11 ahead, 0 behind**; pushed to `origin/aditya/attack-slice` |
+| backup | `backup/pre-rebase-<timestamp>` points at the pre-rebase tree |
+| PR #12 | `ashutosh/d3-decoy` — decoy agent loop, tool calls inside the cage (open; updated to `482e9e8`) |
+| PR #10 | `ashutosh/d2-sinks` — DNS/HTTP/TLS sinks and file trace (**merged**) |
+| merged upstream | `#7 uv-torch-extras`, `#8 sweep-scan-resources`, `#9 per-scan-subnet`, `#10 d2-sinks` |
+| other remote | `read/core-fixes` |
+
+PR #12 adds one more commit after the first snapshot:
+`482e9e8 Fail the decoy closed on timeouts, cage expiry and cut-off replies`.
+
+The ATTACK branch was rebased, not merged, so the five original commits were
+rewritten (`843282c` … `cb2d012`) and the review fixes were stacked on top.
+The branch is pushed; CI run `40732966171` passed both jobs. No PR is open yet.
+
+### 19.2 Muse Spark decoy trial
+
+Ashutosh asked for a real trial: run Muse Spark against repo #1 and confirm it
+is tricked into attempting exfiltration in at least 8 of 10 runs. The runner is
+his `origin/ashutosh/d3-decoy` decoy loop (PR #12); the backend spec is:
+
+```text
+openai:https://api.llama.com/compatible/v1#muse-spark-1.3#META_API_KEY
+```
+
+The full protocol, cage-image build, scoring query and result table are in
+[`docs/DECOY_TRIAL.md`](DECOY_TRIAL.md).
+
+**It cannot be executed on this machine.** Docker is not installed
+(`docker: command not found`), and the trial requires a Linux daemon, plus the
+private `META_API_KEY`. Two honest options for the PR:
+
+1. Land the ATTACK slice without the trial, and let Ashutosh run the ten runs on
+   his Linux host, filling the table in `docs/DECOY_TRIAL.md`.
+2. Wait for a Linux + Docker environment, run it, and attach the ten rows.
+
+Do not claim a bite rate before those rows exist. A single successful decoy run
+is not evidence for `>= 8/10`; the criterion is a rate over ten runs.
