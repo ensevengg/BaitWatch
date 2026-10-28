@@ -66,22 +66,44 @@ verdict engine.
 
 Fail-closed semantics the engine can rely on:
 
-- Any error (unreadable file, detector failure, judge down/timeout/garbage,
-  spend cap exhausted) produces a **flagged** finding — layer `"system"` when
-  BaitWatch itself is the problem — or a raised exception for "couldn't scan
-  at all". An error is never clean.
+- Unreadable files and detector failures produce a **flagged** finding —
+  layer `"system"` when BaitWatch itself is the problem — or a raised
+  exception for "couldn't scan at all". An error is never clean.
+- A review-band chunk (`review_low..flag_threshold`) that no judge cleared —
+  judge disabled (`--no-judge` / `ReadConfig.quick()`), judge unavailable
+  (down/timeout/garbage/spend cap), or judge budget exhausted — is **not**
+  flagged and **not** clean: it stays `status="reviewed"` with
+  `evidence["note"]` saying why it was not judged, and the verdict is
+  `"incomplete"` (CLI exit 3). Judge-unavailable in the band no longer makes
+  a benign repo read as `"attack"`.
 - Evidence the scan could not cover makes `read_verdict` `"incomplete"`,
-  never `"clean"`; `stats.incomplete_reasons` says why: walker file cap,
-  decoded content past its cap, review-band chunks the per-scan judge budget
-  did not reach (`stats.judge_skipped`, status `"reviewed"` with a note),
-  decoder crashes, and — with `ReadConfig.strict_coverage` — oversized files.
+  never `"clean"`; `stats.incomplete_reasons` says why (with a count of
+  unjudged review-band chunks): walker file cap, decoded content past its
+  cap, decoded views the per-file chunk budget could not cover
+  (`stats.decoded_views_uncovered`), review-band chunks the per-scan judge
+  budget did not reach (`stats.judge_skipped`, status `"reviewed"` with a
+  note), decoder crashes, and — with `ReadConfig.strict_coverage` —
+  oversized files.
+- `max_chunks_per_file` is one budget per file across head/tail segments and
+  decoded views. Decoded views are measured first and get what they need, up
+  to about half the budget, shared fairly between views; the original view
+  gets the rest. A small comment or blob can no longer starve the original,
+  and a large file can no longer starve a hidden payload.
+- In-repo directory symlinks are followed under the link path, even into
+  excluded dirs (`.cursor/rules -> ../dist/rules`); outside-repo links and
+  links back to an ancestor are not. Each real directory is listed at most
+  once per priority tier, so link fan-out stays linear.
 - Oversized files are scanned head + tail (`tail_bytes`, `tail_windows`);
   the unscanned middle is reported in `stats.files_truncated` /
   `stats.partial_files` / `stats.chunks_dropped`.
-- Base64/hex blobs and PEM blocks are masked before scoring; their readable
-  content is scored through the decoder views (base64 incl. `KEY=`/unpadded/
-  URL-safe/wrapped, hex, HTML comments, zero-width, variation selectors,
-  Unicode tags; nested two levels deep).
+- Base64/hex blobs and PEM blocks are masked before scoring (including any
+  intermediate nested views); their readable content is scored through the
+  decoder views (base64 incl. `KEY=`/unpadded/URL-safe/wrapped, base32, hex,
+  HTML comments, HTML entities, URL percent-encoding, rot13, reversed text,
+  zero-width, variation selectors, Unicode tags; nested three levels deep).
+  HTML-entity / URL decoders are gated (decoded runs, multi-escape lines, or
+  materially encoded text only) and rot13/reversed keep an English-likeness
+  gate, so ordinary files containing `&amp;` or `%20` gain no decoded view.
 - The judge can **escalate** (flag an uncertain chunk, raise a score) but can
   **never clear** a chunk the model flagged — at most it records its dissent
   in `explanation`. Inside the uncertain band (`review_low..flag_threshold`)
