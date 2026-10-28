@@ -4,6 +4,13 @@ Rules enforced here (each has a test in tests/read/test_walker.py):
 
 - Symlinks pointing outside the repo are never followed; links to files inside
   the repo are scanned once, under their repo-relative name.
+- Directory symlinks whose resolved target stays inside the repo *are*
+  followed, under the link path (the path an agent reads) — even when the
+  target lies inside an excluded dir such as ``dist/``. Link and real paths
+  to the same file are deduped, and symlink loops are not descended. Each
+  resolved directory is listed only when reached through a strictly better
+  dir tier than before (at most three times), so many links to one dir do
+  not make the walk exponential.
 - ``.git``, ``node_modules`` and the other cache/build dirs in WalkerConfig are
   skipped entirely.
 - Binary files are skipped by extension and by a NUL-byte sniff; UTF-16/32
@@ -19,6 +26,8 @@ Rules enforced here (each has a test in tests/read/test_walker.py):
 
 from __future__ import annotations
 
+import heapq
+import itertools
 import os
 import stat
 from dataclasses import dataclass, field
@@ -31,7 +40,7 @@ AGENT_FILE_NAMES = frozenset({
     "agents.md", "agent.md", "claude.md", "claude.local.md", "gemini.md",
     "codex.md", "conventions.md", ".cursorrules", ".clinerules",
     ".windsurfrules", ".roorules", ".goosehints", "copilot-instructions.md",
-    ".mcp.json", "mcp.json",
+    ".mcp.json", "mcp.json", "skill.md",
 })
 AGENT_DIR_PREFIXES = (
     ".claude/", ".cursor/", ".windsurf/", ".clinerules/", ".roo/",
@@ -122,6 +131,25 @@ def priority_tier(rel_path: str) -> int:
     return 2
 
 
+def _dir_tier(rel_dir: str) -> int:
+    """Tier of a logical directory path, as in :func:`priority_tier`.
+
+    0 for agent dirs, 1 for tier-1 dirs, else 2. The trailing slash makes
+    the dir itself (``.cursor``) match its prefix (``.cursor/``). Tier never
+    gets worse on descent: appending a name keeps any prefix/segment match.
+    """
+    if not rel_dir:
+        return 2
+    rel = rel_dir.replace(os.sep, "/").lower()
+    rel_slash = rel if rel.endswith("/") else rel + "/"
+    if rel_slash.startswith(AGENT_DIR_PREFIXES) \
+            or any(f"/{p}" in f"/{rel_slash}" for p in AGENT_DIR_PREFIXES):
+        return 0
+    if rel_slash.startswith(TIER1_DIR_PREFIXES):
+        return 1
+    return 2
+
+
 def _sort_key(rel_path: str) -> tuple[int, int, str]:
     rel = rel_path.replace(os.sep, "/")
     return (priority_tier(rel), rel.count("/"), rel.lower())
@@ -142,47 +170,54 @@ def walk(repo_root: Path, cfg: WalkerConfig | None = None) -> WalkResult:
     seen_targets: set[str] = set()
     candidates: list[_Candidate] = []
 
-    def on_walk_error(exc: OSError) -> None:
-        # An unreadable directory is silently PRUNED by os.walk by default —
-        # its files would never be scanned and nothing would say so. Record it
-        # so the fail-closed layer flags it (scan.py turns `unreadable` into
-        # system findings when on_file_error="flag").
-        result.unreadable.append((str(exc.filename or repo_root), str(exc)))
-
     # Pass 1: enumerate (metadata only, no reads) so the cap can be applied in
-    # priority order across the whole repo, not per directory.
-    for dirpath, dirnames, filenames in os.walk(repo_root, followlinks=False,
-                                                onerror=on_walk_error):
-        root = Path(dirpath)
-
-        kept: list[str] = []
-        for d in sorted(dirnames):
-            full = root / d
-            if d in cfg.excluded_dirs:
-                result.skipped_dirs.append(str(full.relative_to(repo_root)))
-                continue
-            if full.is_symlink():
-                # A symlinked directory inside the repo is only safe if its real
-                # target stays inside; os.walk(followlinks=False) won't descend
-                # either way, so record and move on.
-                if not _is_within(repo_root, full):
-                    result.skipped_outside_symlinks.append(str(full.relative_to(repo_root)))
-                    continue
-            kept.append(d)
-        dirnames[:] = kept
-
-        for name in filenames:
-            full = root / name
-            rel = str(full.relative_to(repo_root))
+    # priority order across the whole repo, not per directory. Traversal is
+    # manual (not os.walk) so directory symlinks can be followed safely:
+    # a link is descended only when its resolved target stays inside the
+    # repo, and it is reported under the link path. A resolved dir is listed
+    # only through a logical path whose dir tier is strictly better than any
+    # visit before it; tier never gets worse on descent, so each real dir is
+    # listed at most three times and the walk stays linear even when many
+    # links point at one dir. The heap on (tier, depth, path) visits the
+    # best logical name first. An unreadable directory is recorded, not
+    # silently pruned, so the fail-closed layer flags it (scan.py turns
+    # `unreadable` into system findings when on_file_error="flag").
+    visited_best: dict[str, int] = {}
+    counter = itertools.count()
+    heap: list[tuple[int, int, str, int, Path, str]] = []
+    heapq.heappush(heap, (_dir_tier(""), 0, "", next(counter), repo_root, ""))
+    while heap:
+        tier, _depth, _path, _n, logical_dir, rel_dir = heapq.heappop(heap)
+        try:
+            resolved_key = str(logical_dir.resolve())
+        except (OSError, RuntimeError) as exc:
+            result.unreadable.append((rel_dir or str(repo_root), str(exc)))
+            continue
+        best = visited_best.get(resolved_key)
+        if best is not None and best <= tier:
+            continue
+        visited_best[resolved_key] = tier
+        try:
+            with os.scandir(logical_dir) as it:
+                names = sorted(e.name for e in it)
+        except OSError as exc:
+            result.unreadable.append((rel_dir or str(repo_root), str(exc)))
+            continue
+        for name in names:
+            full = logical_dir / name
+            rel = str(Path(rel_dir) / name) if rel_dir else name
             try:
                 lst = full.lstat()
             except OSError as exc:
                 result.unreadable.append((rel, f"lstat failed: {exc}"))
                 continue
 
-            read_path, size = full, lst.st_size
             if stat.S_ISLNK(lst.st_mode):
-                target = full.resolve()
+                try:
+                    target = full.resolve()
+                except (OSError, RuntimeError) as exc:   # symlink loop (ELOOP)
+                    result.unreadable.append((rel, f"broken symlink: {exc}"))
+                    continue
                 if not _is_within(repo_root, target):
                     result.skipped_outside_symlinks.append(rel)
                     continue
@@ -191,11 +226,52 @@ def walk(repo_root: Path, cfg: WalkerConfig | None = None) -> WalkResult:
                 except OSError as exc:
                     result.unreadable.append((rel, f"broken symlink: {exc}"))
                     continue
+                if stat.S_ISDIR(tst.st_mode):
+                    if name in cfg.excluded_dirs:
+                        result.skipped_dirs.append(rel)
+                        continue
+                    # Never descend a link back into the directory being
+                    # listed or one of its real ancestors: that would
+                    # re-list the same tree under the alias, however good
+                    # the alias's tier is.
+                    try:
+                        listing_resolved = logical_dir.resolve()
+                    except (OSError, RuntimeError) as exc:
+                        result.unreadable.append(
+                            (rel, f"broken symlink: {exc}"))
+                        continue
+                    try:
+                        listing_resolved.relative_to(target)
+                        continue
+                    except ValueError:
+                        pass
+                    new_tier = _dir_tier(rel)
+                    if visited_best.get(str(target), 99) <= new_tier:
+                        continue
+                    heapq.heappush(heap, (new_tier, rel.count("/"), rel,
+                                          next(counter), full, rel))
+                    continue
                 if not stat.S_ISREG(tst.st_mode):
                     result.skipped_binary.append(rel)
                     continue
                 read_path, size = target, tst.st_size
-            elif not stat.S_ISREG(lst.st_mode):
+            elif stat.S_ISDIR(lst.st_mode):
+                if name in cfg.excluded_dirs:
+                    result.skipped_dirs.append(rel)
+                    continue
+                new_tier = _dir_tier(rel)
+                try:
+                    key = str(full.resolve())
+                except (OSError, RuntimeError):
+                    key = str(full)
+                if visited_best.get(key, 99) <= new_tier:
+                    continue
+                heapq.heappush(heap, (new_tier, rel.count("/"), rel,
+                                      next(counter), full, rel))
+                continue
+            elif stat.S_ISREG(lst.st_mode):
+                read_path, size = full, lst.st_size
+            else:
                 continue
 
             if Path(name).suffix.lower() in cfg.binary_extensions:
