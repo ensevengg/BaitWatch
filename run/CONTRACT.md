@@ -2,9 +2,9 @@
 
 This is RUN's first proposal for the shared interface. The team has not reviewed or frozen it.
 
-`run.detonate(path, command=("true",), config=None) -> RunEvidence`
+`run.detonate(path, command=("true",), config=None, *, backend=None, max_steps=20) -> RunEvidence`
 
-The default command only checks that the sandbox works. The decoy loop will replace or extend it later. Command arguments run inside the cage, never on the host.
+The default command only checks that the sandbox works. With a `backend` (any object with `chat(messages, tools) -> LLMReply`, OpenAI chat-completions shapes; see `run/llm.py`), the decoy loop `run_decoy(sandbox, backend, max_steps=..., task=...)` replaces the plain command: the model runs on the host, and every tool call executes inside the cage through `Sandbox.exec`. Command arguments run inside the cage, never on the host.
 
 ## RunEvidence
 
@@ -13,8 +13,9 @@ The default command only checks that the sandbox works. The decoy loop will repl
 An empty list means nothing was recorded. It does not mean the component ran.
 
 - A component's state is `not_run`, `complete` or `error`.
-- The RUN status is `incomplete`, `complete` or `error`.
-- A command that exits 0 marks only the sandbox component complete. `dns_sink`, `http_sink` and `tls_sink` become complete only when the sink reported ready, its container is still running when evidence is collected, and its whole log parses without problems or truncation; otherwise they are error (`SINK_FAILED`, `SINK_LOG`). A `refused` record — a contact dropped at the sink's connection limit — is such a problem, so suppressed evidence cannot look like a clean log. The TLS component shares the HTTP sink's container and log. `trace` is complete only when both staged-tree snapshots parsed strictly and their diff produced `file_diffs`. The decoy has not run yet, so every real scan stays `incomplete`.
+- The RUN status is `incomplete`, `complete` or `error`. It becomes `complete` only when every component is `complete` and `errors` is empty; hits never change it, and the verdict fusion is a separate later step.
+- A command that exits 0 marks only the sandbox component complete. `dns_sink`, `http_sink` and `tls_sink` become complete only when the sink reported ready, its container is still running when evidence is collected, and its whole log parses without problems or truncation; otherwise they are error (`SINK_FAILED`, `SINK_LOG`). A `refused` record — a contact dropped at the sink's connection limit — is such a problem, so suppressed evidence cannot look like a clean log. The TLS component shares the HTTP sink's container and log. `trace` is complete only when both staged-tree snapshots parsed strictly and their diff produced `file_diffs`. Without a backend the decoy stays `not_run`, so a plain command scan can never become `complete`. With a backend, `decoy` is complete when the loop ended without a model or cage error — the model finishing and exhausting the step budget both count — and error (`DECOY_FAILED`) otherwise.
+- `tool_log` holds one `CommandResult` per executed entry. The plain command records its argv. A decoy tool call records the tool name and arguments as its `command` (for example `["run_cmd", "sh setup.sh"]`) plus the outcome; the underlying cage argv is not repeated there. A call that could not dispatch — unknown tool or malformed arguments — is logged with the model-facing error in `stderr` and no `exit_code`, because nothing executed. After each exec, every other live cage process except the cage's PID 1 is killed, so forked or backgrounded work cannot outlive its tool call; a sweep that cannot confirm this is an error (`EXEC_KILL_FAILED`), never a completed call.
 - `dns_hits`, `http_hits` and `tls_hits` carry the peer source IP (the cage), the destination (DNS qname, HTTP host+path or TLS SNI) and a bounded detail line: query type and label-decoded secrets, method and body preview, or a raw preview for unparseable TCP contact.
 - `file_diffs` lists added, modified and deleted paths in the disposable staged copy. Changes to the original repository are impossible to record this way because the original is never mounted.
 - Setup, timeout, truncation, command and cleanup errors stay in `errors`. A component that is not built yet is `not_run`.

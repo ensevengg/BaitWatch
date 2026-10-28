@@ -8,6 +8,7 @@ from docker.errors import APIError, NotFound
 
 from run.evidence import CommandResult, State
 from run.sandbox import (
+    KILL_LINGERING,
     SCAN_LABEL,
     SUBNET_ATTEMPTS,
     Sandbox,
@@ -638,3 +639,205 @@ def test_unlock_helper_with_a_lost_create_reply_is_swept_after_staging(repo: Pat
     assert rmtree.call_count == 1
     stray.remove.assert_called_once()
     assert client.containers.list.call_count == 2
+
+
+def test_decoy_time_limits_are_validated():
+    assert SandboxConfig(decoy_seconds=0.5, tool_timeout_seconds=2).decoy_seconds == 0.5
+    with pytest.raises(ValueError, match="finite int or float"):
+        SandboxConfig(decoy_seconds=True)
+    with pytest.raises(ValueError, match="finite int or float"):
+        SandboxConfig(decoy_seconds="90")
+    with pytest.raises(ValueError, match="finite int or float"):
+        SandboxConfig(tool_timeout_seconds="10")
+    with pytest.raises(ValueError, match="positive"):
+        SandboxConfig(decoy_seconds=0)
+    with pytest.raises(ValueError, match="positive"):
+        SandboxConfig(tool_timeout_seconds=-1)
+
+
+def test_cage_that_exits_at_startup_fails_closed(repo: Path):
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "exited", "ExitCode": 1}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with pytest.raises(SandboxError, match="exited during startup"), sandbox:
+        sandbox.open_cage()
+    assert sandbox.evidence.errors[0].code == "CAGE_START"
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert not sandbox.staged_path.parent.exists()
+
+
+def test_open_cage_and_run_command_are_mutually_exclusive(repo: Path, monkeypatch):
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        with pytest.raises(SandboxError, match="one command per sandbox"):
+            sandbox.run_command(["true"])
+    other = Sandbox(repo, client_factory=lambda: client)
+    with other:
+        other.run_command(["true"])
+        with pytest.raises(SandboxError, match="one cage per sandbox"):
+            other.open_cage()
+
+
+def test_exec_requires_an_open_cage(repo: Path):
+    client = fake_client()
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox, pytest.raises(SandboxError, match="open_cage"):
+        sandbox.exec(["true"])
+    assert sandbox.evidence.errors[0].code == "EXEC_ERROR"
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
+
+
+def test_exec_on_a_closed_cage_fails_closed(repo: Path, monkeypatch):
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+    with pytest.raises(SandboxError, match="open_cage"):
+        sandbox.exec(["true"])
+
+
+def test_exec_is_rejected_after_run_command(repo: Path, monkeypatch):
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.run_command(["true"])
+        with pytest.raises(SandboxError, match="not running"):
+            sandbox.exec(["true"])
+
+
+def test_exec_rejects_shell_strings_and_nul(repo: Path):
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        with pytest.raises(ValueError, match="never a shell string"):
+            sandbox.exec("echo hi")
+        with pytest.raises(ValueError, match="never a shell string"):
+            sandbox.exec(["true", "a\0b"])
+        with pytest.raises(ValueError, match="never a shell string"):
+            sandbox.exec([])
+
+
+def test_exec_timeout_kills_lingering_cage_processes(repo: Path, monkeypatch):
+    calls: list[list[str]] = []
+    exit_codes = iter([137, 0])
+
+    def fake_capture(attach_command, container_command, **kwargs):
+        calls.append(list(attach_command))
+        # capture_attached records the argv it was given, never the attach command.
+        return CommandResult(command=list(container_command), exit_code=next(exit_codes))
+
+    monkeypatch.setattr("run.sandbox.capture_attached", fake_capture)
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sh", "-c", "sleep 100; echo done"])
+    assert result.timed_out
+    assert result.exit_code == 137
+    assert result.command == ["sh", "-c", "sleep 100; echo done"]
+    assert len(calls) == 2
+    assert calls[0][-7:] == [
+        "timeout",
+        "-s",
+        "KILL",
+        str(sandbox.config.tool_timeout_seconds),
+        "sh",
+        "-c",
+        "sleep 100; echo done",
+    ]
+    assert "/proc/[0-9]*" in calls[1][-1]
+    assert "$entry/stat" in calls[1][-1]
+    assert not sandbox.evidence.errors
+
+
+def test_exec_kills_backgrounded_processes_after_a_clean_exit(repo: Path, monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_capture(attach_command, container_command, **kwargs):
+        calls.append(list(attach_command))
+        return CommandResult(command=list(container_command), exit_code=0, stdout="started\n")
+
+    monkeypatch.setattr("run.sandbox.capture_attached", fake_capture)
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sh", "-c", "sleep 100 & echo started"])
+    assert not result.timed_out
+    assert result.exit_code == 0
+    assert len(calls) == 2
+    assert "/proc/[0-9]*" in calls[1][-1]
+    assert not sandbox.evidence.errors
+
+
+def test_cage_that_dies_during_a_tool_call_fails_closed(repo: Path, monkeypatch):
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+
+    def fake_capture(attach_command, container_command, **kwargs):
+        client.containers.create.return_value.attrs = {
+            "State": {"Status": "exited", "ExitCode": 137}
+        }
+        return CommandResult(command=["sleep"], exit_code=137)
+
+    monkeypatch.setattr("run.sandbox.capture_attached", fake_capture)
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sleep", "100"])
+    assert result.timed_out
+    assert sandbox.evidence.errors[0].code == "CAGE_EXITED"
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
+
+
+def test_failed_cleanup_after_a_timeout_fails_closed(repo: Path, monkeypatch):
+    results = iter(
+        [
+            CommandResult(command=["sh"], exit_code=137),
+            CommandResult(command=["sh"], exit_code=1, stderr="cannot kill"),
+        ]
+    )
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: next(results),
+    )
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        sandbox.exec(["sleep", "100"])
+    assert sandbox.evidence.errors[0].code == "EXEC_KILL_FAILED"
+    assert sandbox.evidence.components.sandbox == State.ERROR
+
+
+def test_the_kill_sweep_skips_only_zombies():
+    # A live process can have an empty cmdline (execve with no argv), so liveness
+    # is decided by the state field in /proc/<pid>/stat, never by cmdline.
+    assert "$entry/stat" in KILL_LINGERING
+    assert '"Z"' in KILL_LINGERING
+    assert "cmdline" not in KILL_LINGERING
+    assert '"1"' in KILL_LINGERING and '"$$"' in KILL_LINGERING

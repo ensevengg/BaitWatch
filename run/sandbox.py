@@ -1,6 +1,7 @@
 import contextlib
 import ipaddress
 import json
+import math
 import os
 import random
 import shutil
@@ -16,6 +17,7 @@ from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount
 
 from run.capture import capture_attached
 from run.evidence import CommandResult, FileDiff, RunError, RunEvidence, State
+from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
 from run.trace import TraceError, diff, manifest_from_json
@@ -30,6 +32,27 @@ TRACE_OUTPUT_BYTES = 8 * 1024 * 1024
 # Collection waits this long for a sink to drain in-flight contacts and acknowledge.
 SINK_STOP_SECONDS = 5.0
 SINK_POLL_SECONDS = 0.05
+# Trusted, not model input: busybox timeout kills only its direct child, so a
+# tool call can leave forked or background work behind. Everything in the cage
+# runs as the same uid, and PID 1 is the cage's own trusted sleep. A live
+# process must never be skipped, whatever its cmdline: only a zombie — state Z
+# in /proc/<pid>/stat, dead until PID 1 reaps it — is beyond a kill. The state
+# sits after the last ')' of comm, which may itself contain parens.
+KILL_LINGERING = (
+    "round=0; "
+    "while [ $round -lt 3 ]; do "
+    "alive=0; "
+    "for entry in /proc/[0-9]*; do pid=${entry#/proc/}; "
+    'if [ "$pid" != "1" ] && [ "$pid" != "$$" ] '
+    '&& read -r stat 2>/dev/null < "$entry/stat"; then '
+    "state=${stat##*) }; state=${state%% *}; "
+    'if [ "$state" != "Z" ]; then alive=1; kill -KILL "$pid" 2>/dev/null; fi; fi; '
+    "done; "
+    'if [ "$alive" -eq 0 ]; then exit 0; fi; '
+    "round=$((round + 1)); sleep 1; "
+    "done; exit 1"
+)
+KILL_TIMEOUT_SECONDS = 10
 
 
 class SandboxError(RuntimeError):
@@ -53,6 +76,9 @@ class SandboxConfig:
     tmpfs_bytes: int = 32 * 1024 * 1024
     timeout_seconds: float = 20
     sink_ready_seconds: float = 15
+    # The decoy cage's overall lifetime and the per-tool-call deadline.
+    decoy_seconds: float = 120
+    tool_timeout_seconds: float = 10
     max_output_bytes: int = 64 * 1024
     staging: StagingLimits = field(default_factory=StagingLimits)
 
@@ -87,6 +113,12 @@ class SandboxConfig:
             self.sink_ready_seconds
         ):
             raise ValueError("sink_ready_seconds must be a finite int or float")
+        for name, value in (
+            ("decoy_seconds", self.decoy_seconds),
+            ("tool_timeout_seconds", self.tool_timeout_seconds),
+        ):
+            if type(value) not in (int, float) or not is_finite(value):
+                raise ValueError(f"{name} must be a finite int or float")
         if (
             not self.image
             or not self.sink_image
@@ -99,6 +131,8 @@ class SandboxConfig:
                     self.tmpfs_bytes,
                     self.timeout_seconds,
                     self.sink_ready_seconds,
+                    self.decoy_seconds,
+                    self.tool_timeout_seconds,
                     self.max_output_bytes,
                 )
             )
@@ -107,7 +141,8 @@ class SandboxConfig:
 
 
 class Sandbox:
-    """One staged copy and one command per instance.
+    """One staged copy and one cage use per instance: a single command, or the
+    long-lived decoy cage with exec calls.
 
     Local Linux daemon only. No published ports, no implicit image pulls, and the
     original repository is never mounted.
@@ -551,6 +586,131 @@ class Sandbox:
         ]
         self.evidence.components.trace = State.COMPLETE
 
+    def open_cage(self) -> None:
+        """Start the long-lived cage the decoy's tool calls exec into.
+
+        The trusted idle command self-terminates at the decoy deadline, so a
+        crashed host loop can never leave the cage running unbounded. One cage
+        per sandbox, mutually exclusive with run_command.
+        """
+        if self._command_started:
+            raise SandboxError("one cage per sandbox; create a new sandbox for another run")
+        self._command_started = True
+        try:
+            # ceil keeps the sleep argument an integer any busybox image accepts.
+            self._cage = self._create(
+                self.config.image,
+                ["sleep", str(max(1, math.ceil(self.config.decoy_seconds)))],
+                "cage",
+                self.cage_ip,
+                mounts=[Mount("/repo", str(self.staged_path), type="bind", read_only=False)],
+                working_dir="/repo",
+            )
+            self._cage.start()
+            self._cage.reload()
+            if self._cage.attrs["State"]["Status"] != "running":
+                raise SandboxError("cage exited during startup")
+        except Exception as exc:
+            self._error("CAGE_START", str(exc), component="sandbox")
+            raise SandboxError(str(exc)) from exc
+
+    def _cage_running(self) -> bool:
+        self._cage.reload()
+        return self._cage.attrs["State"]["Status"] == "running"
+
+    def _kill_lingering(self) -> None:
+        """Kill every live cage process except PID 1 and the killer itself.
+
+        Only one tool call runs at a time, so anything still alive when an
+        exec returns belongs to that call: a fork the `timeout` wrapper could
+        not reach, or work backgrounded past a clean exit. Left alive it could
+        write or exfiltrate after the sinks and trace were collected. All tool
+        processes run under the cage's uid, and only the trusted sleep runs as
+        PID 1. A failed cleanup is an error, never a silent straggler.
+        """
+        try:
+            result = capture_attached(
+                [
+                    "docker",
+                    "--host",
+                    self._docker_host,
+                    "exec",
+                    self._cage.id,
+                    "sh",
+                    "-c",
+                    KILL_LINGERING,
+                ],
+                ["sh", "-c", KILL_LINGERING],
+                timeout_seconds=KILL_TIMEOUT_SECONDS,
+                max_output_bytes=self.config.max_output_bytes,
+                stop_container=lambda: None,
+            )
+        except Exception as exc:
+            self._error("EXEC_KILL_FAILED", str(exc))
+            return
+        if result.timed_out or result.output_truncated or result.exit_code != 0:
+            self._error("EXEC_KILL_FAILED", "could not kill lingering processes inside the cage")
+
+    def exec(self, argv: Sequence[str]) -> CommandResult:
+        """Run argv inside the open cage via docker exec; the cage itself stays up.
+
+        The image's `timeout -s KILL` wrapper is the in-container kill on the
+        tool deadline: the cage must survive the call, so the deadline cannot
+        stop the container the way run_command's deadline does. That wrapper
+        kills only its direct child, so every call then runs a trusted
+        kill of every other live cage process (see _kill_lingering). The host
+        capture deadline is only a backstop for a hung exec client, and exit
+        137 is the busybox wrapper's KILL result.
+        """
+        if (
+            isinstance(argv, (str, bytes))
+            or not argv
+            or any(not isinstance(arg, str) or "\0" in arg for arg in argv)
+        ):
+            raise ValueError("command must be a nonempty argument sequence, never a shell string")
+        if not self._open or self._cage is None:
+            message = "the cage must be started with open_cage before exec"
+            self._error("EXEC_ERROR", message)
+            raise SandboxError(message)
+        try:
+            running = self._cage_running()
+        except Exception as exc:
+            self._error("EXEC_ERROR", str(exc))
+            raise SandboxError(str(exc)) from exc
+        if not running:
+            message = "the cage is not running"
+            self._error("EXEC_ERROR", message)
+            raise SandboxError(message)
+        seconds = max(1, math.ceil(self.config.tool_timeout_seconds))
+        wrapped = ["timeout", "-s", "KILL", str(seconds), *argv]
+        try:
+            result = capture_attached(
+                ["docker", "--host", self._docker_host, "exec", self._cage.id, *wrapped],
+                argv,
+                timeout_seconds=self.config.tool_timeout_seconds + 3,
+                max_output_bytes=self.config.max_output_bytes,
+                # The in-container wrapper owns process kills and the cage must
+                # not be stopped, so the backstop only reaps the attach client.
+                stop_container=lambda: None,
+            )
+        except Exception as exc:
+            self._error("EXEC_ERROR", str(exc))
+            raise SandboxError(str(exc)) from exc
+        if result.exit_code == 137 and not result.timed_out:
+            result.timed_out = True
+        try:
+            running = self._cage_running()
+        except Exception as exc:
+            self._error("EXEC_ERROR", str(exc))
+            return result
+        if not running:
+            # The overall cage deadline fired mid-call; the scan must not
+            # become complete as if the decoy had finished.
+            self._error("CAGE_EXITED", "the cage stopped during a tool call")
+        else:
+            self._kill_lingering()
+        return result
+
     def run_command(self, command: Sequence[str]) -> CommandResult:
         if (
             isinstance(command, (str, bytes))
@@ -782,17 +942,39 @@ def detonate(
     command: Sequence[str] = ("true",),
     *,
     config: SandboxConfig | None = None,
+    backend: LLMBackend | None = None,
+    max_steps: int = 20,
 ) -> RunEvidence:
-    """An exit-0 command still leaves the status incomplete until the decoy runs."""
+    """With a backend, run the decoy instead of the plain command.
+
+    The status becomes complete only when every component is complete and no
+    errors were recorded; hits never change it (verdict fusion is separate).
+    """
     sandbox = Sandbox(path, config)
     try:
         with sandbox:
             sandbox.start_sinks()
             sandbox.trace_before()
-            sandbox.run_command(command)
+            if backend is None:
+                sandbox.run_command(command)
+            else:
+                sandbox.open_cage()
+                # Imported here: run.decoy imports this module for Sandbox.
+                from run.decoy import run_decoy
+
+                run_decoy(sandbox, backend, max_steps=max_steps)
+                # A failed decoy must never be upgraded: only a clean loop
+                # that left the sandbox component untouched proves the cage ran.
+                if (
+                    sandbox.evidence.components.sandbox == State.NOT_RUN
+                    and sandbox.evidence.components.decoy == State.COMPLETE
+                ):
+                    sandbox.evidence.components.sandbox = State.COMPLETE
             sandbox.collect_sinks()
             sandbox.trace_after()
     except Exception as exc:
         if not sandbox.evidence.errors:
             sandbox._error("DETONATION_ERROR", str(exc))
+    if not sandbox.evidence.errors and sandbox.evidence.components.complete():
+        sandbox.evidence.status = "complete"
     return sandbox.evidence
