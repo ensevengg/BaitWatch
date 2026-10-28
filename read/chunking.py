@@ -78,7 +78,8 @@ class Chunker:
 
     def chunk(self, text: str, file: str, view: str = "original",
               first_chunk_id: int = 0,
-              line_offset: int | None = 0) -> tuple[list[Chunk], int]:
+              line_offset: int | None = 0,
+              max_chunks: int | None = None) -> tuple[list[Chunk], int]:
         """Returns (chunks, uncovered_tokens).
 
         ``uncovered_tokens`` counts content tokens no window covers — from the
@@ -87,7 +88,10 @@ class Chunker:
         amount). Over either cap the head windows and the last
         ``tail_windows`` windows are scored. ``line_offset`` shifts reported
         line numbers (tail segments); None means lines are unknown.
+        ``max_chunks`` overrides the per-call window budget (scan uses it to
+        enforce one chunk budget per *file* across all segments and views).
         """
+        budget = self.max_chunks if max_chunks is None else max(0, max_chunks)
         if not text or not text.strip():
             return [], 0
         # Hitting the token cap means the file had more tokens than we
@@ -95,6 +99,8 @@ class Chunker:
         content, hit_token_cap = self._content_offsets(text, max_tokens=self.max_file_tokens)
         if not content:
             return [], 0
+        if budget <= 0:
+            return [], len(content) + (1 if hit_token_cap else 0)
 
         stride = self.window - self.overlap
         windows: list[tuple[int, int]] = []
@@ -112,9 +118,9 @@ class Chunker:
             windows.pop()
 
         spans: list[tuple[int, int]] = []      # char spans to emit, in order
-        k = self.tail_windows
+        k = max(0, min(self.tail_windows, budget - 1)) if budget > 1 else 0
         if hit_token_cap and k:
-            head = windows[: self.max_chunks - k]
+            head = windows[: budget - k]
             spans = [(content[a][0], content[b - 1][1]) for a, b in head]
             head_end = spans[-1][1] if spans else 0
             # Tokenize just the end of the file for the tail windows.
@@ -129,8 +135,8 @@ class Chunker:
                 spans.append((tail[a][0], tail[b - 1][1]))
             uncovered = 1
         else:
-            if len(windows) > self.max_chunks:
-                keep = windows[: self.max_chunks - k] + (windows[-k:] if k else [])
+            if len(windows) > budget:
+                keep = windows[: budget - k] + (windows[-k:] if k else [])
             else:
                 keep = windows
             covered = [False] * len(content)

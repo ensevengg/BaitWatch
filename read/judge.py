@@ -7,10 +7,11 @@ Design rules (roadmap D3/D5, each covered by a test):
   model already flagged.  Inside the uncertain band (review_low..flag_threshold)
   a "benign" verdict clears the chunk — that is the band's whole purpose.
 - Fail closed: API error, timeout, unparseable answer or a hit spend cap
-  return verdict "unavailable", which the scan treats as a flag.  An
-  exhausted per-scan budget returns "skipped" (no call was made), which the
-  scan reports as incomplete evidence.  The judge can never be the reason a
-  repo reads as clean, and ``review()`` never raises.
+  return verdict "unavailable".  An exhausted per-scan budget returns
+  "skipped" (no call was made).  Inside the review band the scan treats both
+  as unjudged evidence — reviewed with a note, verdict "incomplete" — never
+  "clean" and never, on that basis alone, "attack".  The judge can never be
+  the reason a repo reads as clean, and ``review()`` never raises.
 - The chunk is fenced by a random per-call tag, so attacker text cannot close
   the fence and speak outside it; the file name is quoted as data too.
 - Only the suspicious chunk is sent — never whole files, never the repo.

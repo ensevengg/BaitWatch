@@ -7,7 +7,9 @@ JSON contract (docs/verdict.schema.json consumes these via ``to_dict()``):
     score       float  P(injection), max(model score, judge severity on escalation)
     layer       str    "model" | "judge" | "system"
     evidence    dict   {text, line, decoder?, model_score, note?}
-    status      str    "flagged" | "reviewed"   (reviewed = judge cleared it)
+    status      str    "flagged" | "reviewed"   (reviewed = not flagged: judge
+                       cleared it, or no judge cleared it and evidence["note"]
+                       says why — the latter makes the verdict incomplete)
     explanation str?   plain-English judge explanation, None when unavailable
     decoded     bool   chunk came from a decoded (hidden-payload) view
     decoder     str?   name of the decoder that produced the view

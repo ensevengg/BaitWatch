@@ -183,18 +183,41 @@ def _print_human(result, *, target: str, judge_on: bool, verbose: bool = False,
 
     if reviewed:
         band = f" ({lo:.2f}–{hi:.2f})" if lo is not None and hi is not None else ""
-        if not judge_on:
-            how = "judge off"
-        else:
-            skipped = sum(1 for f in reviewed if f.evidence.get("note"))
-            how = ", ".join(p for p in (
-                f"{len(reviewed) - skipped} cleared by judge" if len(reviewed) > skipped else "",
-                f"{skipped} not judged" if skipped else "") if p)
+        unjudged = [f for f in reviewed if f.evidence.get("note")]
+        cleared = len(reviewed) - len(unjudged)
+        how = ", ".join(p for p in (
+            f"{cleared} cleared by judge" if cleared else "",
+            f"{len(unjudged)} not judged" if unjudged else "",
+            "judge off" if not judge_on and not unjudged else "") if p)
         hint = "" if verbose else " · -v to list"
         print(f"\n{st('Uncertain', 'bold')} · {_n(len(reviewed), 'chunk')}{band} "
               f"not flagged: {how}{st(hint, 'dim')}")
         if verbose:
             rows(reviewed, ("yellow",))
+        elif unjudged:
+            # Same grouping by cause as the "Not verified" section above:
+            # why these chunks were never judged, without listing each one.
+            causes: dict[str, list] = {}
+            details: dict[str, str] = {}
+            for f in unjudged:
+                note = str(f.evidence.get("note", "not judged"))
+                rest = note[len("not judged: "):] if note.startswith("not judged: ") else note
+                cause, _, detail = rest.partition(":")
+                cause = cause.strip() or rest
+                causes.setdefault(cause, []).append(f)
+                detail = (detail.strip() or rest)
+                if len(detail) > len(details.get(cause, "")):
+                    details[cause] = detail
+            for cause, fs in causes.items():
+                count = f"  ×{len(fs)}" if len(fs) > 1 else ""
+                print(f"  not judged: {_safe(cause)}{st(count, 'dim')}")
+                if details.get(cause) and details[cause] != cause:
+                    print(f"    {_clip(_safe(details[cause]), width - 4)}")
+                files = list(dict.fromkeys(_safe(f.file) for f in fs))
+                listed = files[:4]
+                more = f", +{len(files) - len(listed)} more" if len(files) > len(listed) else ""
+                for line in textwrap.wrap(", ".join(listed) + more, width - 4):
+                    print(st(f"    {line}", "dim"))
 
     coverage: list[tuple[str, str]] = []
     if s.detector_error:
