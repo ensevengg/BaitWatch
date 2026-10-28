@@ -61,6 +61,11 @@ def test_quick_preset_uses_pinned_thresholds(monkeypatch, tmp_path):
     assert cfg.walker.max_files == 400
 
 
+def test_quick_preset_disables_judge():
+    cfg = rc.ReadConfig.quick()
+    assert cfg.judge.enabled is False, "the inline hook must not block on judge calls"
+
+
 def test_missing_pinned_checkpoint_fails_loudly(monkeypatch, tmp_path):
     import pytest
 

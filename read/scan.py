@@ -6,13 +6,17 @@ Fail-closed rules implemented here (each has a test):
   default "flag"), never silently skipped.
 - If detector inference fails mid-scan, every chunk that never got a score is
   flagged as a system finding; the scan still returns.
-- Judge failure (error, timeout, garbage, spend cap) leaves the chunk flagged.
-  Inside the uncertain band the judge CAN clear; above flag_threshold
-  nothing the judge says removes the flag.
+- Judge failure (error, timeout, garbage, spend cap) in the uncertain band
+  leaves the chunk *reviewed but unjudged*, with a note saying why: the READ
+  verdict becomes "incomplete", never "clean" and never "attack" (no attack
+  was found, but none was ruled out either). The same holds when no judge is
+  configured at all. Inside the band the judge CAN clear; above
+  flag_threshold nothing the judge says removes the flag.
 - Evidence the scan could not cover — walker file cap, decoded content past
-  its cap, review-band chunks the judge budget could not reach, decoder
-  crashes, and (with ``strict_coverage``) the unscanned middle of oversized
-  files — makes the READ verdict "incomplete", never "clean".
+  its cap, decoded views the per-file chunk budget could not fully cover,
+  review-band chunks no judge cleared, decoder crashes, and (with
+  ``strict_coverage``) the unscanned middle of oversized files — makes the
+  READ verdict "incomplete", never "clean".
 
 Contract: ``scan(path) -> ScanResult``; iterate it for Finding records in the
 order the verdict engine cares about (flagged first, by score desc).
@@ -64,7 +68,9 @@ class ScanStats:
     chunks_cached: int = 0          # distinct chunk texts served by the score cache
     chunks_dropped: int = 0         # windows skipped by per-file caps (approx.)
     views_decoded: int = 0
-    views_dropped: int = 0          # decoded views/segments cut by caps
+    views_dropped: int = 0          # decoded views/segments cut by view/segment caps
+    views_skipped_chunk_budget: int = 0   # views not chunked: per-file chunk budget spent
+    decoded_views_uncovered: int = 0      # decoded views skipped/cut by the chunk budget
     flagged: int = 0
     reviewed: int = 0
     judge_calls: int = 0            # judge requests actually attempted
@@ -108,6 +114,9 @@ class ScanResult:
             return VERDICT_ATTACK
         if self.stats.incomplete_reasons:
             return VERDICT_INCOMPLETE
+        if any(f.status == STATUS_REVIEWED and f.evidence.get("note")
+               for f in self.findings):
+            return VERDICT_INCOMPLETE
         return VERDICT_CLEAN
 
     def to_dict(self) -> dict:
@@ -123,6 +132,39 @@ class ScanResult:
 def _snippet(text: str, limit: int = 200) -> str:
     one_line = " ".join(text.split())
     return one_line[:limit] + ("…" if len(one_line) > limit else "")
+
+
+def _water_fill(needs: list[int], cap: int) -> list[int]:
+    """Split ``cap`` chunks across views by need, as evenly as possible.
+
+    Every unsatisfied view is raised to the same level before any view
+    goes higher, so a view that needs little keeps its full need and the
+    leftover flows to larger views instead of the first view in order
+    consuming the whole cap.
+    """
+    alloc = [0] * len(needs)
+    if cap <= 0:
+        return alloc
+    remaining = cap
+    active = [i for i, need in enumerate(needs) if need > 0]
+    while remaining > 0 and active:
+        share = remaining // len(active)
+        if share == 0:
+            # Fewer chunks left than views: finish the views closest to
+            # fully covered first (view order breaks ties).
+            closest = sorted(active, key=lambda i: (needs[i] - alloc[i], i))
+            for i in closest[:remaining]:
+                alloc[i] += 1
+            break
+        still_active: list[int] = []
+        for i in active:
+            give = min(share, needs[i] - alloc[i])
+            alloc[i] += give
+            remaining -= give
+            if alloc[i] < needs[i]:
+                still_active.append(i)
+        active = still_active
+    return alloc
 
 
 @dataclass
@@ -206,13 +248,16 @@ def _read_file(fpath: Path, max_bytes: int, tail_bytes: int,
 
 def _load_detector(cfg: ReadConfig, cache: dict) -> Detector:
     resolved = str(resolve_model_path(cfg.model_path))
-    if resolved not in cache:
-        cache[resolved] = Detector(
+    # Inference-shaping config is part of the key: a detector built with one
+    # batch_size/max_length must not silently serve a scan asking for another.
+    key = (resolved, cfg.batch_size, cfg.max_length)
+    if key not in cache:
+        cache[key] = Detector(
             resolved,
             batch_size=cfg.batch_size,
             max_length=cfg.max_length,
         )
-    return cache[resolved]
+    return cache[key]
 
 
 def _score_cache(cfg: ReadConfig, det, cache: dict) -> ScoreCache | None:
@@ -371,7 +416,10 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
         if ft.tail:
             segments.append((ft.tail, ft.tail_line_offset))
         next_id = 0
-        for seg_text, line_offset in segments:
+        # One chunk budget per file, shared across all segments (head/tail)
+        # and all decoded views — not one budget per segment x view.
+        budget_left = cfg.max_chunks_per_file
+        for seg_idx, (seg_text, line_offset) in enumerate(segments):
             overflow: list[int] = []
             views = produce_views(seg_text, decoders, errors=decoder_errors,
                                   overflow=overflow)
@@ -383,17 +431,98 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
                 views = views[:cfg.max_views_per_file]
                 partial = True
             stats.views_decoded += len(views) - 1
-            for view in views:
+            # Reserve tail windows for the tail segment that follows:
+            # oversized files keep their tail scored under the cap.
+            is_last_segment = seg_idx == len(segments) - 1
+            tail_reserve = 0
+            if not is_last_segment and budget_left > 1:
+                tail_reserve = min(cfg.tail_windows, budget_left - 1)
+            segment_budget = max(0, budget_left - tail_reserve)
+            original_views = [v for v in views if v.decoder is None]
+            decoded_views = [v for v in views if v.decoder is not None]
+            # Chunk the decoded views first to measure what they actually
+            # need. Combined decoded chunks are capped at about half the
+            # segment budget (their guaranteed share, shared by water-fill
+            # so no single decoded view can starve the others); the
+            # original then gets everything the decoded views did not
+            # use, so a tiny decoded view cannot halve original coverage.
+            decoded_cap = ((segment_budget + 1) // 2
+                           if decoded_views and segment_budget > 1 else 0)
+            decoded_chunks: list[list[Chunk]] = [[] for _ in decoded_views]
+            if decoded_views and decoded_cap > 0:
+                prepared: list[tuple[str, list[Chunk], int]] = []
+                needs: list[int] = []
+                for view in decoded_views:
+                    text = mask_blobs(view.text) if cfg.mask_blobs else view.text
+                    # Decoded text has no position in the file: no line.
+                    prelim, prelim_uncovered = chunker.chunk(
+                        text, rel, view=view.decoder or "original",
+                        first_chunk_id=0, line_offset=None,
+                        max_chunks=decoded_cap)
+                    prepared.append((text, prelim, prelim_uncovered))
+                    needs.append(len(prelim) + (
+                        max(1, math.ceil(prelim_uncovered / stride))
+                        if prelim_uncovered else 0))
+                for idx, allocation in enumerate(_water_fill(needs, decoded_cap)):
+                    if needs[idx] == 0:
+                        continue
+                    if allocation <= 0:
+                        stats.views_skipped_chunk_budget += 1
+                        stats.chunks_dropped += 1
+                        partial = True
+                        stats.decoded_views_uncovered += 1
+                        continue
+                    text, prelim, prelim_uncovered = prepared[idx]
+                    if allocation >= needs[idx] and not prelim_uncovered:
+                        decoded_chunks[idx] = prelim
+                        continue
+                    final_chunks, uncovered = chunker.chunk(
+                        text, rel, view=decoded_views[idx].decoder or "original",
+                        first_chunk_id=0, line_offset=None,
+                        max_chunks=allocation)
+                    decoded_chunks[idx] = final_chunks
+                    if uncovered:
+                        partial = True
+                        stats.chunks_dropped += max(
+                            1, math.ceil(uncovered / stride))
+                        stats.decoded_views_uncovered += 1
+            elif decoded_views:
+                # A segment budget of 0/1 leaves no decoded share: the
+                # original keeps it and the decoded views are uncovered.
+                for _view in decoded_views:
+                    stats.views_skipped_chunk_budget += 1
+                    stats.chunks_dropped += 1
+                    partial = True
+                    stats.decoded_views_uncovered += 1
+            decoded_used = sum(len(view_chunks) for view_chunks in decoded_chunks)
+            original_allowance = max(0, segment_budget - decoded_used)
+            original_chunks: list[Chunk] = []
+            for view in original_views:
+                if original_allowance <= 0:
+                    stats.views_skipped_chunk_budget += 1
+                    stats.chunks_dropped += 1
+                    partial = True
+                    continue
                 text = mask_blobs(view.text) if cfg.mask_blobs else view.text
-                # Decoded text has no position in the file: no line number.
                 file_chunks, uncovered = chunker.chunk(
-                    text, rel, view=view.decoder or "original", first_chunk_id=next_id,
-                    line_offset=line_offset if view.decoder is None else None)
-                chunks.extend(file_chunks)
-                next_id += len(file_chunks)
+                    text, rel, view="original", first_chunk_id=0,
+                    line_offset=line_offset,
+                    max_chunks=original_allowance)
+                original_chunks.extend(file_chunks)
+                original_allowance -= len(file_chunks)
                 if uncovered:
                     partial = True
                     stats.chunks_dropped += max(1, math.ceil(uncovered / stride))
+            # Emit the original's chunks first, then the decoded views in
+            # view order; ids are assigned in that emitted order so they
+            # stay unique and deterministic within the file.
+            segment_chunks = original_chunks + [
+                chunk for view_chunks in decoded_chunks for chunk in view_chunks]
+            for chunk in segment_chunks:
+                chunk.chunk_id = next_id
+                next_id += 1
+            chunks.extend(segment_chunks)
+            budget_left -= len(segment_chunks)
         if partial:
             stats.partial_files += 1
     stats.decoder_errors = [f"{name}: {msg}" for name, msg in decoder_errors]
@@ -454,10 +583,13 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
             elif score >= cfg.review_low:
                 # No judge configured (CI / explicit --no-judge): the uncertain
                 # band still surfaces, as reviewed-not-flagged, so nothing
-                # silently disappears and the ASK tier can act on it.
+                # silently disappears and the ASK tier can act on it — but it
+                # was never judged, so the note keeps the verdict incomplete.
                 findings.append(Finding(
                     file=chunk.file, chunk_id=chunk.chunk_id, score=score,
-                    layer=LAYER_MODEL, evidence=evidence, status=STATUS_REVIEWED,
+                    layer=LAYER_MODEL,
+                    evidence={**evidence, "note": "not judged: no judge configured"},
+                    status=STATUS_REVIEWED,
                     decoded=decoded, decoder=decoder,
                 ))
             # else: below review band, genuinely clean — no finding.
@@ -492,11 +624,18 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
                         decoded=decoded, decoder=decoder,
                     ))
                 else:
+                    # Judge unavailable is not an attack and not clean: the
+                    # chunk stays reviewed with a note, and the scan reports
+                    # incomplete evidence instead of flagging a benign repo.
                     stats.judge_unavailable += 1
-                    findings.append(system_finding(
-                        chunk.file,
-                        f"judge unavailable, fail-closed: {result.error}",
-                        chunk_id=chunk.chunk_id, evidence=evidence, decoder=decoder,
+                    findings.append(Finding(
+                        file=chunk.file, chunk_id=chunk.chunk_id, score=score,
+                        layer=LAYER_MODEL,
+                        evidence={**evidence,
+                                  "note": f"not judged: judge unavailable: {result.error}"},
+                        status=STATUS_REVIEWED,
+                        explanation=result.explanation,
+                        decoded=decoded, decoder=decoder,
                     ))
 
         # Flagged chunks still owed an explanation get judged last, by score.
@@ -523,6 +662,8 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
                             f"(model score {f.score:.2f}): "
                             + (result.explanation or "no explanation given")
                         )
+                    elif result.verdict == "skipped":
+                        stats.judge_skipped += 1
                     elif result.verdict == "unavailable":
                         stats.judge_unavailable += 1
 
@@ -546,8 +687,15 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
     if stats.views_dropped:
         reasons.append(f"decoded content cap: {stats.views_dropped} decoded "
                        f"view(s)/segment(s) not scored")
+    if stats.decoded_views_uncovered:
+        reasons.append(f"decoded chunk budget: {stats.decoded_views_uncovered} decoded "
+                       f"view(s) not fully scored")
     if stats.judge_skipped:
         reasons.append(f"judge budget: {stats.judge_skipped} review-band chunk(s) not judged")
+    unjudged = sum(1 for f in findings
+                   if f.status == STATUS_REVIEWED and f.evidence.get("note"))
+    if unjudged:
+        reasons.append(f"unjudged review-band: {unjudged} review-band chunk(s) not judged")
     if stats.decoder_errors:
         reasons.append(f"decoder errors: {len(stats.decoder_errors)}")
     if cfg.strict_coverage and stats.partial_files:

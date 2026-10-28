@@ -83,7 +83,8 @@ def test_benign_fixture_fpr_meets_gate(detector):
 
     cfg = _pinned()
     threshold = cfg["thresholds"]["flag_threshold"]
-    fixtures = Path(__file__).parent / "fixtures" / "benign_repo"
+    # The benign half of the real-world suite (12 repos), scanned repo by repo.
+    fixtures = Path(__file__).parent / "fixtures" / "suite" / "benign"
     chunker = Chunker(detector.tokenizer)
     report = benign_fpr(detector, chunker, fixtures, threshold)
     gate = cfg.get("quality_gates", {}).get("max_benign_file_fpr", 0.02)

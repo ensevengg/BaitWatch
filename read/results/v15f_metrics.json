@@ -16,7 +16,7 @@
     "val_benign": 1345,
     "val_attack": 1051
   },
-  "computed_at": "2026-10-27T06:19:13+0530",
+  "computed_at": "2026-10-28T16:55:25+0530",
   "injecagent": {
     "variants": {
       "dh_base": {
@@ -76,40 +76,62 @@
   "test_split": {
     "threshold": 0.85,
     "overall": {
+      "support": 2396,
+      "attacks": 1051,
+      "benign": 1345,
       "precision": 0.9394,
       "recall": 0.8116,
       "f1": 0.8709,
-      "support": 2396
+      "fpr": 0.0409
     },
     "by_source": {
       "llmail": {
+        "support": 1438,
+        "attacks": 762,
+        "benign": 676,
         "precision": 0.9428,
         "recall": 0.8438,
         "f1": 0.8906,
-        "support": 1438
+        "fpr": 0.0577
       },
       "opencodeinstruct": {
-        "precision": 0.0,
-        "recall": 0.0,
-        "f1": 0.0,
-        "support": 399
+        "support": 399,
+        "attacks": 0,
+        "benign": 399,
+        "fpr": 0.0
       },
       "prodnull": {
+        "support": 559,
+        "attacks": 289,
+        "benign": 270,
         "precision": 0.9292,
         "recall": 0.7266,
         "f1": 0.8155,
-        "support": 559
+        "fpr": 0.0593
       }
     }
   },
   "benign_corpus": {
-    "files": 2027,
-    "chunks": 8937,
-    "flagged_files": 116,
-    "file_fpr": 0.0572,
-    "chunk_fpr": 0.0387,
+    "files": 2021,
+    "chunks": 8846,
+    "flagged_files": 79,
+    "file_fpr": 0.0391,
+    "chunk_fpr": 0.0121,
+    "repos": 1,
+    "repos_flagged": 1,
+    "review_band_chunks": 528,
+    "judge_enabled": false,
+    "per_repo": {
+      "benign-corpus": {
+        "files": 2021,
+        "flagged_files": 79,
+        "review_band_chunks": 528,
+        "judge_calls": 0,
+        "read_verdict": "attack",
+        "elapsed_s": 43.916
+      }
+    },
     "flagged_file_list": [
-      "CheatSheetSeries/link-check-known-failures.json",
       "CheatSheetSeries/.claude/commands/review-cheatsheet-pr.md",
       "CheatSheetSeries/assets/Authorization_filter.drawio",
       "CheatSheetSeries/assets/Authorization_filter.svg",
@@ -120,16 +142,37 @@
       "CheatSheetSeries/assets/Edge_Level_Authorization_Modern.svg",
       "CheatSheetSeries/assets/Embedded_data.svg",
       "CheatSheetSeries/assets/External_Identity_Propagation.svg",
-      "CheatSheetSeries/assets/Logging_Cheat_Sheet.drawio",
-      "CheatSheetSeries/assets/Network_Segmentation_Cheat_Sheet_BACKEND.drawio",
-      "CheatSheetSeries/assets/Network_Segmentation_Cheat_Sheet_firewall_1.drawio",
-      "CheatSheetSeries/assets/Network_Segmentation_Cheat_Sheet_firewall_2.drawio",
-      "CheatSheetSeries/assets/Network_Segmentation_Cheat_Sheet_interservice.drawio",
-      "CheatSheetSeries/assets/Network_Segmentation_Cheat_Sheet_interservice_balancer.drawio",
-      "CheatSheetSeries/assets/Network_Segmentation_Cheat_Sheet_interservice_deny.drawio",
-      "CheatSheetSeries/assets/Network_Segmentation_Cheat_Sheet_MIDDLEWARE.drawio",
-      "CheatSheetSeries/assets/Network_Segmentation_Cheat_Sheet_Monitoring.drawio"
+      "CheatSheetSeries/assets/On_demand_data_pull.svg",
+      "CheatSheetSeries/assets/Out_of_band_data_push.svg",
+      "CheatSheetSeries/assets/PDP_as_filter.svg",
+      "CheatSheetSeries/assets/Protocol_Agnostic_Identity_Propagation.svg",
+      "CheatSheetSeries/assets/Request_time_data_injection.svg",
+      "CheatSheetSeries/assets/Simple_Service_Level_Identity_Forwarding.svg",
+      "CheatSheetSeries/assets/Token_Exchange_Based_Identity_Issuance.svg",
+      "CheatSheetSeries/cheatsheets/Bean_Validation_Cheat_Sheet.md",
+      "CheatSheetSeries/cheatsheets/Browser_Extension_Vulnerabilities_Cheat_Sheet.md",
+      "CheatSheetSeries/cheatsheets/C-Based_Toolchain_Hardening_Cheat_Sheet.md",
+      "CheatSheetSeries/cheatsheets/Django_Security_Cheat_Sheet.md",
+      "CheatSheetSeries/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.md",
+      "CheatSheetSeries/cheatsheets/Laravel_Cheat_Sheet.md",
+      "CheatSheetSeries/cheatsheets/Mass_Assignment_Cheat_Sheet.md",
+      "CheatSheetSeries/cheatsheets/Third_Party_Javascript_Management_Cheat_Sheet.md",
+      "CheatSheetSeries/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.md",
+      "CheatSheetSeries/cheatsheets/WebSocket_Security_Cheat_Sheet.md",
+      "CheatSheetSeries/cheatsheets/XSS_Filter_Evasion_Cheat_Sheet.md",
+      "cli/.github/workflows/coverage.yml",
+      "cli/.github/workflows/release-brew.yml",
+      "cli/Makefile",
+      "cli/docs/README.md",
+      "cli/extras/httpie-completion.fish",
+      "cli/extras/man/http.1",
+      "cli/extras/man/https.1",
+      "cli/httpie/cli/definition.py",
+      "cli/httpie/utils.py",
+      "cli/tests/fixtures/xmldata/invalid/external_file.xml",
+      "cli/tests/fixtures/xmldata/invalid/xalan_exec.xsl",
+      "cli/tests/utils/matching/test_matching.py"
     ]
   },
-  "elapsed_s": 47.4
+  "elapsed_s": 51.3
 }

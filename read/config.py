@@ -145,6 +145,10 @@ class ReadConfig:
         cfg.max_chunks_per_file = 8
         cfg.max_file_tokens = 8_000
         cfg.batch_size = 128
+        # The inline hook must not block on judge round-trips: detector-only.
+        # Review-band chunks it surfaces are reported as unjudged/incomplete
+        # (see read/scan.py), never silently clean.
+        cfg.judge.enabled = False
         # The pinned checkpoint's thresholds, not the class defaults: the
         # hook must judge with the same cutoffs as a full scan.
         return config_from_model_config(cfg)

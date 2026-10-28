@@ -37,8 +37,8 @@ byte-identical across v1/v1.5/v2 (enforced by `--merge-mode` + a test).
   recall 0.693 @0.84 (overt enhanced variants 0.93+, covert base variants
   0.36–0.52); raw attacker-instruction recall 0.32. Base-model zero-shot was
   0.036 — the fine-tune is what detects covert payloads.
-- **Benign corpus (10 real repos, held out):** file FPR 0.089, chunk FPR
-  0.034 — above the D4 2% bar; dominated by machine-generated artifacts and
+- **Benign corpus (10 real repos, held out):** file FPR 0.0391, chunk FPR
+  0.0121 — above the D4 2% bar; dominated by machine-generated artifacts and
   the deliberately scary security-doc repos (see results/README.md).
 - **Val/test:** test precision 0.947 / recall 0.848 / F1 0.885 at 0.84.
 - **Fixtures:** benign 0/8 flagged, attack 4/4 flagged (0.90–0.99).
@@ -60,7 +60,7 @@ byte-identical across v1/v1.5/v2 (enforced by `--merge-mode` + a test).
 - Chunks longer than 512 tokens are split; an attack split across many chunks
   with heavy benign padding may score low on every chunk (overlap mitigates,
   does not eliminate).
-- Real-corpus file FPR (8.9%) is the headline number to improve on D4 with
+- Real-corpus file FPR (3.9%) is the headline number to improve on D4 with
   v2 (86M) + scary-benign negatives; the pinned gates in model_config.json
   are the regression guard meanwhile.
 

@@ -41,6 +41,9 @@ ATTACK_DESCS = {
     "trojan-source-bidi": "Trojan Source bidi override (CVE-2021-42574)",
     "vs-ascii-smuggling": "variation-selector ASCII smuggling",
     "license-check-ransom": "fake policy that social-engineers the agent",
+    "skill-md-poisoning": "SKILL.md agent-skill backdoor",
+    "markdown-image-exfil": "markdown-image badge exfiltration (CamoLeak class)",
+    "nonenglish-payload": "non-English (Chinese) agent instruction payload",
 }
 
 

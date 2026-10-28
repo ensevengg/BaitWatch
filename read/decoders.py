@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import codecs
+import html
 import re
 import unicodedata
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -54,6 +57,11 @@ _B64_RUN_RE = re.compile(r"[A-Za-z0-9+/_-]{24,}={0,2}")
 # blobs (PEM-style, `base64 -w 76`) are rejoined before decoding.
 _B64_LINE_RE = re.compile(r"^[\s>#*/\"'`]*([A-Za-z0-9+/_-]{16,}={0,2})[\s\"'`,;\\]*$")
 _HEX_RUN_RE = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}){16,}(?![0-9A-Fa-f])")
+_B32_RUN_RE = re.compile(r"[A-Z2-7]{16,}={0,6}", re.IGNORECASE)
+_ENTITY_RE = re.compile(r"&(#\d+|#x[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]+);")
+_ENTITY_RUN_RE = re.compile(r"(?:&(?:#\d+|#x[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]+);)+")
+_PCT_RE = re.compile(r"%[0-9a-fA-F]{2}")
+_PCT_RUN_RE = re.compile(r"(?:%[0-9a-fA-F]{2})+")
 _HTML_COMMENT_RE = re.compile(r"<!--(.*?)-->", re.DOTALL)
 # Zero-width and invisible formatting chars used to smuggle text past review.
 # Includes the Trojan-Source bidi controls (CVE-2021-42574) — U+202A..U+202E
@@ -155,6 +163,168 @@ class HexDecoder:
             if decoded is not None and decoded not in out:
                 out.append(decoded)
         return out
+
+
+class Base32Decoder:
+    """Decodes base32 runs whose result is mostly printable text."""
+    name = "base32"
+
+    def decode(self, text: str) -> list[str]:
+        out: list[str] = []
+        for match in _B32_RUN_RE.finditer(text):
+            s = match.group().upper().rstrip("=")
+            if len(s) % 8 in (1, 3, 6):   # impossible base32 lengths
+                continue
+            try:
+                raw = base64.b32decode(s + "=" * (-len(s) % 8))
+            except (binascii.Error, ValueError):
+                continue
+            decoded = _printable_text(raw)
+            if decoded is not None and decoded not in out:
+                out.append(decoded)
+        return out
+
+
+# Markup escapes whose decoding changes punctuation, not the text a model
+# reads: lines/files using only these are markup, not encoded payloads.
+_BENIGN_ENTITY_BODIES = frozenset({
+    "amp", "quot", "lt", "gt", "apos", "nbsp", "#39", "#x27", "#x22",
+    "#xa", "#10", "#xd", "#13", "#x9", "#9",   # whitespace escapes (drawio SVGs)
+})
+
+
+def _is_interesting_entity(match: re.Match) -> bool:
+    return match.group(1).lower() not in _BENIGN_ENTITY_BODIES
+
+
+class HtmlEntityDecoder:
+    """Unescapes HTML entities (``&#73;gnore…``) into plain text.
+
+    Gated so ordinary files that merely contain ``&amp;`` do not produce a
+    whole-file copy: a decoded view is emitted only for a run of entities
+    that decodes to real text, for a line carrying several non-markup
+    entities and reading as prose once decoded, or when such entities cover
+    a material fraction of the whole text.
+    """
+    name = "html_entity"
+
+    def decode(self, text: str) -> list[str]:
+        matches = list(_ENTITY_RE.finditer(text))
+        if not matches:
+            return []
+        out: list[str] = []
+
+        def add(decoded: str) -> None:
+            if decoded.strip() and decoded != text and decoded not in out:
+                out.append(decoded)
+
+        for m in _ENTITY_RUN_RE.finditer(text):
+            decoded = html.unescape(m.group())
+            if len(decoded.strip()) >= 8 and any(
+                    _is_interesting_entity(e) for e in _ENTITY_RE.finditer(m.group())):
+                add(decoded)
+        for line in text.splitlines():
+            line_matches = list(_ENTITY_RE.finditer(line))
+            if len(line_matches) >= 3 and any(
+                    _is_interesting_entity(e) for e in line_matches):
+                decoded = html.unescape(line)
+                # A line of markup that merely uses &quot;/&amp; decodes to
+                # itself; only lines that read as prose once decoded are
+                # worth a separate view.
+                if _english_hits(decoded) >= 3:
+                    add(decoded)
+        interesting = [m for m in matches if _is_interesting_entity(m)]
+        entity_chars = sum(len(m.group()) for m in interesting)
+        if len(interesting) >= 4 and entity_chars / max(1, len(text)) >= 0.10:
+            add(html.unescape(text))
+        return out
+
+
+class UrlEncodingDecoder:
+    """Percent-decodes text containing ``%XX`` escapes.
+
+    Gated like the HTML-entity decoder: a lone ``%20`` in a URL or file name
+    emits nothing. Only decoded runs, lines carrying several escapes, or a
+    text materially covered by escapes produce a view.
+    """
+    name = "url_encoding"
+
+    def decode(self, text: str) -> list[str]:
+        matches = list(_PCT_RE.finditer(text))
+        if not matches:
+            return []
+        out: list[str] = []
+
+        def add(decoded: str) -> None:
+            if decoded.strip() and decoded != text and decoded not in out:
+                out.append(decoded)
+
+        for m in _PCT_RUN_RE.finditer(text):
+            decoded = urllib.parse.unquote(m.group())
+            if len(decoded.strip()) >= 8:
+                add(decoded)
+        for line in text.splitlines():
+            if len(_PCT_RE.findall(line)) >= 3:
+                decoded = urllib.parse.unquote(line)
+                # Percent-escapes in URLs/code ("/snow%20%E2%98%83/") decode
+                # to themselves in context; only prose-like decoded lines
+                # earn a separate view.
+                if _english_hits(decoded) >= 3:
+                    add(decoded)
+        if len(matches) >= 4 and 3 * len(matches) / max(1, len(text)) >= 0.10:
+            add(urllib.parse.unquote(text))
+        return out
+
+
+_COMMON_WORDS = frozenset({
+    "the", "and", "all", "your", "you", "this", "that", "with", "from",
+    "before", "after", "any", "ignore", "instructions", "instruction",
+    "previous", "send", "run", "read", "file", "files", "user", "secret",
+    "secrets", "token", "tokens", "curl", "not", "do", "tell", "mention",
+    "contents", "content", "server", "please", "post", "env", "collect",
+    "https", "evil", "example", "hidden", "never", "must", "agent", "agents",
+    "system", "prompt", "override", "download", "execute", "install",
+    "password", "credentials", "task", "its", "to",
+})
+
+
+def _english_hits(text: str) -> int:
+    return sum(1 for w in re.findall(r"[a-z]+", text.lower()) if w in _COMMON_WORDS)
+
+
+class Rot13Decoder:
+    """ROT13-decodes lines that read as English only after decoding.
+
+    The English-likeness gate keeps this from emitting a gibberish copy of
+    every ordinary file: a line is surfaced only when the decoded form has
+    at least two common words and more than the original.
+    """
+    name = "rot13"
+
+    def decode(self, text: str) -> list[str]:
+        cands = []
+        for line in text.splitlines():
+            if len(line) < 12:
+                continue
+            decoded = codecs.decode(line, "rot_13")
+            if _english_hits(decoded) >= 2 and _english_hits(decoded) > _english_hits(line):
+                cands.append(decoded)
+        return ["\n".join(cands)] if cands else []
+
+
+class ReversedDecoder:
+    """Reverses lines that read as English only when reversed."""
+    name = "reversed"
+
+    def decode(self, text: str) -> list[str]:
+        cands = []
+        for line in text.splitlines():
+            if len(line) < 12:
+                continue
+            decoded = line[::-1]
+            if _english_hits(decoded) >= 2 and _english_hits(decoded) > _english_hits(line):
+                cands.append(decoded)
+        return ["\n".join(cands)] if cands else []
 
 
 class HtmlCommentDecoder:
@@ -267,8 +437,10 @@ class VariationSelectorDecoder:
 
 
 def builtin_decoders() -> list[Decoder]:
-    return [Base64Decoder(), HtmlCommentDecoder(), ZeroWidthDecoder(),
-            VariationSelectorDecoder(), TagDecoder(), HexDecoder()]
+    return [Base64Decoder(), Base32Decoder(), HexDecoder(),
+            HtmlCommentDecoder(), HtmlEntityDecoder(), ZeroWidthDecoder(),
+            VariationSelectorDecoder(), TagDecoder(),
+            UrlEncodingDecoder(), Rot13Decoder(), ReversedDecoder()]
 
 
 # -- blob masking ---------------------------------------------------------------
@@ -366,7 +538,7 @@ SEGMENT_SEPARATOR = "\n\n"
 
 def produce_views(text: str, decoders: list[Decoder] | None,
                   errors: list[tuple[str, str]] | None = None,
-                  depth: int = 2, max_segments: int = 256,
+                  depth: int = 3, max_segments: int = 256,
                   overflow: list[int] | None = None) -> list[View]:
     """Original text first, then one view per decoder.
 

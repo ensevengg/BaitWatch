@@ -6,8 +6,9 @@ payload list (Aditya's attack seeds, D3: "hash-check that none of Aditya's
 attack-repo payloads are in your training parquet").
 
 The real-world suite's attack fixtures (tests/read/fixtures/suite/attacks)
-are frozen too — every line of >= 5 words and every whole file — so suite
-results can only be reported for models that never trained on them.
+are frozen too — every line of >= 8 words, every long spaceless line (e.g.
+CJK text), and every whole file — so suite results can only be reported for
+models that never trained on them.
 
 A row counts as leaked when its normalized text matches a frozen text exactly,
 or shares word 3-gram Jaccard >= 0.8 with one. Exact matches are reported
@@ -37,8 +38,35 @@ TEST_CASE_FILES = (
 )
 
 
-def suite_attack_texts(suite_dir: Path = SUITE_ATTACKS_DIR) -> list[str]:
-    """Whole files and every >= 5-word line of the suite's attack fixtures."""
+def _is_frozen_line(line: str, min_line_words: int) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    normalized = normalize_for_dedupe(stripped)
+    if not normalized:
+        return False   # e.g. a line of variation selectors erases to nothing
+    if len(normalized.split()) >= min_line_words:
+        return True
+    # Lines without spaces (CJK text normalizes to one or a few long
+    # "words") are frozen by length instead, so non-English payloads stay
+    # frozen even when punctuation splits them into several tokens.
+    if len(stripped) >= 20 and any(
+            "\u3400" <= c <= "\u4dbf" or "\u4e00" <= c <= "\u9fff"
+            or "\uf900" <= c <= "\ufaff" or "\u3040" <= c <= "\u30ff"
+            or "\uac00" <= c <= "\ud7af" for c in stripped):
+        return True
+    return " " not in normalized and len(normalized) >= 20
+
+
+def suite_attack_texts(suite_dir: Path = SUITE_ATTACKS_DIR,
+                       min_line_words: int = 8) -> list[str]:
+    """Whole files and every long line of the suite's attack fixtures.
+
+    Only lines of >= ``min_line_words`` words (or long spaceless lines) are
+    frozen individually: shorter lines are common phrases ("Commit messages
+    follow Conventional Commits." appears in a fixture and in ordinary benign
+    repos) and flag false leaks. Whole files are always frozen.
+    """
     texts: list[str] = []
     if not suite_dir.exists():
         return texts
@@ -50,7 +78,7 @@ def suite_attack_texts(suite_dir: Path = SUITE_ATTACKS_DIR) -> list[str]:
         if body.strip():
             texts.append(body)
         texts.extend(ln.strip() for ln in body.splitlines()
-                     if len(normalize_for_dedupe(ln).split()) >= 5)
+                     if _is_frozen_line(ln, min_line_words))
     return texts
 
 
@@ -78,22 +106,18 @@ def frozen_texts(extra: list[Path] | None = None,
     return {k: v for k, v in out.items() if v}
 
 
-def check_split(parquet_path: Path, frozen: dict[str, list[str]],
-                jaccard_threshold: float = 0.8) -> dict:
-    """Fast two-sided check.
-
-    An inverted index over frozen word 3-grams narrows every row to a handful
-    of candidate frozen texts before any Jaccard math runs, so the full sweep
-    is O(total shingles) instead of O(rows x frozen).
-    """
-    rows = read_parquet(parquet_path)
-
+def check_rows(rows, frozen: dict[str, list[str]],
+               jaccard_threshold: float = 0.8) -> dict:
+    """Leakage check over in-memory rows (see :func:`check_split`)."""
+    rows = list(rows)
     hash_to_frozen: dict[str, list[tuple[str, int]]] = {}
     tri_to_frozen: dict[bytes, set[tuple[str, int]]] = {}
     frozen_shingles: dict[tuple[str, int], set[bytes]] = {}
     frozen_norm: dict[tuple[str, int], str] = {}
     for group, texts in frozen.items():
         for idx, t in enumerate(texts):
+            if not normalize_for_dedupe(t):
+                continue   # erases to nothing: cannot match a training row
             gid = (group, idx)
             hash_to_frozen.setdefault(text_sha256(t), []).append(gid)
             sh = {h.tobytes() for h in _shingle_hashes(t)}
@@ -133,12 +157,23 @@ def check_split(parquet_path: Path, frozen: dict[str, list[str]],
                 exact[group].append({"split_row": i, "label": r.label,
                                      "embedded": True})
     return {
-        "parquet": str(parquet_path),
         "rows": len(rows),
         "exact_leaks": {k: v for k, v in exact.items() if v},
         "fuzzy_leaks": {k: v for k, v in fuzzy.items() if v},
         "clean": not any(exact.values()) and not any(fuzzy.values()),
     }
+
+
+def check_split(parquet_path: Path, frozen: dict[str, list[str]],
+                jaccard_threshold: float = 0.8) -> dict:
+    """Fast two-sided check over one parquet split.
+
+    An inverted index over frozen word 3-grams narrows every row to a handful
+    of candidate frozen texts before any Jaccard math runs, so the full sweep
+    is O(total shingles) instead of O(rows x frozen).
+    """
+    report = check_rows(read_parquet(parquet_path), frozen, jaccard_threshold)
+    return {"parquet": str(parquet_path), **report}
 
 
 def main(argv: list[str] | None = None) -> int:
