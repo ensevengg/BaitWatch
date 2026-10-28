@@ -37,14 +37,16 @@ SINK_POLL_SECONDS = 0.05
 # runs as the same uid, and PID 1 is the cage's own trusted sleep. A live
 # process must never be skipped, whatever its cmdline: only a zombie — state Z
 # in /proc/<pid>/stat, dead until PID 1 reaps it — is beyond a kill. The state
-# sits after the last ')' of comm, which may itself contain parens.
+# sits after the last ')' of comm, which may itself contain parens or a
+# newline, so the whole record is read at once; an unreadable or malformed
+# record yields no Z and is killed like a live process.
 KILL_LINGERING = (
     "round=0; "
     "while [ $round -lt 3 ]; do "
     "alive=0; "
     "for entry in /proc/[0-9]*; do pid=${entry#/proc/}; "
-    'if [ "$pid" != "1" ] && [ "$pid" != "$$" ] '
-    '&& read -r stat 2>/dev/null < "$entry/stat"; then '
+    'if [ "$pid" != "1" ] && [ "$pid" != "$$" ]; then '
+    'stat=$(cat "$entry/stat" 2>/dev/null); '
     "state=${stat##*) }; state=${state%% *}; "
     'if [ "$state" != "Z" ]; then alive=1; kill -KILL "$pid" 2>/dev/null; fi; fi; '
     "done; "
@@ -53,6 +55,9 @@ KILL_LINGERING = (
     "done; exit 1"
 )
 KILL_TIMEOUT_SECONDS = 10
+# Printed by the in-cage wrapper before the tool starts; its absence means the
+# docker exec never reached the cage, so its exit code is not the tool's.
+EXEC_START_MARKER = "baitwatch-exec-started"
 
 
 class SandboxError(RuntimeError):
@@ -618,6 +623,14 @@ class Sandbox:
         self._cage.reload()
         return self._cage.attrs["State"]["Status"] == "running"
 
+    def cage_running(self) -> bool:
+        if self._cage is None:
+            return False
+        try:
+            return self._cage_running()
+        except Exception:
+            return False
+
     def _kill_lingering(self) -> None:
         """Kill every live cage process except PID 1 and the killer itself.
 
@@ -682,7 +695,13 @@ class Sandbox:
             self._error("EXEC_ERROR", message)
             raise SandboxError(message)
         seconds = max(1, math.ceil(self.config.tool_timeout_seconds))
-        wrapped = ["timeout", "-s", "KILL", str(seconds), *argv]
+        wrapped = [
+            "sh",
+            "-c",
+            f"printf '%s\\n' {EXEC_START_MARKER} >&2; exec timeout -s KILL {seconds} \"$@\"",
+            "baitwatch-exec",
+            *argv,
+        ]
         try:
             result = capture_attached(
                 ["docker", "--host", self._docker_host, "exec", self._cage.id, *wrapped],
@@ -698,6 +717,9 @@ class Sandbox:
             raise SandboxError(str(exc)) from exc
         if result.exit_code == 137 and not result.timed_out:
             result.timed_out = True
+        reached = result.stderr.startswith(EXEC_START_MARKER)
+        if reached:
+            result.stderr = result.stderr[len(EXEC_START_MARKER) :].removeprefix("\n")
         try:
             running = self._cage_running()
         except Exception as exc:
@@ -709,6 +731,21 @@ class Sandbox:
             self._error("CAGE_EXITED", "the cage stopped during a tool call")
         else:
             self._kill_lingering()
+            if result.timed_out:
+                self._error(
+                    "EXEC_TIMEOUT",
+                    f"tool call exceeded its {self.config.tool_timeout_seconds:g}s limit",
+                )
+            if result.output_truncated:
+                self._error(
+                    "EXEC_OUTPUT_TRUNCATED",
+                    f"tool call exceeded its {self.config.max_output_bytes} byte output limit",
+                )
+            if not reached and not result.timed_out and not result.output_truncated:
+                self._error(
+                    "EXEC_TRANSPORT_FAILED",
+                    f"docker exec did not reach the cage (exit {result.exit_code})",
+                )
         return result
 
     def run_command(self, command: Sequence[str]) -> CommandResult:
@@ -969,7 +1006,10 @@ def detonate(
                     sandbox.evidence.components.sandbox == State.NOT_RUN
                     and sandbox.evidence.components.decoy == State.COMPLETE
                 ):
-                    sandbox.evidence.components.sandbox = State.COMPLETE
+                    if sandbox.cage_running():
+                        sandbox.evidence.components.sandbox = State.COMPLETE
+                    else:
+                        sandbox._error("CAGE_EXITED", "the cage stopped before the decoy completed")
             sandbox.collect_sinks()
             sandbox.trace_after()
     except Exception as exc:

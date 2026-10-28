@@ -8,6 +8,7 @@ from docker.errors import APIError, NotFound
 
 from run.evidence import CommandResult, State
 from run.sandbox import (
+    EXEC_START_MARKER,
     KILL_LINGERING,
     SCAN_LABEL,
     SUBNET_ATTEMPTS,
@@ -744,7 +745,10 @@ def test_exec_timeout_kills_lingering_cage_processes(repo: Path, monkeypatch):
     def fake_capture(attach_command, container_command, **kwargs):
         calls.append(list(attach_command))
         # capture_attached records the argv it was given, never the attach command.
-        return CommandResult(command=list(container_command), exit_code=next(exit_codes))
+        stderr = f"{EXEC_START_MARKER}\n" if len(calls) == 1 else ""
+        return CommandResult(
+            command=list(container_command), exit_code=next(exit_codes), stderr=stderr
+        )
 
     monkeypatch.setattr("run.sandbox.capture_attached", fake_capture)
     client = fake_client()
@@ -756,19 +760,15 @@ def test_exec_timeout_kills_lingering_cage_processes(repo: Path, monkeypatch):
     assert result.timed_out
     assert result.exit_code == 137
     assert result.command == ["sh", "-c", "sleep 100; echo done"]
+    assert result.stderr == ""
     assert len(calls) == 2
-    assert calls[0][-7:] == [
-        "timeout",
-        "-s",
-        "KILL",
-        str(sandbox.config.tool_timeout_seconds),
-        "sh",
-        "-c",
-        "sleep 100; echo done",
-    ]
+    assert calls[0][-4:] == ["baitwatch-exec", "sh", "-c", "sleep 100; echo done"]
+    assert "timeout" in calls[0][-5]
     assert "/proc/[0-9]*" in calls[1][-1]
-    assert "$entry/stat" in calls[1][-1]
-    assert not sandbox.evidence.errors
+    assert 'cat "$entry/stat"' in calls[1][-1]
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TIMEOUT"]
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
 
 
 def test_exec_kills_backgrounded_processes_after_a_clean_exit(repo: Path, monkeypatch):
@@ -776,7 +776,10 @@ def test_exec_kills_backgrounded_processes_after_a_clean_exit(repo: Path, monkey
 
     def fake_capture(attach_command, container_command, **kwargs):
         calls.append(list(attach_command))
-        return CommandResult(command=list(container_command), exit_code=0, stdout="started\n")
+        stderr = f"{EXEC_START_MARKER}\n" if len(calls) == 1 else ""
+        return CommandResult(
+            command=list(container_command), exit_code=0, stdout="started\n", stderr=stderr
+        )
 
     monkeypatch.setattr("run.sandbox.capture_attached", fake_capture)
     client = fake_client()
@@ -787,8 +790,70 @@ def test_exec_kills_backgrounded_processes_after_a_clean_exit(repo: Path, monkey
         result = sandbox.exec(["sh", "-c", "sleep 100 & echo started"])
     assert not result.timed_out
     assert result.exit_code == 0
+    assert result.stderr == ""
     assert len(calls) == 2
     assert "/proc/[0-9]*" in calls[1][-1]
+    assert not sandbox.evidence.errors
+
+
+def _exec_with_results(repo: Path, monkeypatch, results):
+    monkeypatch.setattr("run.sandbox.capture_attached", lambda *args, **kwargs: next(results))
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sh", "-c", "echo hi"])
+    return sandbox, result
+
+
+def test_exec_output_truncation_fails_closed(repo: Path, monkeypatch):
+    results = iter(
+        [
+            CommandResult(
+                command=["sh"],
+                exit_code=0,
+                stdout="flood",
+                stderr=f"{EXEC_START_MARKER}\n",
+                output_truncated=True,
+            ),
+            CommandResult(command=["sh"], exit_code=0),
+        ]
+    )
+    sandbox, result = _exec_with_results(repo, monkeypatch, results)
+    assert result.output_truncated
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_OUTPUT_TRUNCATED"]
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
+
+
+@pytest.mark.parametrize("exit_code", [125, 126, 127])
+def test_exec_docker_transport_failure_fails_closed(repo: Path, monkeypatch, exit_code):
+    results = iter(
+        [
+            CommandResult(command=["sh"], exit_code=exit_code, stderr="docker daemon error"),
+            CommandResult(command=["sh"], exit_code=0),
+        ]
+    )
+    sandbox, result = _exec_with_results(repo, monkeypatch, results)
+    assert result.exit_code == exit_code
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TRANSPORT_FAILED"]
+    assert sandbox.evidence.components.sandbox == State.ERROR
+
+
+@pytest.mark.parametrize("exit_code", [1, 125, 126, 127])
+def test_exec_tool_exit_codes_are_not_transport_failures(repo: Path, monkeypatch, exit_code):
+    results = iter(
+        [
+            CommandResult(
+                command=["sh"], exit_code=exit_code, stderr=f"{EXEC_START_MARKER}\ntool boom\n"
+            ),
+            CommandResult(command=["sh"], exit_code=0),
+        ]
+    )
+    sandbox, result = _exec_with_results(repo, monkeypatch, results)
+    assert result.exit_code == exit_code
+    assert result.stderr == "tool boom\n"
     assert not sandbox.evidence.errors
 
 
@@ -830,14 +895,20 @@ def test_failed_cleanup_after_a_timeout_fails_closed(repo: Path, monkeypatch):
     with sandbox:
         sandbox.open_cage()
         sandbox.exec(["sleep", "100"])
-    assert sandbox.evidence.errors[0].code == "EXEC_KILL_FAILED"
+    assert [error.code for error in sandbox.evidence.errors] == [
+        "EXEC_KILL_FAILED",
+        "EXEC_TIMEOUT",
+    ]
     assert sandbox.evidence.components.sandbox == State.ERROR
 
 
 def test_the_kill_sweep_skips_only_zombies():
     # A live process can have an empty cmdline (execve with no argv), so liveness
-    # is decided by the state field in /proc/<pid>/stat, never by cmdline.
-    assert "$entry/stat" in KILL_LINGERING
+    # is decided by the state field in /proc/<pid>/stat, never by cmdline. The
+    # whole stat record is read: a single-line read would stop inside a comm
+    # containing a newline and could mistake a live process for a zombie.
+    assert 'cat "$entry/stat"' in KILL_LINGERING
+    assert "read -r stat" not in KILL_LINGERING
     assert '"Z"' in KILL_LINGERING
     assert "cmdline" not in KILL_LINGERING
     assert '"1"' in KILL_LINGERING and '"$$"' in KILL_LINGERING

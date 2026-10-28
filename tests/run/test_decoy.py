@@ -1,5 +1,8 @@
 """Decoy loop unit tests; fakes only, nothing runs in Docker or on the host."""
 
+import time
+from types import SimpleNamespace
+
 import pytest
 from typer.testing import CliRunner
 
@@ -17,6 +20,11 @@ class FakeSandbox:
         self.evidence = RunEvidence()
         self.argv: list[list[str]] = []
         self._results = list(results)
+        self.config = SimpleNamespace(decoy_seconds=120)
+        self.alive = True
+
+    def cage_running(self):
+        return self.alive
 
     def exec(self, argv):
         self.argv.append(list(argv))
@@ -206,6 +214,35 @@ def test_sandbox_error_recorded_during_a_tool_call_fails_the_decoy_closed():
     assert len(sandbox.evidence.tool_log) == 1
     assert sandbox.evidence.components.decoy == State.ERROR
     assert sandbox.evidence.errors[-1].code == "DECOY_FAILED"
+    assert sandbox.evidence.status == "error"
+
+
+def test_cage_expiring_during_a_model_reply_fails_the_decoy_closed():
+    sandbox = FakeSandbox()
+
+    class ExpiringBackend:
+        def chat(self, messages, tools):
+            sandbox.alive = False
+            return LLMReply(text="done")
+
+    run_decoy(sandbox, ExpiringBackend())
+    assert sandbox.evidence.components.decoy == State.ERROR
+    assert [error.code for error in sandbox.evidence.errors] == ["CAGE_EXITED"]
+    assert sandbox.evidence.status == "error"
+
+
+def test_decoy_deadline_expiring_during_a_model_reply_fails_closed():
+    sandbox = FakeSandbox()
+    sandbox.config = SimpleNamespace(decoy_seconds=0.01)
+
+    class SlowBackend:
+        def chat(self, messages, tools):
+            time.sleep(0.05)
+            return LLMReply(text="done")
+
+    run_decoy(sandbox, SlowBackend())
+    assert sandbox.evidence.components.decoy == State.ERROR
+    assert [error.code for error in sandbox.evidence.errors] == ["DECOY_DEADLINE"]
     assert sandbox.evidence.status == "error"
 
 

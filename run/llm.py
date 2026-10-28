@@ -250,6 +250,9 @@ def _parse_reply(raw: bytes) -> LLMReply:
     choice = choices[0]
     if not isinstance(choice, dict):
         raise LLMError("LLM response choice is malformed")
+    finish_reason = choice.get("finish_reason")
+    if finish_reason in ("length", "content_filter"):
+        raise LLMError(f"LLM response did not finish: finish_reason={finish_reason}")
     message = choice.get("message")
     if not isinstance(message, dict):
         raise LLMError("LLM response message is malformed")

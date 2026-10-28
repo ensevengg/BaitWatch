@@ -228,6 +228,27 @@ def test_openai_request_shape_and_tool_call_parsing(monkeypatch):
     }
 
 
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter"])
+@pytest.mark.parametrize("with_tool_calls", [False, True])
+def test_openai_unfinished_replies_raise(finish_reason, with_tool_calls):
+    message: dict[str, object] = {"content": "starting..."}
+    if with_tool_calls:
+        message["tool_calls"] = [{"id": "call_1", "function": {"name": "noop", "arguments": "{}"}}]
+    payload = {"choices": [{"finish_reason": finish_reason, "message": message}]}
+    with fake_server(reply(payload)) as server:
+        backend = OpenAICompatBackend(server.base_url, "m")
+        with pytest.raises(LLMError, match=finish_reason):
+            backend.chat([], [])
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls", None])
+def test_openai_finished_replies_are_accepted(finish_reason):
+    payload = {"choices": [{"finish_reason": finish_reason, "message": {"content": "done"}}]}
+    with fake_server(reply(payload)) as server:
+        backend = OpenAICompatBackend(server.base_url, "m")
+        assert backend.chat([], []) == LLMReply(text="done")
+
+
 def test_openai_text_reply_without_calls_or_key(monkeypatch):
     monkeypatch.delenv(ENV, raising=False)
     with fake_server(reply(completion({"content": "done"}))) as server:

@@ -3,6 +3,7 @@ runs inside the cage, and every call — reads included, since hash-diff only se
 writes — lands in `tool_log`."""
 
 import json
+import time
 from typing import Any
 
 from run.evidence import CommandResult, RunError, State
@@ -95,6 +96,26 @@ def _feedback(result: CommandResult) -> str:
     return text or "(no output)"
 
 
+class _DecoyFailure(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _check_cage(sandbox: Sandbox, deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _DecoyFailure("DECOY_DEADLINE", "the decoy exceeded its cage lifetime")
+    checker = getattr(sandbox, "cage_running", None)
+    if checker is None:
+        return
+    try:
+        running = checker()
+    except Exception:
+        running = False
+    if not running:
+        raise _DecoyFailure("CAGE_EXITED", "the cage is not running")
+
+
 def _failed_call(name: str, message: str) -> tuple[CommandResult, str]:
     return CommandResult(command=[name], stderr=message[:1000]), f"tool error: {message}"
 
@@ -148,10 +169,15 @@ def run_decoy(
         raise ValueError("max_steps must be a positive integer")
     evidence = sandbox.evidence
     baseline_errors = len(evidence.errors)
+    config = getattr(sandbox, "config", None)
+    seconds = getattr(config, "decoy_seconds", None)
+    deadline = time.monotonic() + seconds if type(seconds) in (int, float) and seconds > 0 else None
     messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt(task)}]
     try:
         for _ in range(max_steps):
+            _check_cage(sandbox, deadline)
             reply = backend.chat(messages, _tools())
+            _check_cage(sandbox, deadline)
             if not reply.tool_calls:
                 break
             messages.append(_assistant_message(reply))
@@ -163,10 +189,12 @@ def run_decoy(
                     # continuing would let the loop end COMPLETE over it.
                     raise RuntimeError("the sandbox recorded an error during a tool call")
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": feedback})
+        _check_cage(sandbox, deadline)
     except Exception as exc:
         evidence.components.decoy = State.ERROR
+        code = exc.code if isinstance(exc, _DecoyFailure) else "DECOY_FAILED"
         evidence.errors.append(
-            RunError(code="DECOY_FAILED", message=str(exc)[:1000] or "the decoy loop failed")
+            RunError(code=code, message=str(exc)[:1000] or "the decoy loop failed")
         )
         evidence.status = "error"
         return

@@ -171,17 +171,16 @@ def test_detonate_with_a_backend_completes(repo: Path, engine):
 
 
 def live_cage_processes(sandbox: Sandbox) -> str:
-    # Zombies keep a /proc entry; state Z in /proc/<pid>/stat is the only dead
-    # one, so a live process with an empty cmdline still shows up. busybox
-    # timeout execs the command in place and leaves a watchdog that PID 1
-    # reparents; the watchdog of this very probe carries this script in its
-    # cmdline, so the marker filters out the probe itself and nothing else.
+    # Zombies keep a /proc entry; the State line of /proc/<pid>/status is the
+    # only dead one, so a live process with an empty cmdline still shows up.
+    # busybox timeout execs the command in place and leaves a watchdog that
+    # PID 1 reparents; the watchdog of this very probe carries this script in
+    # its cmdline, so the marker filters out the probe itself and nothing else.
     script = (
         "probe_marker=live-cage-probe; "
         "for entry in /proc/[0-9]*; do pid=${entry#/proc/}; "
-        'if [ "$pid" != "1" ] && [ "$pid" != "$$" ] '
-        '&& read -r stat 2>/dev/null < "$entry/stat"; then '
-        "state=${stat##*) }; state=${state%% *}; "
+        'if [ "$pid" != "1" ] && [ "$pid" != "$$" ]; then '
+        "state=$(awk '/^State:/ { value=$2 } END { print value }' \"$entry/status\" 2>/dev/null); "
         'if [ "$state" != "Z" ]; then cmd=$(tr "\\0" " " < "$entry/cmdline" 2>/dev/null); '
         'case "$cmd" in *live-cage-probe*) ;; *) echo "$pid $state $cmd";; esac; fi; fi; '
         "done"
@@ -208,18 +207,67 @@ def test_no_lingering_processes_after_an_exec(repo: Path, engine, command: str, 
         run_decoy(sandbox, Scripted([("run_cmd", {"command": command})]))
         live = live_cage_processes(sandbox)
     evidence = sandbox.evidence
-    assert not evidence.errors, [error.model_dump_json() for error in evidence.errors]
     result = evidence.tool_log[0]
     assert result.command == ["run_cmd", command]
     assert result.timed_out is timed_out
     if timed_out:
         assert result.exit_code == 137
+        assert [error.code for error in evidence.errors] == ["EXEC_TIMEOUT", "DECOY_FAILED"]
+        assert evidence.components.sandbox == State.ERROR
+        assert evidence.components.decoy == State.ERROR
+        assert evidence.status == "error"
     else:
+        assert not evidence.errors, [error.model_dump_json() for error in evidence.errors]
         assert result.exit_code == 0
         assert result.stdout == "started\n"
+        assert evidence.components.decoy == State.COMPLETE
     assert "sleep 100" not in live
     assert "timeout" not in live
-    assert evidence.components.decoy == State.COMPLETE
+    assert_no_leftovers(engine, evidence)
+
+
+LINGER_PY = r"""
+import ctypes, os, time
+child = os.fork()
+if child:
+    while not os.path.exists("/repo/linger.ready"):
+        time.sleep(0.01)
+    os._exit(0)
+ctypes.CDLL(None).prctl(15, b"x) Z \ny", 0, 0, 0)
+os.close(1)
+os.close(2)
+with open("/repo/linger.ready", "w") as ready:
+    ready.write(str(os.getpid()))
+time.sleep(100)
+"""
+
+STATE_PROBE = r"""
+import pathlib
+pid = pathlib.Path("/repo/linger.ready").read_text().strip()
+try:
+    status = pathlib.Path(f"/proc/{pid}/status").read_text()
+except FileNotFoundError:
+    print("missing")
+else:
+    states = [line.split()[1] for line in status.splitlines() if line.startswith("State:")]
+    print(states[-1] if states else "malformed")
+"""
+
+
+def test_sweep_kills_a_process_whose_comm_looks_like_a_zombie(repo: Path, engine):
+    (repo / "linger.py").write_text(LINGER_PY)
+    sandbox = Sandbox(
+        repo, SandboxConfig(image=PYTHON_IMAGE, decoy_seconds=90, tool_timeout_seconds=10)
+    )
+    with sandbox:
+        sandbox.open_cage()
+        spawned = sandbox.exec(["python", "linger.py"])
+        assert spawned.exit_code == 0, spawned.stderr
+        probe = sandbox.exec(["python", "-c", STATE_PROBE])
+    evidence = sandbox.evidence
+    assert probe.exit_code == 0, probe.stderr
+    assert probe.stdout.strip() in {"Z", "missing"}, probe.stdout
+    assert not evidence.errors, [error.model_dump_json() for error in evidence.errors]
     assert_no_leftovers(engine, evidence)
 
 
@@ -232,11 +280,13 @@ def test_tool_timeout_kills_the_process_inside_the_cage(repo: Path, engine):
         run_decoy(sandbox, Scripted([("run_cmd", {"command": "sleep 100"})]))
         live = live_cage_processes(sandbox)
     evidence = sandbox.evidence
-    assert not evidence.errors, [error.model_dump_json() for error in evidence.errors]
     result = evidence.tool_log[0]
     assert result.command == ["run_cmd", "sleep 100"]
     assert result.timed_out
     assert result.exit_code == 137
+    assert [error.code for error in evidence.errors] == ["EXEC_TIMEOUT", "DECOY_FAILED"]
+    assert evidence.components.sandbox == State.ERROR
+    assert evidence.components.decoy == State.ERROR
+    assert evidence.status == "error"
     assert "sleep 100" not in live
-    assert evidence.components.decoy == State.COMPLETE
     assert_no_leftovers(engine, evidence)
