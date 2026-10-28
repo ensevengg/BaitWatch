@@ -1,5 +1,7 @@
 import ipaddress
 import shutil
+import socket
+import struct
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -1014,6 +1016,36 @@ def test_exec_stream_break_after_the_marker_is_a_transport_failure(repo: Path, m
     )
     assert result.exit_code == 0  # docker's record survives the broken client
     assert result.stdout == "partial"
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TRANSPORT_FAILED"]
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
+
+
+def test_exec_frame_cut_mid_payload_with_a_clean_record_is_a_transport_failure(
+    repo: Path,
+    monkeypatch,
+):
+    """The transport probe: a clean exec record must not pass for a delivered stream."""
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["sh"], exit_code=0),
+    )
+    client = fake_client()
+    exec_api(client, exit_code=0)
+    peer, end = socket.socketpair()
+    marker = f"{EXEC_START_MARKER}\n".encode()
+    peer.sendall(struct.pack(">BxxxL", 2, len(marker)) + marker)
+    peer.sendall(struct.pack(">BxxxL", 1, 12) + b"abc")  # declares 12 bytes, delivers 3
+    peer.close()
+    client.api.exec_start.return_value = end  # real capture_exec reads this raw socket
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sh", "-c", "echo hi"])
+    assert client.api.exec_start.call_args.kwargs["socket"] is True
+    assert result.stdout == "abc"
+    assert result.exit_code == 0
     assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TRANSPORT_FAILED"]
     assert sandbox.evidence.components.sandbox == State.ERROR
     assert sandbox.evidence.status == "error"

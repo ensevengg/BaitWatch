@@ -1,12 +1,18 @@
+import contextlib
 import os
-import queue
 import selectors
+import socket
+import struct
 import subprocess
-import threading
 import time
 from collections.abc import Callable, Sequence
 
 from run.evidence import CommandResult
+
+EXEC_GRACE_SECONDS = 3
+_FRAME_HEADER = struct.Struct(">BxxxL")
+_FRAME_STREAMS = {1: "stdout", 2: "stderr"}
+_READ_CHUNK = 64 * 1024
 
 
 def capture_attached(
@@ -81,6 +87,29 @@ def capture_attached(
     return result
 
 
+def _read_chunk(stream):
+    # docker-py hands back a SocketIO wrapper, a plain or TLS socket, or an
+    # SSH channel depending on the transport; each exposes one of these.
+    if hasattr(stream, "recv"):
+        return stream.recv(_READ_CHUNK)
+    if hasattr(stream, "read"):
+        return stream.read(_READ_CHUNK)
+    return os.read(stream.fileno(), _READ_CHUNK)
+
+
+def _close_stream(stream):
+    # The shutdown wakes a peer still blocked on the open side; closing both
+    # layers covers docker-py's SocketIO wrapper and its underlying socket.
+    raw = getattr(stream, "_sock", stream)
+    with contextlib.suppress(AttributeError, OSError):
+        raw.shutdown(socket.SHUT_RDWR)
+    with contextlib.suppress(AttributeError, OSError):
+        stream.close()
+    if raw is not stream:
+        with contextlib.suppress(AttributeError, OSError):
+            raw.close()
+
+
 def capture_exec(
     api,
     exec_id,
@@ -89,13 +118,19 @@ def capture_exec(
     timeout_seconds: float,
     max_output_bytes: int,
 ) -> tuple[CommandResult, BaseException | None]:
-    """Bounded capture of one SDK exec stream, mirroring capture_attached's
-    output budget, deadline and grace period.
+    """Bounded capture read straight off the exec's raw socket.
 
-    A stream that ends proves nothing about how the command finished — docker-py
-    turns a broken connection into a clean end of stream — so the exit code is
-    deliberately left to Docker's exec record and a broken stream is returned
-    as the failure instead of passing for a clean end.
+    docker-py's streaming iterator hides socket errors as a clean end of
+    stream and cannot be interrupted, so this reader owns the socket that
+    `exec_start(socket=True)` returns and parses Docker's multiplexed
+    framing itself: an 8-byte header (stream type, padding, big-endian
+    length) then exactly that many payload bytes. An EOF inside a header or
+    payload, an unknown stream type or a socket error is returned as the
+    failure; EOF on a frame boundary is a clean end whose exit code still
+    belongs to Docker's exec record. Frames are consumed in fixed chunks —
+    a header can declare up to 4 GiB, which is never allocated — and bytes
+    past the shared output budget are read and discarded, so a flooding
+    tool can neither stall the cage nor buffer output on the host.
     """
     started = time.monotonic()
     result = CommandResult(command=list(command))
@@ -103,51 +138,89 @@ def capture_exec(
     remaining = max_output_bytes
     stopped_at: float | None = None
     failure: BaseException | None = None
-    done = object()
-    chunks: queue.Queue = queue.Queue()
-    abandoned = threading.Event()
-
-    def pump():
+    stream = None
+    selector = selectors.DefaultSelector()
+    try:
+        # The socket deadline below cannot interrupt an exec_start that has
+        # not answered, so the start request gets the whole deadline plus
+        # grace as its HTTP timeout and is restored immediately after.
+        previous_timeout = getattr(api, "timeout", None)
+        api.timeout = timeout_seconds + EXEC_GRACE_SECONDS
         try:
-            for stdout, stderr in api.exec_start(exec_id, stream=True, demux=True):
-                if abandoned.is_set():
-                    return
-                if stdout:
-                    chunks.put(("stdout", stdout))
-                if stderr:
-                    chunks.put(("stderr", stderr))
-            chunks.put(done)
-        except BaseException as exc:
-            chunks.put(exc)
-
-    threading.Thread(target=pump, daemon=True).start()
-    while True:
-        now = time.monotonic()
-        if stopped_at is None and now - started >= timeout_seconds:
-            result.timed_out = True
-            stopped_at = now
-        if stopped_at is not None and now - stopped_at >= 3:
-            # The in-container wrapper owns process kills, so the backstop only
-            # abandons the stream; the daemon thread ends when the exec does.
-            abandoned.set()
-            break
-        try:
-            item = chunks.get(timeout=0.05)
-        except queue.Empty:
-            continue
-        if item is done:
-            break
-        if isinstance(item, BaseException):
-            failure = item
-            break
-        name, chunk = item
-        kept = chunk[:remaining]
-        captured[name].extend(kept)
-        remaining -= len(kept)
-        if len(chunk) > len(kept):
-            result.output_truncated = True
-            if stopped_at is None:
-                stopped_at = time.monotonic()
+            stream = api.exec_start(exec_id, socket=True)
+        except Exception as exc:
+            failure = exc
+            if time.monotonic() - started >= timeout_seconds:
+                result.timed_out = True
+        finally:
+            api.timeout = previous_timeout
+        if stream is not None:
+            selector.register(stream, selectors.EVENT_READ)
+            pending = bytearray()
+            frame_name = "stdout"
+            frame_size = 0
+            frame_left = 0
+            while True:
+                now = time.monotonic()
+                if stopped_at is None and now - started >= timeout_seconds:
+                    result.timed_out = True
+                    stopped_at = now
+                if stopped_at is not None and now - stopped_at >= EXEC_GRACE_SECONDS:
+                    break
+                if not selector.select(0.05):
+                    continue
+                try:
+                    chunk = _read_chunk(stream)
+                except BlockingIOError:
+                    continue
+                except OSError as exc:
+                    failure = exc
+                    break
+                if not chunk:
+                    if frame_left:
+                        failure = ValueError(
+                            f"exec stream ended inside a frame payload "
+                            f"({frame_size - frame_left} of {frame_size} bytes)"
+                        )
+                    elif pending:
+                        failure = ValueError("exec stream ended inside a frame header")
+                    break
+                pending += chunk
+                pos = 0
+                while pos < len(pending):
+                    if frame_left:
+                        take = min(frame_left, len(pending) - pos)
+                        part = pending[pos : pos + take]
+                        pos += take
+                        frame_left -= take
+                        kept = part[:remaining]
+                        captured[frame_name].extend(kept)
+                        remaining -= len(kept)
+                        if len(part) > len(kept):
+                            result.output_truncated = True
+                            if stopped_at is None:
+                                # Keep draining so the cage cannot stall on a
+                                # full pipe, but only for the grace period.
+                                stopped_at = time.monotonic()
+                    elif len(pending) - pos < _FRAME_HEADER.size:
+                        break
+                    else:
+                        frame_type, frame_size = _FRAME_HEADER.unpack_from(pending, pos)
+                        frame_name = _FRAME_STREAMS.get(frame_type, "")
+                        if not frame_name:
+                            failure = ValueError(
+                                f"exec stream frame declares unknown stream type {frame_type}"
+                            )
+                            break
+                        pos += _FRAME_HEADER.size
+                        frame_left = frame_size
+                if failure is not None:
+                    break
+                del pending[:pos]
+    finally:
+        selector.close()
+        if stream is not None:
+            _close_stream(stream)
     result.stdout = captured["stdout"].decode("utf-8", errors="replace")
     result.stderr = captured["stderr"].decode("utf-8", errors="replace")
     result.duration_seconds = time.monotonic() - started

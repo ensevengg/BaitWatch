@@ -700,10 +700,10 @@ class Sandbox:
     def _confirm_exec(self, exec_id, result: CommandResult, reached: bool, failure) -> None:
         """Docker's own exec record is the only proof a stream end was the exit.
 
-        The stream's end proves nothing — docker-py turns a broken connection
-        into a clean end of stream, and the marker only proves the call
-        started — so the record must show the exec finished, and its ExitCode
-        is the code the scan reports. Timeout and output-cap stops are our own
+        The stream's end proves nothing — a broken connection can still end
+        on a frame boundary, and the marker only proves the call started —
+        so the record must show the exec finished, and its ExitCode is the
+        code the scan reports. Timeout and output-cap stops are our own
         kills and keep their existing error paths instead.
         """
         if result.timed_out or result.output_truncated:
