@@ -22,7 +22,9 @@ def test_copy_preserves_symlinks_without_reading_their_targets(repo: Path, tmp_p
     assert os.readlink(target / "link") == str(outside)
     assert (target / "broken").is_symlink()
     assert (target / "empty").is_dir()
-    assert (target / "script.sh").stat().st_mode & 0o7777 == 0o755
+    # Writable for the cage's uid, but the setuid bit is still stripped.
+    assert (target / "script.sh").stat().st_mode & 0o7777 == 0o777
+    assert (target / "README.md").stat().st_mode & 0o7777 == 0o666
     assert not any(
         "HOST-ONLY-FIXTURE" in p.read_text()
         for p in target.iterdir()

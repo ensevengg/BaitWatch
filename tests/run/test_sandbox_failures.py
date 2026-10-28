@@ -430,3 +430,71 @@ def test_malformed_config_values_raise_value_error():
         SandboxConfig(timeout_seconds=10**400)
     with pytest.raises(ValueError, match="finite"):
         StagingLimits(timeout_seconds=10**400)
+
+
+def test_sink_that_never_becomes_ready_fails_closed(repo: Path):
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, SandboxConfig(sink_ready_seconds=0.05), client_factory=lambda: client)
+    with sandbox:
+        sandbox.start_sinks()
+    assert [error.code for error in sandbox.evidence.errors] == ["SERVICE_START", "SERVICE_START"]
+    assert "never wrote its ready record" in sandbox.evidence.errors[0].message
+    components = sandbox.evidence.components
+    assert components.dns_sink == State.ERROR
+    assert components.http_sink == State.ERROR
+    assert components.tls_sink == State.ERROR
+    assert sandbox.evidence.status == "error"
+    assert not sandbox.staged_path.parent.exists()
+
+
+def test_sink_container_that_exits_fails_closed(repo: Path):
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "exited", "ExitCode": 1}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.start_sinks()
+    assert [error.code for error in sandbox.evidence.errors] == ["SERVICE_START", "SERVICE_START"]
+    assert "exited during startup" in sandbox.evidence.errors[0].message
+    assert sandbox.evidence.components.dns_sink == State.ERROR
+    assert sandbox.evidence.components.tls_sink == State.ERROR
+
+
+def test_dirty_sink_logs_fail_closed_at_collection(repo: Path, monkeypatch):
+    monkeypatch.setattr(Sandbox, "_wait_ready", lambda self, container, log, role: None)
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.start_sinks()
+        sandbox._sink_logs["dns"].write_text(
+            '{"kind":"ready","sink":"dns"}\nnot-json\n', encoding="utf-8"
+        )
+        sandbox._sink_logs["http"].write_text(
+            '{"kind":"ready","sink":"http"}\n{"kind":"log_truncated","ts":1.0}\n',
+            encoding="utf-8",
+        )
+        sandbox.collect_sinks()
+    assert [error.code for error in sandbox.evidence.errors] == ["SINK_LOG", "SINK_LOG"]
+    components = sandbox.evidence.components
+    assert components.dns_sink == State.ERROR
+    assert components.http_sink == State.ERROR
+    assert components.tls_sink == State.ERROR
+    assert not sandbox.evidence.dns_hits and not sandbox.evidence.http_hits
+    assert sandbox.evidence.status == "error"
+
+
+def test_sink_that_died_before_collection_fails_closed(repo: Path, monkeypatch):
+    monkeypatch.setattr(Sandbox, "_wait_ready", lambda self, container, log, role: None)
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "exited", "ExitCode": 137}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.start_sinks()
+        sandbox._sink_logs["dns"].write_text('{"kind":"ready","sink":"dns"}\n', encoding="utf-8")
+        sandbox._sink_logs["http"].write_text('{"kind":"ready","sink":"http"}\n', encoding="utf-8")
+        sandbox.collect_sinks()
+    assert [error.code for error in sandbox.evidence.errors] == ["SINK_FAILED", "SINK_FAILED"]
+    assert "not running" in sandbox.evidence.errors[0].message
+    assert sandbox.evidence.components.tls_sink == State.ERROR
+    assert not sandbox.evidence.tls_hits

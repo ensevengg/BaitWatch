@@ -1,8 +1,11 @@
+import contextlib
 import ipaddress
+import json
 import os
 import random
 import shutil
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,12 +15,18 @@ from docker.errors import APIError, DockerException, NotFound
 from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount
 
 from run.capture import capture_attached
-from run.evidence import CommandResult, RunError, RunEvidence, State
+from run.evidence import CommandResult, FileDiff, RunError, RunEvidence, State
+from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
+from run.trace import TraceError, diff, manifest_from_json
 
 SCAN_LABEL = "org.baitwatch.scan-id"
 DEFAULT_SUBNET = "10.13.37.0/24"
 SUBNET_ATTEMPTS = 16
+SINKS_DIR = Path(__file__).parent / "sinks"
+TRACE_SCRIPT = Path(__file__).parent / "trace.py"
+# A 10k-entry manifest is ~1 MiB; past this bound the snapshot is not trustworthy.
+TRACE_OUTPUT_BYTES = 8 * 1024 * 1024
 
 
 class SandboxError(RuntimeError):
@@ -27,6 +36,7 @@ class SandboxError(RuntimeError):
 @dataclass(frozen=True)
 class SandboxConfig:
     image: str = "alpine:3.20"
+    sink_image: str = "python:3.12-alpine"
     # None tries DEFAULT_SUBNET, then other 10.13.X.0/24 pools on overlap.
     # An explicit subnet never falls back.
     subnet: str | None = None
@@ -39,6 +49,7 @@ class SandboxConfig:
     pids_limit: int = 64
     tmpfs_bytes: int = 32 * 1024 * 1024
     timeout_seconds: float = 20
+    sink_ready_seconds: float = 15
     max_output_bytes: int = 64 * 1024
     staging: StagingLimits = field(default_factory=StagingLimits)
 
@@ -69,15 +80,24 @@ class SandboxConfig:
             raise ValueError("memory, cpu, pid, tmpfs, and output limits must be integers")
         if type(self.timeout_seconds) not in (int, float) or not is_finite(self.timeout_seconds):
             raise ValueError("timeout_seconds must be a finite int or float")
-        if not self.image or any(
-            value <= 0
-            for value in (
-                self.memory_bytes,
-                self.nano_cpus,
-                self.pids_limit,
-                self.tmpfs_bytes,
-                self.timeout_seconds,
-                self.max_output_bytes,
+        if type(self.sink_ready_seconds) not in (int, float) or not is_finite(
+            self.sink_ready_seconds
+        ):
+            raise ValueError("sink_ready_seconds must be a finite int or float")
+        if (
+            not self.image
+            or not self.sink_image
+            or any(
+                value <= 0
+                for value in (
+                    self.memory_bytes,
+                    self.nano_cpus,
+                    self.pids_limit,
+                    self.tmpfs_bytes,
+                    self.timeout_seconds,
+                    self.sink_ready_seconds,
+                    self.max_output_bytes,
+                )
             )
         ):
             raise ValueError("image and positive resource/output/time limits are required")
@@ -116,6 +136,9 @@ class Sandbox:
         self._closed = False
         self._command_started = False
         self._service_roles: set[str] = set()
+        self._sinks: dict[str, object] = {}
+        self._sink_logs: dict[str, Path] = {}
+        self._trace_before: dict | None = None
 
     @property
     def network_id(self) -> str | None:
@@ -152,12 +175,13 @@ class Sandbox:
     def http_ip(self) -> str:
         return str(self._network_subnet().network_address + self.config.http_host)
 
-    def _error(self, code: str, message: str) -> None:
+    def _error(self, code: str, message: str, component: str | None = "sandbox") -> None:
         # str(exc) can be empty (e.g. TimeoutError()); an empty message would
         # raise ValidationError here and skip the caller's cleanup.
         self.evidence.errors.append(RunError(code=code, message=message[:1000] or code))
         self.evidence.status = "error"
-        self.evidence.components.sandbox = State.ERROR
+        if component is not None:
+            setattr(self.evidence.components, component, State.ERROR)
 
     def _create_network(self) -> ipaddress.IPv4Network:
         if self.config.subnet is not None:
@@ -229,33 +253,49 @@ class Sandbox:
                 raise
             raise SandboxError(str(exc)) from exc
 
-    def _create(self, image: str, command: Sequence[str], role: str, ip: str, *, repo: bool):
-        if not self._open or self._client is None or self._network is None:
+    def _create(
+        self,
+        image: str,
+        command: Sequence[str],
+        role: str,
+        ip: str | None,
+        *,
+        mounts: Sequence[Mount] = (),
+        sysctls: dict[str, str] | None = None,
+        working_dir: str = "/tmp",
+        networked: bool = True,
+    ):
+        if not self._open or self._client is None or (networked and self._network is None):
             raise SandboxError("sandbox is not open")
         self._client.images.get(image)
         config = self.config
-        endpoint = self._client.api.create_endpoint_config(ipv4_address=ip)
+        network_kwargs = {}
+        if networked:
+            endpoint = self._client.api.create_endpoint_config(ipv4_address=ip)
+            network_kwargs = {
+                "network": self._network.name,
+                "networking_config": {self._network.name: endpoint},
+                "dns": [self.dns_ip],
+                "dns_opt": ["timeout:1", "attempts:1"],
+                "dns_search": ["."],
+            }
+        else:
+            network_kwargs = {"network_mode": "none"}
         container = self._client.containers.create(
             image,
             command=list(command),
             entrypoint=[],
             name=f"{self.name}-{role}",
             labels=self.labels,
-            network=self._network.name,
-            networking_config={self._network.name: endpoint},
-            dns=[self.dns_ip],
-            dns_opt=["timeout:1", "attempts:1"],
-            dns_search=["."],
             user="65532:65532",
-            working_dir="/repo" if repo else "/tmp",
+            working_dir=working_dir,
             environment={"HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"},
-            mounts=[Mount("/repo", str(self.staged_path), type="bind", read_only=True)]
-            if repo
-            else [],
+            mounts=list(mounts),
             read_only=True,
             privileged=False,
             cap_drop=["ALL"],
             security_opt=["no-new-privileges:true"],
+            sysctls=sysctls,
             mem_limit=config.memory_bytes,
             memswap_limit=config.memory_bytes,
             nano_cpus=config.nano_cpus,
@@ -263,6 +303,7 @@ class Sandbox:
             tmpfs={"/tmp": f"rw,noexec,nosuid,nodev,size={config.tmpfs_bytes},mode=1777"},
             log_config=LogConfig(type="json-file", config={"max-size": "1m", "max-file": "1"}),
             restart_policy={"Name": "no"},
+            **network_kwargs,
         )
         self._containers.append(container)
         return container
@@ -273,13 +314,205 @@ class Sandbox:
             raise SandboxError("service role must be a unique dns or http sink")
         ip = self.dns_ip if role == "dns" else self.http_ip
         try:
-            container = self._create(image, command, role, ip, repo=False)
+            container = self._create(image, command, role, ip)
             container.start()
             self._service_roles.add(role)
             return container
         except Exception as exc:
             self._error("SERVICE_START", str(exc))
             raise SandboxError(str(exc)) from exc
+
+    def start_sinks(self) -> None:
+        """Start the production sinks and wait until both report ready.
+
+        A sink that dies or never reports ready marks only its own components
+        error; the scan continues and stays non-ALLOW either way.
+        """
+        log_dir = self._temporary / "sink-logs"
+        log_dir.mkdir(mode=0o700)
+        specs = {
+            "dns": (
+                "dns_sink.py",
+                [
+                    "python",
+                    "-I",
+                    "/sink/dns_sink.py",
+                    "--log",
+                    "/log/dns.jsonl",
+                    "--answer",
+                    self.http_ip,
+                ],
+            ),
+            "http": (
+                "http_sink.py",
+                ["python", "-I", "/sink/http_sink.py", "--log", "/log/http.jsonl"],
+            ),
+        }
+        for role, (script, command) in specs.items():
+            try:
+                log = log_dir / f"{role}.jsonl"
+                log.touch()
+                # The sink's uid 65532 appends through the bind mount; only the
+                # 0700 scan directory shields the file from other host users.
+                log.chmod(0o666)
+                container = self._create(
+                    self.config.sink_image,
+                    command,
+                    f"sink-{role}",
+                    self.dns_ip if role == "dns" else self.http_ip,
+                    mounts=[
+                        Mount(
+                            f"/sink/{script}",
+                            str(SINKS_DIR / script),
+                            type="bind",
+                            read_only=True,
+                        ),
+                        Mount(f"/log/{role}.jsonl", str(log), type="bind", read_only=False),
+                    ],
+                    # Low ports without a capability: the sysctl is namespaced
+                    # to the sink container's own network namespace.
+                    sysctls={"net.ipv4.ip_unprivileged_port_start": "0"},
+                )
+                container.start()
+                self._sinks[role] = container
+                self._sink_logs[role] = log
+                self._wait_ready(container, log, role)
+            except Exception as exc:
+                self._sinks.pop(role, None)
+                self._sink_error(role, "SERVICE_START", str(exc))
+
+    def _wait_ready(self, container, log: Path, role: str) -> None:
+        deadline = time.monotonic() + self.config.sink_ready_seconds
+        while time.monotonic() < deadline:
+            try:
+                text = log.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
+            for line in text.splitlines():
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("kind") == "ready":
+                    return
+            container.reload()
+            if container.attrs["State"]["Status"] != "running":
+                raise SandboxError(f"{role} sink container exited during startup")
+            time.sleep(0.05)
+        raise SandboxError(f"{role} sink never wrote its ready record")
+
+    def _sink_components(self, role: str) -> tuple[str, ...]:
+        return ("dns_sink",) if role == "dns" else ("http_sink", "tls_sink")
+
+    def _sink_error(self, role: str, code: str, message: str) -> None:
+        for component in self._sink_components(role):
+            setattr(self.evidence.components, component, State.ERROR)
+        self.evidence.errors.append(RunError(code=code, message=message[:1000] or code))
+        self.evidence.status = "error"
+
+    def _container_running(self, container) -> bool:
+        try:
+            container.reload()
+            return container.attrs["State"]["Status"] == "running"
+        except Exception:
+            return False
+
+    def collect_sinks(self) -> None:
+        """Read both sink logs into hits; a sink is complete only when it stayed
+        up and its whole log parsed cleanly."""
+        for role in ("dns", "http"):
+            container = self._sinks.get(role)
+            if container is None:
+                continue  # never started, or its start already failed closed
+            components = self._sink_components(role)
+            sink_log = read_sink_log(self._sink_logs[role])
+            running = self._container_running(container)
+            if not running:
+                problem, code = f"{role} sink container is not running at collection", "SINK_FAILED"
+            elif not sink_log.ready:
+                problem, code = f"{role} sink log has no ready record", "SINK_FAILED"
+            elif sink_log.problems:
+                problem, code = "; ".join(sink_log.problems), "SINK_LOG"
+            elif sink_log.truncated:
+                problem, code = f"{role} sink log stopped at its size cap", "SINK_LOG"
+            else:
+                if role == "dns":
+                    self.evidence.dns_hits.extend(sink_log.dns_hits)
+                else:
+                    self.evidence.http_hits.extend(sink_log.http_hits)
+                    self.evidence.tls_hits.extend(sink_log.tls_hits)
+                for component in components:
+                    setattr(self.evidence.components, component, State.COMPLETE)
+                continue
+            for component in components:
+                setattr(self.evidence.components, component, State.ERROR)
+            self.evidence.errors.append(RunError(code=code, message=f"{role}: {problem}"[:1000]))
+            self.evidence.status = "error"
+
+    def _run_trace_helper(self, role: str) -> dict:
+        command = ["python", "-I", "/trace/trace.py", "snapshot", "/repo"]
+        container = self._create(
+            self.config.sink_image,
+            command,
+            role,
+            None,
+            networked=False,
+            mounts=[
+                Mount("/repo", str(self.staged_path), type="bind", read_only=True),
+                Mount("/trace/trace.py", str(TRACE_SCRIPT), type="bind", read_only=True),
+            ],
+        )
+        try:
+
+            def stop() -> None:
+                with contextlib.suppress(DockerException):
+                    container.kill()
+
+            # Snapshots run in a helper container because the cage's uid can
+            # leave files the host user cannot read.
+            result = capture_attached(
+                ["docker", "--host", self._docker_host, "start", "--attach", container.id],
+                command,
+                timeout_seconds=self.config.timeout_seconds,
+                max_output_bytes=TRACE_OUTPUT_BYTES,
+                stop_container=stop,
+            )
+        finally:
+            self._remove_container(container, set())
+        if result.timed_out:
+            raise SandboxError(f"trace helper exceeded its {self.config.timeout_seconds}s limit")
+        if result.output_truncated:
+            raise SandboxError(f"trace manifest exceeded {TRACE_OUTPUT_BYTES} bytes")
+        if result.exit_code != 0:
+            detail = result.stderr.strip() or f"exit code {result.exit_code}"
+            raise SandboxError(f"trace helper failed: {detail}")
+        try:
+            return manifest_from_json(result.stdout)
+        except TraceError as exc:
+            raise SandboxError(str(exc)) from exc
+
+    def trace_before(self) -> bool:
+        if self._trace_before is not None:
+            raise SandboxError("the before snapshot can only be taken once")
+        try:
+            self._trace_before = self._run_trace_helper("trace-before")
+        except Exception as exc:
+            self._error("TRACE_FAILED", str(exc), component="trace")
+            return False
+        return True
+
+    def trace_after(self) -> None:
+        if self._trace_before is None:
+            return  # the failed before snapshot already marked the trace error
+        try:
+            after = self._run_trace_helper("trace-after")
+        except Exception as exc:
+            self._error("TRACE_FAILED", str(exc), component="trace")
+            return
+        self.evidence.file_diffs = [
+            FileDiff(path=path, change=change) for path, change in diff(self._trace_before, after)
+        ]
+        self.evidence.components.trace = State.COMPLETE
 
     def run_command(self, command: Sequence[str]) -> CommandResult:
         if (
@@ -293,7 +526,16 @@ class Sandbox:
         self._command_started = True
         result = CommandResult(command=list(command))
         try:
-            self._cage = self._create(self.config.image, command, "cage", self.cage_ip, repo=True)
+            # Writable so cage file changes can be traced; the original
+            # repository is never mounted, only this disposable copy.
+            self._cage = self._create(
+                self.config.image,
+                command,
+                "cage",
+                self.cage_ip,
+                mounts=[Mount("/repo", str(self.staged_path), type="bind", read_only=False)],
+                working_dir="/repo",
+            )
 
             def stop() -> None:
                 try:
@@ -396,6 +638,50 @@ class Sandbox:
             except Exception as exc:
                 self._error("NETWORK_CLEANUP", str(exc))
 
+    def _unlock_staging(self) -> bool:
+        """Let the cage's own uid lift the mode bits it used to lock the staged
+        tree against the host user; symlinks are never followed."""
+        try:
+            container = self._create(
+                self.config.sink_image,
+                ["python", "-I", "/trace/trace.py", "unlock", "/repo"],
+                "unlock-staging",
+                None,
+                networked=False,
+                mounts=[
+                    Mount("/repo", str(self.staged_path), type="bind", read_only=False),
+                    Mount("/trace/trace.py", str(TRACE_SCRIPT), type="bind", read_only=True),
+                ],
+            )
+            try:
+                container.start()
+                status = container.wait(timeout=self.config.timeout_seconds)
+                code = status.get("StatusCode") if isinstance(status, dict) else None
+                return code == 0
+            finally:
+                self._remove_container(container, set())
+        except Exception:
+            return False
+
+    def _remove_staging(self) -> None:
+        try:
+            shutil.rmtree(self._temporary)
+            return
+        except Exception as first:
+            error = str(first)
+        if not self._command_started:
+            self._error("STAGING_CLEANUP", error)
+            return
+        # The cage's uid can lock directories against the host user; only that
+        # uid can lift the mode bits. An error is recorded only if the tree
+        # still survives, because that is the only leak there is.
+        if not self._unlock_staging():
+            error = f"{error}; the unlock helper failed"
+        try:
+            shutil.rmtree(self._temporary)
+        except Exception as exc:
+            self._error("STAGING_CLEANUP", f"{exc}; {error}")
+
     def close(self) -> None:
         if self._closed:
             return
@@ -419,10 +705,7 @@ class Sandbox:
                 self._error("NETWORK_CLEANUP", str(exc))
         self._sweep_labelled_networks(handled)
         if self._temporary is not None and all_removed:
-            try:
-                shutil.rmtree(self._temporary)
-            except Exception as exc:
-                self._error("STAGING_CLEANUP", str(exc))
+            self._remove_staging()
         if self._client is not None:
             try:
                 self._client.close()
@@ -444,11 +727,15 @@ def detonate(
     *,
     config: SandboxConfig | None = None,
 ) -> RunEvidence:
-    """An exit-0 command still leaves the status incomplete until sinks, decoy and tracing run."""
+    """An exit-0 command still leaves the status incomplete until the decoy runs."""
     sandbox = Sandbox(path, config)
     try:
         with sandbox:
+            sandbox.start_sinks()
+            sandbox.trace_before()
             sandbox.run_command(command)
+            sandbox.collect_sinks()
+            sandbox.trace_after()
     except Exception as exc:
         if not sandbox.evidence.errors:
             sandbox._error("DETONATION_ERROR", str(exc))
