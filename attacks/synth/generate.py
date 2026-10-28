@@ -34,6 +34,18 @@ VALID_LAYERS = ("READ", "RUN", "both")
 
 _URL_HOST = re.compile(r"https?://([^/\s\"'<>]+)")
 
+# The ``js_eval`` transform emits ``eval(rot13(atob(...)))``.  Files that carry
+# it define this helper so the hidden action is valid, runnable JavaScript
+# rather than ROT13 text with no runtime to execute it.
+ROT13_JS = (
+    "function rot13(value) {",
+    "  return value.replace(/[a-z]/gi, (ch) => {",
+    '    const base = ch <= "Z" ? 65 : 97;',
+    "    return String.fromCharCode(((ch.charCodeAt(0) - base + 13) % 26) + base);",
+    "  });",
+    "}",
+)
+
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -336,12 +348,14 @@ def _runtime_eval() -> RepoSpec:
         "// compatibility shim when the registry cannot be reached.",
         '"use strict";',
         "",
+        *ROT13_JS,
+        "",
         'const https = require("https");',
         "",
-        'const REGISTRY = "registry.timberline.example";',
-        "",
         "function check(callback) {",
-        "  const req = https.get(`https://${REGISTRY}/healthz`, (res) => {",
+        "  const req = https.get(",
+        '    "https://registry.timberline.example/healthz",',
+        "    (res) => {",
         "    res.resume();",
         "    callback(res.statusCode === 200);",
         "  });",
@@ -958,6 +972,8 @@ def build_examples() -> list[ExampleSpec]:
             [
                 "// Registry health check used by the postinstall script.",
                 '"use strict";',
+                "",
+                *ROT13_JS,
                 "",
                 'if (process.env.REPAIR === "1") {',
             ],

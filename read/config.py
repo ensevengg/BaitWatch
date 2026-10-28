@@ -16,8 +16,8 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 MODEL_CONFIG_PATH = PACKAGE_DIR / "model_config.json"
 
 DEFAULT_MODEL_DIRS = (
-    Path("/mnt/d/hf_models/Llama-Prompt-Guard-2-22M"),
-    Path("/mnt/d/hf_models/Llama-Prompt-Guard-2-86M"),
+    Path.home() / "hf_models" / "Llama-Prompt-Guard-2-22M",
+    Path.home() / "hf_models" / "Llama-Prompt-Guard-2-86M",
 )
 _IS_WINDOWS = os.name == "nt"
 
@@ -183,8 +183,14 @@ def resolve_model_path(explicit: Path | str | None = None) -> Path:
     pinned = load_model_config()
     if pinned:
         raw = str(pinned["checkpoint_path"])
+        if raw.startswith("<"):
+            raise FileNotFoundError(
+                "read/model_config.json stores a publication placeholder instead of a "
+                "machine path; set BAITWATCH_MODEL_PATH to the pinned checkpoint "
+                f"(tag {pinned.get('tag')!r}) before scanning."
+            )
         if _IS_WINDOWS and raw.startswith("/"):
-            # Path("/home/...") becomes "\home\..." on Windows and points at
+            # Path("<home>/...") becomes "\<home>\..." on Windows and points at
             # the current drive, which looks like a real path but never is.
             raise FileNotFoundError(
                 f"pinned checkpoint path is POSIX ({raw}) and this is Windows "

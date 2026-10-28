@@ -28,14 +28,14 @@
     },
     {
       "file": "runtime-eval/01-atob-rot13.js",
-      "line": 5,
-      "end_line": 5,
+      "line": 12,
+      "end_line": 12,
       "technique": "runtime-eval-chain",
       "encoding": "js_eval",
       "expected_layer": "RUN",
       "target": "evil.example",
-      "payload_sha256": "938de29c1d2088a395490ac47032ba9ff3bf46fa439e024d91ad8e20a2be2dab",
-      "decoded_sha256": "5af358a55874b17e7e2fd2dce460d83b48fd96dc8d7a4990da33faa52a89d6db"
+      "payload_sha256": "b8d91617dafd90fe2a4da328f957e066f331e613dd9a3c3eafd2d56f383c75a5",
+      "decoded_sha256": "430a814317fdf0a62d9831437f0fabcb6df080af16963f6662305d0e3828ac49"
     },
     {
       "file": "runtime-eval/02-js-escapes.js",

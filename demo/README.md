@@ -27,7 +27,7 @@ PYTHON=/usr/bin/python3 bash demo/run_demo.sh
 | 0:00 | Cold open | `attacks check`: lint clean, generated tree clean, five repos pass the READ gate |
 | 0:15 | D2: obfuscation | One payload encoded nine ways; every channel recovers the seed |
 | 1:00 | D3: repo #1 | Harness table: READ flags the README, zero extra files; Gate B refuses the `.env` POST |
-| 1:45 | Gates | Hook selftest (11/11), Gate A catches invisible instructions, installer dry-run merges settings |
+| 1:45 | Gates | Hook selftest (11/11), Gate A catches invisible instructions, installer refuses an old host and dry-runs a merge for 2.1.295 |
 | 2:30 | Close | Safety lint clean, leakage check skips without a corpus, one-line summary |
 
 ## What it proves

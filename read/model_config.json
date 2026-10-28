@@ -1,8 +1,8 @@
 {
   "tag": "v1.5f",
-  "checkpoint_path": "/home/enseven/.local/share/baitwatch/models/v15f_22m",
+  "checkpoint_path": "<model-dir>/v15f_22m",
   "checkpoint_sha256": "f13b23ec19774b29fe122953a0c3f03a687c7da19076fd792be2dac17a98e222",
-  "base_model": "/mnt/d/hf_models/Llama-Prompt-Guard-2-22M",
+  "base_model": "<model-dir>/Llama-Prompt-Guard-2-22M",
   "base_model_sha256": "5120e30bcd536ce285345d9ec104bea6bd6e8f94365b99a340c764f417ea5fa1",
   "mode": "full",
   "trained_at": "2026-10-27T06:18:09+0530",

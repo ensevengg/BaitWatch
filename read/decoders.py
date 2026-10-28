@@ -539,7 +539,9 @@ SEGMENT_SEPARATOR = "\n\n"
 def produce_views(text: str, decoders: list[Decoder] | None,
                   errors: list[tuple[str, str]] | None = None,
                   depth: int = 3, max_segments: int = 256,
-                  overflow: list[int] | None = None) -> list[View]:
+                  overflow: list[int] | None = None,
+                  max_input_chars: int = 262_144,
+                  max_work_chars: int = 4_000_000) -> list[View]:
     """Original text first, then one view per decoder.
 
     Each decoder's segments (every HTML comment, every decoded blob) are
@@ -556,6 +558,12 @@ def produce_views(text: str, decoders: list[Decoder] | None,
     unscored segments is appended to ``overflow`` so the caller can report
     incomplete evidence. A decoder that raises is recorded in ``errors`` as
     (name, message) and skipped — one broken decoder never kills the scan.
+
+    Every call is bounded. A source string longer than ``max_input_chars`` is
+    decoded from its prefix only, and ``max_work_chars`` caps the total text
+    handed to all decoders for this segment. Either limit being spent is
+    recorded in ``errors`` (so the scan reports incomplete coverage, never a
+    clean result) and the coverage loop stops instead of scanning forever.
     """
     views = [View(text=text, decoder=None)]
     if not decoders:
@@ -565,16 +573,31 @@ def produce_views(text: str, decoders: list[Decoder] | None,
     joins: dict[str, bool] = {}
     frontier = [text]
     total = dropped = 0
+    work = 0
+    exhausted = False
     for _ in range(max(1, depth)):
         next_frontier: list[str] = []
         for source in frontier:
             for dec in decoders:
+                source_for_decode = source
+                if len(source_for_decode) > max_input_chars:
+                    source_for_decode = source_for_decode[:max_input_chars]
+                    if errors is not None:
+                        errors.append((dec.name, "input budget exhausted; decoded a prefix"))
+                if work + len(source_for_decode) > max_work_chars:
+                    if errors is not None:
+                        errors.append(("decoders", "work budget exhausted; stopped decoding"))
+                    exhausted = True
+                    break
+                work += len(source_for_decode)
                 try:
-                    found = dec.decode(source)
+                    found = dec.decode(source_for_decode)
                 except Exception as exc:   # noqa: BLE001 - isolate plugin bugs
                     if errors is not None:
                         errors.append((dec.name, str(exc)))
                     continue
+                if getattr(dec, "budget_spent", False) and errors is not None:
+                    errors.append((dec.name, "decode budget exhausted; output truncated"))
                 for seg in found:
                     if not isinstance(seg, str) or not seg.strip() or seg in seen:
                         continue
@@ -586,8 +609,10 @@ def produce_views(text: str, decoders: list[Decoder] | None,
                     found_by.setdefault(dec.name, []).append(seg)
                     joins[dec.name] = getattr(dec, "join_segments", True)
                     next_frontier.append(seg)
+            if exhausted:
+                break
         frontier = next_frontier
-        if not frontier:
+        if exhausted or not frontier:
             break
     if dropped and overflow is not None:
         overflow.append(dropped)

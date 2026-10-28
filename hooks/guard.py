@@ -23,6 +23,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 __all__ = [
     "Decision",
@@ -39,6 +40,9 @@ __all__ = [
 
 SINK_NETWORK = ipaddress.ip_network("10.13.37.0/24")
 _ALLOWED = ("evil.example",)
+# A prompt longer than this cannot be decoded within the hook deadline; it is
+# treated as risky (not silently allowed) instead of being inspected halfway.
+MAX_PROMPT_CHARS = 65_536
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.IGNORECASE)
 _NET_TOOL = (
@@ -109,6 +113,9 @@ class Decision:
     source: str = "policy"  # repo | policy | cache | error | off
     files: list[str] = field(default_factory=list)
     duration_ms: float = 0.0
+    # Gate A may turn a repo/incomplete ASK into ALLOW after an explicit,
+    # fingerprint-bound user approval. Prompt risk is never approvable.
+    approvable: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -118,6 +125,7 @@ class Decision:
             "source": self.source,
             "files": self.files,
             "duration_ms": round(self.duration_ms, 1),
+            "approvable": self.approvable,
         }
 
 
@@ -154,7 +162,7 @@ def _worst(*verdicts: str) -> str:
 
 def _bad_host(host: str) -> bool:
     host = host.lower().rstrip(".")
-    if host in _ALLOWED:
+    if host in _ALLOWED or host.endswith(".evil.example"):
         return True
     try:
         return ipaddress.ip_address(host) in SINK_NETWORK
@@ -162,11 +170,27 @@ def _bad_host(host: str) -> bool:
         return False
 
 
+def _url_host(url: str) -> str | None:
+    """Real hostname, with userinfo/port removed; None when malformed.
+
+    ``.hostname`` alone accepts a broken port, so ``.port`` is read too: a URL
+    whose authority cannot be parsed completely is never treated as safe.
+    """
+    try:
+        parts = urlsplit(url)
+        _ = parts.port
+        return parts.hostname
+    except ValueError:
+        return None
+
+
 def _bad_urls(text: str) -> list[str]:
     hits: list[str] = []
     for match in _URL_RE.finditer(text):
-        host = match.group().split("://", 1)[1].split("/", 1)[0].split(":")[0]
-        if _bad_host(host):
+        host = _url_host(match.group())
+        # A malformed authority (bad port, broken IPv6 literal, empty host)
+        # cannot be proven safe, so it is treated exactly like a sink hit.
+        if host is None or _bad_host(host):
             hits.append(match.group())
     return hits
 
@@ -183,20 +207,72 @@ def _repo_from(payload: dict) -> Path:
     return Path.cwd()
 
 
-def _looks_like_repo(path: Path) -> bool:
-    if not path.is_dir():
-        return False
-    markers = (
-        ".git",
-        "AGENTS.md",
-        "CLAUDE.md",
-        "README.md",
-        "package.json",
-        "pyproject.toml",
-        ".cursorrules",
-        ".claude",
-    )
-    return any((path / marker).exists() for marker in markers)
+# Markers strong enough to identify a project root from a subdirectory.  A
+# bare README is deliberately not here: it is accepted only for the directory
+# the session started in, so an unrelated README higher up cannot widen a scan.
+_PROJECT_MARKERS = (
+    ".git",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".cursorrules",
+    ".clinerules",
+    ".windsurfrules",
+    ".claude",
+    ".mcp.json",
+    "pyproject.toml",
+    "package.json",
+    "Cargo.toml",
+    "go.mod",
+)
+
+
+def resolve_project_root(path: str | Path) -> tuple[Path | None, str]:
+    """Find the project root for a session directory.
+
+    Returns ``(root, status)`` where status is:
+
+    - ``ok``: a marker was found walking up from ``path``;
+    - ``not_a_repo``: a real directory with no project marker (not a repo);
+    - ``unresolved``: the path is missing, not a directory, or home/root was
+      reached without a marker and the start directory has no README.
+    """
+    start = Path(path).expanduser()
+    try:
+        if not start.exists():
+            return None, "unresolved"
+        if start.is_file():
+            start = start.parent
+        if not start.is_dir():
+            return None, "unresolved"
+        start = start.resolve()
+    except OSError:
+        return None, "unresolved"
+
+    home: Path | None = None
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        home = None
+
+    found: Path | None = None
+    current = start
+    for _ in range(64):
+        # Never adopt the user's home directory (or a volume root) as the
+        # project root: that would scan unrelated files outside the session.
+        if current == home or current.parent == current:
+            break
+        if any((current / marker).exists() for marker in _PROJECT_MARKERS):
+            found = current
+        current = current.parent
+    if found is not None:
+        return found, "ok"
+    if home is not None and start == home:
+        # A README in the home directory does not make home a project: scanning
+        # it would read unrelated files and blow the scan budget.
+        return None, "not_a_repo"
+    if (start / "README.md").is_file():
+        return start, "ok"
+    return None, "not_a_repo"
 
 
 def _gate_label(gate: str) -> str:
@@ -234,19 +310,23 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
     repo = Path(repo)
     mode = os.environ.get("BAITWATCH_HOOK_SCANNER", "read").strip().lower()
     tag = "keyword" if mode == "keyword" else _read_tag()
+    cache_key = None
     if cache is not None and os.environ.get("BAITWATCH_HOOK_REFRESH") != "1":
-        key = cache.key(repo, tag)
-        cached = cache.get(key)
-        if cached is not None:
-            return RepoScan(
-                cached.verdict,
-                cached.score,
-                cached.reason,
-                cached.files,
-                cached.model,
-                cached=True,
-                duration_ms=(time.perf_counter() - started) * 1000,
-            )
+        # A key is None when the scanned tree cannot be fingerprinted; then the
+        # cache is not consulted or written at all (rescan, never stale ALLOW).
+        cache_key = cache.key(repo, tag)
+        if cache_key is not None:
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return RepoScan(
+                    cached.verdict,
+                    cached.score,
+                    cached.reason,
+                    cached.files,
+                    cached.model,
+                    cached=True,
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                )
 
     if mode == "keyword":
         from attacks.harness import keyword_scanner
@@ -275,24 +355,34 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
         if cache is not None:
             from hooks.cache import CachedScan
 
-            cache.set(
-                cache.key(repo, tag),
-                CachedScan(
-                    verdict=verdict,
-                    score=scan_result.score,
-                    reason=reason,
-                    files=files,
-                    model="keyword",
-                    created=time.time(),
-                ),
-            )
+            if cache_key is None:
+                cache_key = cache.key(repo, tag)
+            if cache_key is not None:
+                cache.set(
+                    cache_key,
+                    CachedScan(
+                        verdict=verdict,
+                        score=scan_result.score,
+                        reason=reason,
+                        files=files,
+                        model="keyword",
+                        created=time.time(),
+                    ),
+                )
         return scan_result
 
     from read.config import ReadConfig  # lazy: keeps hooks importable on CPU
     from read.scan import scan
 
     cfg = ReadConfig.quick()
-    cfg.judge.enabled = os.environ.get("BAITWATCH_HOOK_JUDGE", "1") != "0"
+    # Inline judging is off by default: a judge round-trip is the most
+    # expensive thing a hook can do and must never push it into its deadline.
+    # When enabled, keep a small budget so it still finishes in time.
+    judge_on = os.environ.get("BAITWATCH_HOOK_JUDGE", "0") == "1"
+    cfg.judge.enabled = judge_on
+    if judge_on:
+        cfg.judge.max_calls_per_scan = min(cfg.judge.max_calls_per_scan, 2)
+        cfg.judge.timeout_s = min(cfg.judge.timeout_s, 3.0)
     result = scan(repo, cfg=cfg)
     if result.read_verdict == "attack":
         verdict = "block"
@@ -319,17 +409,20 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
     if cache is not None:
         from hooks.cache import CachedScan
 
-        cache.set(
-            cache.key(repo, tag),
-            CachedScan(
-                verdict=verdict,
-                score=result.max_score,
-                reason=reason,
-                files=files,
-                model=model,
-                created=time.time(),
-            ),
-        )
+        if cache_key is None:
+            cache_key = cache.key(repo, tag)
+        if cache_key is not None:
+            cache.set(
+                cache_key,
+                CachedScan(
+                    verdict=verdict,
+                    score=result.max_score,
+                    reason=reason,
+                    files=files,
+                    model=model,
+                    created=time.time(),
+                ),
+            )
     return scan_result
 
 
@@ -344,8 +437,16 @@ def prompt_risk(prompt: str) -> tuple[bool, str]:
         produce_views,
     )
 
+    if len(prompt) > MAX_PROMPT_CHARS:
+        return True, (
+            f"prompt is too long to inspect completely ({len(prompt)} characters); "
+            "submit a shorter prompt or approve it explicitly"
+        )
     decoders = builtin_decoders() + external_decoders()
-    views = produce_views(prompt, decoders)
+    errors: list[tuple[str, str]] = []
+    views = produce_views(prompt, decoders, errors=errors)
+    if errors:
+        return True, "prompt decoding could not cover the full text; treat it as risky"
     for view in views:
         if view.decoder is None:
             continue
@@ -457,15 +558,50 @@ def _combine(
     )
 
 
+def _outside_root(path: str, root: Path) -> bool:
+    """True for an absolute tool target outside the scanned project root."""
+    if not path:
+        return False
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        return False
+    try:
+        candidate = candidate.resolve()
+        root = root.resolve()
+    except OSError:
+        return True
+    return candidate != root and root not in candidate.parents
+
+
 def gate_a(payload: dict, *, scanner=scan_repo, cache=None) -> Decision:
     started = time.perf_counter()
     prompt = str(payload.get("prompt") or payload.get("user_prompt") or "")
     repo = _repo_from(payload)
     risky, why = prompt_risk(prompt)
+    root, status = resolve_project_root(repo)
     repo_scan = None
-    if _looks_like_repo(repo):
-        repo_scan = scanner(repo) if scanner is not scan_repo else scan_repo(repo, cache=cache)
+    unresolved = status == "unresolved"
+    if status == "ok" and root is not None:
+        repo_scan = scanner(root) if scanner is not scan_repo else scan_repo(root, cache=cache)
     decision = _combine("A", repo_scan, None, why if risky else "")
+    if unresolved:
+        decision.verdict = _worst(decision.verdict, "ask")
+        decision.reason = "; ".join(
+            part
+            for part in (
+                f"project root could not be resolved from {repo}; refusing an unscanned session",
+                decision.reason,
+            )
+            if part
+        )
+        decision.source = "error"
+    if decision.verdict == "ask" and not risky and not unresolved and root is not None:
+        decision.approvable = True
+        from hooks.cache import ApprovalStore
+
+        if ApprovalStore().is_approved(root):
+            decision.verdict = "allow"
+            decision.reason = f"{decision.reason}; approved for this exact tree by the user"
     decision.duration_ms = (time.perf_counter() - started) * 1000
     return decision
 
@@ -475,9 +611,19 @@ def gate_b(payload: dict, *, scanner=scan_repo, cache=None) -> Decision:
     tool_name = str(payload.get("tool_name") or payload.get("toolName") or "")
     tool_input = payload.get("tool_input") or payload.get("toolInput") or {}
     repo = _repo_from(payload)
+    root, status = resolve_project_root(repo)
+    if status == "unresolved":
+        decision = Decision(
+            "B",
+            "ask",
+            f"project root could not be resolved from {repo}; cannot verify this tool call",
+            source="error",
+        )
+        decision.duration_ms = (time.perf_counter() - started) * 1000
+        return decision
     repo_scan = None
-    if _looks_like_repo(repo):
-        repo_scan = scanner(repo) if scanner is not scan_repo else scan_repo(repo, cache=cache)
+    if status == "ok" and root is not None:
+        repo_scan = scanner(root) if scanner is not scan_repo else scan_repo(root, cache=cache)
     if repo_scan is not None and repo_scan.verdict == "block":
         decision = Decision(
             "B",
@@ -489,6 +635,26 @@ def gate_b(payload: dict, *, scanner=scan_repo, cache=None) -> Decision:
         decision.duration_ms = (time.perf_counter() - started) * 1000
         return decision
     policy = static_tool_decision(tool_name, tool_input)
+    tool = tool_name.strip().lower()
+    if (
+        policy.verdict == "allow"
+        and root is not None
+        and tool
+        in (
+            "write",
+            "edit",
+            "multiedit",
+            "notebookedit",
+        )
+    ):
+        data = tool_input if isinstance(tool_input, dict) else {}
+        target = str(data.get("file_path") or data.get("path") or data.get("notebook_path") or "")
+        if _outside_root(target, root):
+            policy = Decision(
+                "B",
+                "ask",
+                f"edit target {target!r} is outside the scanned project root {root}",
+            )
     decision = _combine("B", repo_scan, policy)
     decision.duration_ms = (time.perf_counter() - started) * 1000
     return decision

@@ -25,8 +25,8 @@ ATTACK_REPO = FIXTURES / "attack_repo"
 BENIGN_REPO = FIXTURES / "benign_repo"
 
 DEFAULT_MODEL_DIRS = [
-    Path("/mnt/d/hf_models/Llama-Prompt-Guard-2-22M"),
-    Path("/mnt/d/hf_models/Llama-Prompt-Guard-2-86M"),
+    Path.home() / "hf_models" / "Llama-Prompt-Guard-2-22M",
+    Path.home() / "hf_models" / "Llama-Prompt-Guard-2-86M",
 ]
 
 

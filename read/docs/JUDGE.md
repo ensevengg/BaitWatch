@@ -63,7 +63,7 @@ run in parallel. Identical chunk texts are judged once.
    `api.llama.com/compatible/v1` returns HTTP 404 and `muse-spark` returns
    `model_not_found`; `api.meta.ai/v1` with `muse-spark-1.3` returns 200.
 2. **Fallback — local llama-server.** `llama-server -m
-   /mnt/d/hf_models/Llama-3.2-3B-Instruct/Llama-3.2-3B-Instruct-Q6_K.gguf
+   $HOME/hf_models/Llama-3.2-3B-Instruct/Llama-3.2-3B-Instruct-Q6_K.gguf
    -ngl 99 -c 8192 --jinja --port 8080` (OpenAI dialect at
    `http://127.0.0.1:8080/v1`). Only runs while no local decoy holds VRAM
    (demo-machine rule).

@@ -30,6 +30,10 @@ try:
     import fcntl
 except ModuleNotFoundError:  # Windows dev boxes: flock is POSIX-only
     fcntl = None
+try:
+    import msvcrt
+except ModuleNotFoundError:  # POSIX: msvcrt is Windows-only
+    msvcrt = None
 import http.client
 import json
 import os
@@ -118,30 +122,70 @@ class SpendLedger:
 
     def record(self, usage: dict) -> float:
         cost = self.cost_of(usage)
-        # Re-read under an exclusive lock so two scans in different processes
-        # cannot each start from the same total and silently overrun the cap.
+        # Re-read under an exclusive inter-process lock so two scans cannot each
+        # start from the same total and silently overrun the cap.  POSIX uses
+        # flock; Windows uses msvcrt.locking on the first byte of the same file.
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock, open(self.path, "a+") as f:
-            if fcntl is not None:
-                fcntl.flock(f, fcntl.LOCK_EX)
-            f.seek(0)
+        # Lock a sidecar file rather than the ledger itself: Windows byte-range
+        # locks do not survive truncating the locked region, and the sidecar
+        # keeps POSIX and Windows behaviour identical.
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        with self._lock, open(lock_path, "a+b") as lock, open(self.path, "a+b") as f:
+            locked = self._acquire_lock(lock)
             try:
-                data = json.loads(f.read() or "{}")
-            except (ValueError, TypeError):
-                data = {}
-            self.total_usd = float(data.get("total_usd", 0.0)) + cost
-            self.calls = int(data.get("calls", 0)) + 1
-            f.seek(0)
-            f.truncate()
-            f.write(json.dumps({
-                "total_usd": round(self.total_usd, 4),
-                "calls": self.calls,
-                "usd_cap": self.usd_cap,
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            }))
-            if fcntl is not None:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                f.seek(0)
+                raw = f.read()
+                try:
+                    data = json.loads(raw.decode("utf-8") or "{}")
+                except (ValueError, TypeError, UnicodeDecodeError):
+                    data = {}
+                self.total_usd = float(data.get("total_usd", 0.0)) + cost
+                self.calls = int(data.get("calls", 0)) + 1
+                payload = json.dumps({
+                    "total_usd": round(self.total_usd, 4),
+                    "calls": self.calls,
+                    "usd_cap": self.usd_cap,
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                }).encode("utf-8")
+                f.seek(0)
+                f.truncate()
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                if locked:
+                    self._release_lock(lock)
         return cost
+
+    @staticmethod
+    def _acquire_lock(handle) -> bool:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            return True
+        if msvcrt is not None:
+            # Lock one byte at the start; msvcrt has no whole-file lock.  The
+            # non-blocking variant is retried here because LK_LOCK sleeps a
+            # full second per attempt, which is far too coarse for two hooks
+            # finishing microseconds apart.
+            deadline = time.monotonic() + 10.0
+            while True:
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    return True
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.005)
+        return False
+
+    @staticmethod
+    def _release_lock(handle) -> None:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        elif msvcrt is not None:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _tokens(usage: dict, key: str) -> int:

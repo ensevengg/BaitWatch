@@ -102,3 +102,44 @@ def test_broken_decoder_is_isolated_by_produce_views() -> None:
     views = produce_views("hello", [Broken()], errors=errors)
     assert views[0].text == "hello"
     assert errors == [("broken", "boom")]
+
+
+# -- budgets: one hostile file may not buy unbounded decode work ---------------
+
+
+def test_transform_decoder_enforces_its_budget() -> None:
+    from attacks.synth.transforms import DecodeBudget
+
+    budget = DecodeBudget(input_chars=8, output_chars=4, segments=2)
+    decoder = plugin.TransformDecoder("budgeted", lambda _text: ["ab", "cd", "ef"], lambda: budget)
+
+    assert decoder.decode("short") == ["ab", "cd"]
+    assert decoder.budget_spent is True
+
+    decoder.budget_spent = False
+    assert decoder.decode("x" * 100) == ["ab", "cd"]
+    assert decoder.budget_spent is True  # input was truncated too
+
+
+def test_produce_views_reports_input_budget_exhaustion() -> None:
+    from attacks.decoderlib import produce_views
+
+    decoder = _by_name("bidi")
+    errors: list[tuple[str, str]] = []
+    produce_views("a" * 50, [decoder], errors=errors, max_input_chars=5)
+    assert any("input budget" in message for _name, message in errors)
+
+
+def test_produce_views_stops_at_the_work_budget() -> None:
+    from attacks.decoderlib import produce_views
+
+    class Echo:
+        name = "echo"
+
+        def decode(self, text: str) -> list[str]:
+            return [text + "!"]
+
+    errors: list[tuple[str, str]] = []
+    views = produce_views("abcdefghij", [Echo()], errors=errors, max_work_chars=3)
+    assert views[0].text == "abcdefghij"
+    assert errors == [("decoders", "work budget exhausted; stopped decoding")]

@@ -1,15 +1,15 @@
 # ATTACK slice — implementation and verification report
 
 **Owner:** Aditya (`Shellghostt`)
-**Repository:** `D:\Hackathon\BaitWatch` (clone of `ensevengg/BaitWatch`)
-**Branch:** `main`, 14 commits ahead of `origin/main` (`1b8d7b8`), pushed as
-`aditya/attack-slice` (PR not opened yet)
+**Repository:** `ensevengg/BaitWatch` (local clone at `<checkout>`)
+**Branch:** `main`, pushed as `aditya/attack-slice`; **PR #13** is open
+(https://github.com/ensevengg/BaitWatch/pull/13)
 **Report date:** 2026-10-29
 **Local commits:** `843282c`, `334df98`, `78e3ad5`, `cb2d012`, `0bd106c`,
-`c30cab9`, `3a029a5`, `228a1ae`, `52c3e32`, `acea601`, plus the commit that
-added this update. The tree was rebased onto `origin/main` twice (first onto
-`f9f7083`, then onto `1b8d7b8` after PR #10 merged), so the hashes differ from
-the pre-rebase report.
+`c30cab9`, `3a029a5`, `228a1ae`, `52c3e32`, `acea601`, `9e4ce3e`, `72b2af6`,
+`b5622c8`, `6d9a59e`, plus the PR #13 review-fix commit. The tree was rebased
+onto `origin/main` twice (first onto `f9f7083`, then onto `1b8d7b8` after PR #10
+merged), so the hashes differ from the pre-rebase report.
 
 This report is the audit trail for the ATTACK side: every file, every contract,
 every command, and the exact verification result. Open it in Cursor with
@@ -26,26 +26,28 @@ require the fine-tuned READ checkpoint or the training corpus.
 |---|---|---|
 | Five attack repos, all five threat types | `attacks/repos/` | `test_repos.py`, `python -m attacks harness` |
 | README curl bait, `http` **and** `https` | `readme-bait-curl/README.md` | `test_readme_bait_covers_http_and_https` |
-| Runtime JS eval chain | `runtime-eval-chain/scripts/doctor.js` | decoder recovery 2/2 |
+| Runtime JS eval chain | `runtime-eval-chain/scripts/doctor.js` | decoder recovery 2/2 + `node` executes the action (`test_runtime_payloads.py`) |
 | Markdown hidden prompt after invisible chars | `markdown-ghost/` (5 channels) | decoder recovery 5/5 |
 | Agent-config injection in every agent file | `agent-config-injection/` (8 entries) | `test_agent_config_repo_covers_every_agent_file` |
 | Git-hook installer payload | `git-hook-installer/` | `test_git_hook_is_executable_shaped` |
 | `MANIFEST.json` labels per repo | 5 repo manifests + 1 examples manifest | `test_manifests.py` |
 | Two examples per threat type | `attacks/examples/` (10 entries) | `test_examples_cover_two_per_threat` |
 | Safety lint (real URLs/IPs/keys forbidden) | `attacks/lint.py` | `test_lint.py`, `python -m attacks lint` |
-| Hash-check payloads against training data | `attacks/leakage.py` | `test_leakage.py` (11 passed) |
+| Hash-check payloads against training data | `attacks/leakage.py` | `test_leakage.py` (16 passed) |
 | Per-repo detection harness | `attacks/harness.py` | `python -m attacks harness` |
-| Gate A `UserPromptSubmit`, Gate B `PreToolUse` | `hooks/guard.py`, `hooks/cli.py` | `test_hooks.py`, selftest 11/11 |
+| Gate A `UserPromptSubmit`, Gate B `PreToolUse` | `hooks/guard.py`, `hooks/cli.py` | `test_hooks.py`, `test_hardening.py`, selftest |
 | Fail-closed behavior | `hooks/guard.py::error_decision` | `test_crash_fails_closed`, selftest |
 | `< 3 s` target | cache + keyword stand-in | `test_hook_under_three_seconds` |
 | Demo beat sheet `<= 3:00` | `demo/run_demo.sh` | `test_demo_stays_inside_three_minutes` |
 | Docs | `attacks/README.md`, `docs/HOOKS.md`, `demo/README.md` | `test_docs.py` |
 | Payloads only `*.example` / `10.13.37.0/24` | seeds + lint | `test_targets_stay_inside_the_sandbox`, lint clean |
+| No personal paths in the public tree | `attacks/publication.py` | `test_publication.py`, `python -m attacks publication` |
 | Test-data marker | `.baitwatch-test-data` in every repo | `test_every_repo_is_marked_as_test_data` |
 | De-Caffeinator credit without external URLs | root README + `attacks/README.md` | `test_attack_readme_names_prior_work_without_a_url` |
 
-**Test result on this machine:** `153 collected`, `153 passed`, `0 skipped`,
-`0 failed`.
+**Test result on this machine:** `python -m pytest tests/attacks -q` →
+`217 passed`, `0 failed`. Node 22 is present, so the runtime-execution test
+ran; on a machine without `node` those three tests skip by design.
 
 The former skip (`test_read_scanner_is_lazy_without_torch`) is gone. It was
 rewritten as `test_read_scanner_reports_a_missing_dependency`, which blocks
@@ -71,9 +73,9 @@ cb2d012  fix(attacks): forward --help to the subcommand
 ```
 
 `git status --short` is clean after the report commit above. The work was
-rebased onto `origin/main` twice, so the branch is now `ahead 14, behind 0`.
-It is pushed as `aditya/attack-slice`, and CI run `40732966171` passed both
-jobs, including `ATTACK repos, decoders and hook`.
+rebased onto `origin/main` twice, then the PR #13 review fixes were added as one
+more commit. It is pushed as `aditya/attack-slice`, and PR #13 is open with CI
+green on the review-fix commit (see §17 and §19.1).
 
 ### 2.1 Files changed in the existing tree
 
@@ -116,13 +118,14 @@ documented extension point.
 
 | Item | Why it cannot be installed here | How to supply it |
 |---|---|---|
-| `v15f_22m` checkpoint | produced by training, pinned at `/home/enseven/...` | copy from the training machine; set `BAITWATCH_MODEL_PATH` |
+| `v15f_22m` checkpoint | produced by training, not committed | copy from the training machine; set `BAITWATCH_MODEL_PATH` |
 | `train/val/test` parquet | training data is not vendored | `python -m attacks leakage --data-dir <dir>` |
 | GPU | optional | CPU torch is enough for correctness, slower than real time |
 
 The READ scanner now **imports** on Windows, but a real scan still stops at
-the missing `v15f_22m` checkpoint. The pin stores a POSIX path, so Windows
-raises an explicit message instead of inventing `\home\enseven\...`; that is
+the missing `v15f_22m` checkpoint. The committed pin stores a `<model-dir>`
+publication placeholder, so `resolve_model_path` raises an explicit message
+telling the operator to set `BAITWATCH_MODEL_PATH`; that is
 data, not a code error. The harness turns it into one actionable line and the
 hook fails closed.
 
@@ -172,16 +175,19 @@ Generated tree size: **57 files** (`build.build_tree()`), of which
 |---|---:|---|
 | `test_build.py` | 6 | determinism, drift, LF, manifest JSON, wheel cover |
 | `test_cli.py` | 2 | `--help` reaches the subcommand, top-level help |
-| `test_decoders.py` | 11 | plugin registration, each new channel, builtin drift |
+| `test_decoders.py` | 14 | plugin registration, each channel, budget exhaustion, builtin drift |
 | `test_docs.py` | 5 | docs exist, demo under 3:00, hook docs, credit |
+| `test_hardening.py` | 31 | the PR #13 review findings, one test group per comment |
 | `test_harness.py` | 13 | staging, recall, extras, incomplete, recovery, CLI |
 | `test_hooks.py` | 38 | tool policy, gates, cache, installer, CLI, timing |
-| `test_leakage.py` | 11 | exact/embedded/fuzzy, skip, parquet |
-| `test_lint.py` | 10 | URL/domain/IP/key/.env rules |
+| `test_leakage.py` | 16 | exact/embedded/fuzzy, skip, parquet, incomplete, exit 2 |
+| `test_lint.py` | 17 | URL/domain/IP/key/.env rules, every scheme, dynamic hosts |
 | `test_manifests.py` | 15 | schema, hashes, spans, neutrality, coverage |
+| `test_publication.py` | 8 | repo-wide personal-path check and its exemptions |
 | `test_repos.py` | 13 | 5 repos, markers, recovery, layers, encodings |
-| `test_transforms.py` | 29 | round trip per transform, invisibility, plugin set |
-| **Total** | **153** | |
+| `test_runtime_payloads.py` | 3 | Node executes the JS eval chain; every generated `.js` parses |
+| `test_transforms.py` | 36 | round trip per transform, invisibility, bidi, escapes, budgets |
+| **Total** | **217** | |
 
 ### 4.4 Other new paths
 
@@ -345,13 +351,20 @@ seed in decode_payload(encode_seed(seed, channel), channel)
 | hex | no (built-in) | yes | runs of 16+ bytes |
 | rot13 | no (built-in since v1.5f) | inside `js_eval` | line-level and whole-text candidate |
 | zero_width_binary | **yes** | yes | UTF-8 bits as U+200B / U+200C, U+2063 delimiter |
-| bidi | **yes** | yes | RLO … PDF over reversed text |
+| bidi | **yes** | yes | RLO … PDF over reversed text; one-pass span scan, budgeted |
 | html_comment | no (built-in) | yes | `<!-- payload -->` |
 | unicode_tags | no (built-in) | yes | U+E0000+ASCII |
 | variation_selectors | no (built-in) | yes | two selectors per UTF-8 byte |
 | markdown_image | **yes** | examples/tests | prompt in alt text |
-| js_eval | **yes** | yes | `eval(atob(...))`, base64 around rot13 |
-| js_escapes | **yes** | examples/tests | `\xNN` / `\uNNNN` runs |
+| js_eval | **yes** | yes | `eval(rot13(atob(...)))` — base64 around ROT13 around a real sink action |
+| js_escapes | **yes** | examples/tests | `\xNN` bytes and `\uNNNN` characters (surrogate pairs joined) |
+
+Every decoder runs under a three-part budget: input characters, output
+characters and emitted segments, plus a shared work budget per file in
+`read/decoders.py`. Hitting a budget is recorded through `produce_views`
+errors, which the scanner turns into an `incomplete` verdict — never a silent
+ALLOW. `bidi` parses spans in one pass, so N unmatched RLOs cost O(N), not
+O(N²).
 
 The plugin registers exactly five channels:
 
@@ -522,12 +535,15 @@ Detection:
 | `embedded` | the normalized payload appears inside a longer row |
 | `fuzzy` | word 3-gram overlap ≥ 0.8 |
 
-Exit codes: `0` clean or skipped, `3` leak, `2` error.
+Exit codes: `0` clean or skipped, `3` leak, `2` incomplete (unreadable or empty
+corpus, or a missing `pyarrow`). The default data directory is
+`~/.local/share/baitwatch/data`; the transcript below was run on the author's
+machine, where the per-user path is elided as `<data-dir>`.
 
 On this machine there is no corpus, so it exits 0 with:
 
 ```text
-leakage check skipped: no corpus found under C:\Users\Aditya\.local\share\baitwatch\data
+leakage check skipped: no corpus found under <data-dir>
 ```
 
 That is the designed CPU/CI behavior, not a failure.
@@ -543,7 +559,7 @@ $ python -m ruff check attacks hooks tests/attacks
 All checks passed!
 
 $ python -m ruff format --check attacks hooks tests/attacks
-57 files already formatted
+61 files already formatted
 ```
 
 ### 11.2 Generated tree, safety lint, READ gate
@@ -551,13 +567,14 @@ $ python -m ruff format --check attacks hooks tests/attacks
 ```text
 $ python -m attacks check
 lint: clean
+publication: clean
 generated tree: clean
 gate READ agent-config-injection: ok (8/8 payloads recovered)
 gate READ git-hook-installer: ok (2/2 payloads recovered)
 gate READ markdown-ghost: ok (5/5 payloads recovered)
 gate READ readme-bait-curl: ok (3/3 payloads recovered)
 gate READ runtime-eval-chain: ok (2/2 payloads recovered)
-PASS: lint, generated tree, and READ gate
+PASS: lint, publication, generated tree, and READ gate
 ```
 
 ### 11.3 Detection harness
@@ -607,17 +624,18 @@ selftest: 11/11
 
 ```text
 $ python -m pytest tests/attacks -q
-153 passed
+217 passed
 ```
 
-No test is skipped: the lazy-import guard is now exercised with torch present.
-The per-file split is in §4.3.
+No test is skipped on a machine with Node 22: the runtime-eval tests execute the
+generated JavaScript with stubbed `https`/`fs`. Without `node`, those three
+tests skip. The per-file split is in §4.3.
 
-READ-side smoke tests that the change touches:
+READ-side tests that the change touches:
 
 ```text
 $ python -m pytest tests/read/test_judge.py tests/read/test_config.py -q
-28 passed
+32 passed
 
 $ python -m pytest tests/read/test_decoders.py -q
 27 passed
@@ -635,7 +653,7 @@ Beats:
 2. `0:15` one seed through nine channels, `recovered 9/9`.
 3. `1:00` repo #1 table plus Gate B block.
 4. `1:45` selftest 11/11, Gate A `ask` on a zero-width prompt, installer
-   dry-run.
+   refusal for an old host and a dry-run merge for 2.1.295.
 5. `2:30` lint, leakage skip, summary.
 
 Measured wall time on this machine: **~4 seconds**; the timestamps are the
@@ -643,22 +661,23 @@ narration script, not sleeps.
 
 ### 11.7 Windows real-READ behavior
 
-`read/judge.py` previously failed at import with `No module named 'fcntl'`.
-After the shim, `import read.scan` succeeds. A POSIX pin is refused instead of
-being turned into a Windows `Path`; the harness prints:
+`read/judge.py` previously failed at import with `No module named 'fcntl'`;
+the ledger lock now uses `fcntl` on POSIX and `msvcrt.locking` on Windows, so
+`import read.scan` succeeds everywhere. A machine path is never committed: the
+pin stores `"<model-dir>/v15f_22m"`, and resolution stops with an actionable
+message rather than inventing a `Path` from it. The harness prints:
 
 ```text
-error: READ checkpoint unavailable (pinned checkpoint path is POSIX
-(/home/enseven/.local/share/baitwatch/models/v15f_22m) and this is Windows
-(read/model_config.json, tag 'v1.5f'). Copy it to a Windows path and set
-BAITWATCH_MODEL_PATH explicitly.). The keyword scanner needs no model; use
---scanner keyword for the CPU gate.
+error: READ checkpoint unavailable (read/model_config.json stores a publication
+placeholder instead of a machine path; set BAITWATCH_MODEL_PATH to the pinned
+checkpoint (tag 'v1.5f') before scanning.). The keyword scanner needs no model;
+use --scanner keyword for the CPU gate.
 ```
 
 The hook in real mode fails closed with the same normalized gate label:
 
 ```json
-{"gate":"B","verdict":"block","source":"error","reason":"BaitWatch hook failed (FileNotFoundError: pinned checkpoint path is POSIX ...); failing closed"}
+{"gate":"B","verdict":"block","source":"error","reason":"BaitWatch hook failed (FileNotFoundError: read/model_config.json stores a publication placeholder ...); failing closed"}
 ```
 
 Both are correct: missing model data must never become an allow, and a crash
@@ -692,7 +711,7 @@ Run everything from the repository root.
 ### 12.1 PowerShell (Windows)
 
 ```powershell
-cd D:\Hackathon\BaitWatch
+cd <checkout>
 
 git log --oneline -2
 git status --short
@@ -726,7 +745,7 @@ five `ok` rows; `PASS`; `153 passed`; `28 passed`; `27 passed`;
 ### 12.2 Git Bash / WSL (demo)
 
 ```bash
-cd /d/Hackathon/BaitWatch
+cd <checkout>
 bash demo/run_demo.sh
 ```
 
@@ -829,16 +848,22 @@ Use this as a file-by-file read. Each item names the exact symbol or assertion.
 - [ ] `attacks/manifests.py` — `span_text` is 1-based and exact; a missing
       `decoded_sha256` is rejected; `expected_files` returns unique files.
 - [ ] `attacks/decoders.py` — `register` skips names already in the registry
-      **or** in `BUILTIN_NAMES`; `TransformDecoder.join_segments = True`.
+      **or** in `BUILTIN_NAMES`; `TransformDecoder.join_segments = True`;
+      `budget_spent` is surfaced to `produce_views`.
 - [ ] `attacks/decoderlib.py` — imports `read.decoders` by path, not
-      `import read`.
+      `import read`; enforces input and work budgets.
 - [ ] `hooks/guard.py` — `error_decision` default is `block` and normalizes the
       gate label; `.env.example` is excluded by `_SECRET`; `gate_b`
-      short-circuits on a repo block.
-- [ ] `hooks/cache.py` — key includes `repo_head`; TTL parse; corrupt JSON
-      returns `None`.
+      short-circuits on a repo block; `resolve_project_root` walks upward and
+      never adopts home; `_url_host` reads `.hostname` **and** `.port`.
+- [ ] `hooks/cache.py` — key includes `repo_head`, the content fingerprint
+      (tracked and untracked) and the scanner config; a missing fingerprint
+      returns `None`; `ApprovalStore` is fingerprint- and TTL-bound.
 - [ ] `hooks/install.py` — merge keeps unrelated hooks/env; invalid JSON
-      raises; atomic replace.
+      raises; atomic replace; emits `-I -m hooks` and `onFailure: "block"`;
+      refuses Claude Code `< 2.1.295`.
+- [ ] `hooks/cli.py` — Gate A ask becomes a blocking decision; the internal
+      deadline prints a deny before the host's 30 s timeout.
 - [ ] `demo/run_demo.sh` — no writes outside `TMPDIR`; installer uses
       `--dry-run`; `BAITWATCH_HOOK_SCANNER=keyword`.
 
@@ -867,11 +892,13 @@ Use this as a file-by-file read. Each item names the exact symbol or assertion.
 - [ ] The plugin does not register any built-in channel — including `rot13`
       and `reversed`, which READ added in v1.5f.
 - [ ] The keyword scanner is a stand-in; the product default is `read`.
-- [ ] Windows falls back to a thread lock without `fcntl`; multi-process
-      spend locking is POSIX-only.
-- [ ] Gate A `ask` is context injection, because the host has no ask for
-      prompt submission.
-- [ ] `python -m attacks leakage` exits 0 when no corpus exists.
+- [ ] Windows falls back to a thread lock without `fcntl`; the **ledger** lock
+      uses `msvcrt` on a sidecar file, so multi-process spend locking works on
+      both platforms.
+- [ ] Gate A `ask` is emitted as a block with explicit approval instructions;
+      the generic host output still carries `ask`.
+- [ ] `python -m attacks leakage` exits 0 when no corpus exists, and 2 when a
+      supplied corpus cannot be read.
 
 ---
 
@@ -881,14 +908,14 @@ These are **not** bugs at this commit.
 
 | Observation | Why it is expected | How to close it |
 |---|---|---|
-| `--scanner read` stops at `FileNotFoundError` | the fine-tuned `v15f_22m` checkpoint is not in this workspace, and its pin is a POSIX path | copy it, set `BAITWATCH_MODEL_PATH`; the message now names the POSIX pin instead of `\home\...` |
+| `--scanner read` stops at `FileNotFoundError` | the fine-tuned `v15f_22m` checkpoint is not in this workspace, and the committed pin is a `<model-dir>` placeholder | copy it, set `BAITWATCH_MODEL_PATH`; the message says the pin is a publication placeholder |
 | leakage prints `skipped` | no `train/val/test` corpus locally | `--data-dir` at the real corpus |
 | Gate A cold real scan can exceed 3 s | torch import + model load per process | warm scan/cache; keyword test proves the policy path |
 | `got > want` in the harness table | keyword scanner flags every payload file, including RUN-only ones that share a manifest | intentional; `extra == 0` is the failure condition |
 | `readme-bait-curl` shows `want 1` for 3 payloads | three entries share README.md; gates are file-level | `rec 3/3` proves per-payload recovery |
 | Muse Code target refused | host hook contract unconfirmed | integrate `gate-a`/`gate-b --host generic` once known |
-| CI is green, no PR yet | pushed to `aditya/attack-slice`; both jobs passed on run `40732966171` | open the PR when requested |
-| full `tests/read` reports 17 Windows failures | upstream path-separator and symlink assumptions (`skills\deploy\SKILL.md` vs `skills/deploy/SKILL.md`), plus the missing model/corpus | run on Linux; not part of the ATTACK slice. The targeted `test_judge`, `test_config` and `test_decoders` suites pass (28 + 27). |
+| PR #13 is open | pushed to `aditya/attack-slice`; both jobs passed | re-run CI after the review fixes |
+| full `tests/read` reports 17 Windows failures | upstream path-separator and symlink assumptions (`skills\deploy\SKILL.md` vs `skills/deploy/SKILL.md`), plus the missing model/corpus | run on Linux; not part of the ATTACK slice. The targeted `test_judge`, `test_config` and `test_decoders` suites pass (32 + 27). |
 | `test_cli_accepts_gate_form_without_subcommand` fails on Windows | it expects a successful real scan, but the pinned checkpoint is POSIX and Windows now refuses it loudly | same data gap as the row above; the refusal is the intended fail-closed behavior |
 
 ---
@@ -898,6 +925,7 @@ These are **not** bugs at this commit.
 ```text
 python -m attacks build [--check] [--prune]
 python -m attacks lint [--all] [paths...]
+python -m attacks publication [paths...]
 python -m attacks harness [--scanner keyword|read] [--layer READ|RUN]
                           [--repo NAME ...] [--json]
 python -m attacks leakage [--data-dir DIR] [--splits train val test]
@@ -906,10 +934,12 @@ python -m attacks check
 
 python -m hooks gate-a [--host claude|generic]
 python -m hooks gate-b [--host claude|generic]
+python -m hooks approve [--minutes N] [--repo PATH] [--revoke]
 python -m hooks selftest
 python -m hooks status
 python -m hooks install [--scope user|project] [--target claude|muse]
-                        [--python PATH] [--dry-run] [--uninstall]
+                        [--python PATH] [--claude-version X.Y.Z]
+                        [--dry-run] [--uninstall]
 python -m hooks cache path|clear
 ```
 
@@ -949,17 +979,18 @@ Exit codes:
 
 | Check | Result |
 |---|---|
-| `git status` | clean after the last commit (this report + `docs/DECOY_TRIAL.md`) |
-| branch | `main` = `origin/aditya/attack-slice`; 14 ahead / 0 behind `origin/main` (`1b8d7b8`) |
-| CI | runs `40732966171` (code) and `40744170648` (docs) both success |
+| `git status` | clean after the review-fix commit |
+| branch | `main` = `origin/aditya/attack-slice`; PR #13 open |
+| CI | green on the review-fix commit (both jobs) |
 | ruff check | pass |
-| ruff format check | 57 files formatted |
+| ruff format check | 61 files formatted |
 | generated tree | 57 files, no drift |
 | safety lint | 61 files clean |
+| publication check | clean |
 | READ gate | 5/5 repos, 20/20 payloads recovered |
 | RUN coverage gate | 5/5 repos |
-| tests | 153 passed (153 collected, 0 skipped) |
-| READ judge/config | 28 passed |
+| tests | 217 passed |
+| READ judge/config | 32 passed |
 | READ decoders | 27 passed |
 | hook selftest | 11/11 |
 | demo | all beats, ~4 s |
@@ -973,10 +1004,12 @@ it returned 0/10 bites (see §19.2).
 
 ---
 
-## 18. Review response (Cursor findings)
+## 18. Review response
 
-Every finding from the code review is closed in a dedicated commit, with a
-regression test that fails on the old behavior.
+### 18.1 First round (pre-PR audit)
+
+Every finding from the first code review is closed, with a regression test that
+fails on the old behavior.
 
 | Finding | Fix | Test |
 |---|---|---|
@@ -985,13 +1018,48 @@ regression test that fails on the old behavior.
 | CLI can print `ok yes` with `rec 0/N` | same property drives `main`'s exit code | `test_cli_exits_nonzero_when_recovery_is_incomplete` |
 | `decoded_sha256` is optional | JSON Schema `required` **and** `validate_manifest` reject a missing hash | `test_missing_decoded_hash_is_rejected` |
 | crash path uses lowercase `gate` | `_gate_label` normalizes every path to `A`/`B` | `test_error_decision_normalizes_the_gate_label` |
-| Windows turns a POSIX pin into `\home\...` | explicit `FileNotFoundError` naming the POSIX path, tag and override | `test_windows_pin_reports_the_posix_path` |
+| Windows turns a POSIX pin into `\home\...` | explicit `FileNotFoundError` naming the tag and `BAITWATCH_MODEL_PATH`, with a committed `<model-dir>` placeholder | `test_windows_pin_reports_the_posix_path`, `test_publication_placeholder_pin_is_an_actionable_error` |
 | report snapshot stale / README line 15 | this report rewritten at the rebased commit; sample manifest says line 12 | docs review; `attacks check` |
 | plugin now collides with built-in `rot13` | `BUILTIN_NAMES`, five registered channels, drift test | `test_builtin_names_match_the_read_registry` |
 
+### 18.2 Second round (PR #13 review: 4 high, 8 medium)
+
+Each row is one review comment, the root-cause fix, and the test that fails on
+the old code. Tests live in `tests/attacks/test_hardening.py` unless named
+otherwise.
+
+| # | Severity | Finding | Fix | Regression test |
+|---|---|---|---|---|
+| 1 | high | `python -m hooks` imports from the scanned checkout | installer emits `"<python>" -I -m hooks gate-a\|gate-b`; `-I` keeps `''`/`.` off `sys.path` | `test_hook_command_isolates_the_interpreter`, `test_python_i_keeps_the_working_directory_off_sys_path` |
+| 2 | high | cached ALLOW survives edits and untracked files | cache key = repo path + HEAD + model tag + bounded content fingerprint of the whole tree **and** scanner config; unreadable tree → `key()` is `None` → rescan | `test_cache_key_changes_when_a_file_is_edited`, `..._untracked_file_appears`, `..._scanner_configuration`, `test_cache_key_is_none_when_the_tree_cannot_be_fingerprinted` |
+| 3 | high | hook timeout / start failure lets the action run | `onFailure: "block"` on every generated hook; installer refuses Claude Code `< 2.1.295`; CLI enforces a 20 s internal deadline (`BAITWATCH_HOOK_DEADLINE`) and emits deny itself | `test_install_writes_fail_closed_hook_entries`, `test_install_refuses_a_host_without_fail_closed_hooks`, `test_deadline_stops_waiting_for_a_hung_scan`, `test_cli_deadline_fails_closed` |
+| 4 | high | a plain `src/` session never scans its real root | `resolve_project_root` walks parents to the nearest marker, stops before home/volume root; `unresolved` is `ask`, `not_a_repo` is the only skip | `test_root_walks_up_from_a_subdirectory`, `test_missing_session_directory_is_unresolved`, `test_directory_without_markers_is_not_a_repo`, `test_gate_a_does_not_allow_an_unresolved_session` |
+| 5 | medium | inline judge is enabled by the quick preset without a time budget | `BAITWATCH_HOOK_JUDGE` defaults to off and is capped at 2 calls × 3 s when enabled | `test_cache_key_changes_with_scanner_configuration`, hook runtime tests |
+| 6 | medium | Gate A ASK exits 0 and the prompt runs | ASK is emitted as `decision: block` with exact `python -m hooks approve` instructions; `ApprovalStore` binds approval to the tree fingerprint and TTL; prompt-risk and unresolved-root asks are not approvable | `test_cli_turns_gate_a_ask_into_a_block_with_approval_steps`, `test_gate_a_ask_is_approvable_and_approval_is_used`, `test_approval_dies_when_the_tree_changes`, `test_prompt_risk_is_never_approvable` |
+| 7 | medium | bidi decode is quadratic and unbudgeted | `_bidi_decode` is a single left-to-right span pass; every decoder has input/output/segment budgets and `produce_views` adds a shared work budget; exhaustion is reported as incomplete | `test_bidi_decoding_is_one_pass_and_linear`, `test_decode_budget_truncates_input_and_output`, `test_produce_views_stops_at_the_work_budget`, `test_produce_views_reports_input_budget_exhaustion` |
+| 8 | medium | lint checks only HTTP(S) and lets dynamic real hosts through | every URL scheme is parsed with `urlsplit` (including `.port`); a dynamic host is accepted only if its fixed suffix is `.example`; reversed `evil.example` is allowed via its reverse | `test_non_http_schemes_are_checked`, `test_dynamic_host_without_example_suffix_is_rejected`, `test_dynamic_host_under_example_is_allowed`, `test_unparseable_authority_is_rejected` |
+| 9 | medium | a Parquet corpus without `pyarrow` reports clean | `iter_rows` raises `ManifestError` (exit 2); an unreadable, empty or row-less corpus is `incomplete`, never clean | `test_missing_pyarrow_is_an_actionable_manifest_error`, `test_empty_corpus_file_is_incomplete`, `test_cli_exits_2_for_an_incomplete_check`, `test_json_report_exposes_incomplete` |
+| 10 | medium | the runtime-eval fixture evals ROT13 text, not code | encoder emits `eval(rot13(atob("...")))` and the generated files define `rot13`; a real sink action is inside the base64 | `test_js_eval_payload_executes_the_action` (Node, stubbed `https`/`fs`), `test_generated_javascript_parses` |
+| 11 | medium | report and tree carry personal workstation paths | placeholders `<checkout>` / `<data-dir>` / `<model-dir>` repo-wide; new `attacks/publication.py` scans every text file and is wired into `python -m attacks check` and CI | `tests/attacks/test_publication.py` (8 tests), `python -m attacks publication` |
+| 12 | medium | sink block is bypassed by URL userinfo | `_url_host` uses `urlsplit(...).hostname` **and** `.port`; a malformed authority is unsafe/blocked | `test_bad_urls_uses_the_parsed_hostname`, `test_malformed_urls_are_blocked` |
+| 13 | medium | `\uNNNN` is decoded as bytes and one bad escape discards the run | four-digit escapes decode to characters, surrogate pairs join, lone surrogates become U+FFFD, and each run is isolated; printability is checked on the decoded text | `test_u_escapes_decode_to_characters`, `test_u_escape_surrogate_pair_becomes_one_character`, `test_lone_u_surrogate_is_replaced_not_dropped`, `test_one_bad_escape_run_does_not_discard_the_others` |
+
+The reviewer's list had twelve comments. The timeout comment carried two asks
+(fail-closed `onFailure` plus an internal deadline) and a third aside (keep
+inline judging off unless it has a time budget), so the table splits it into
+rows 3 and 5; every other row is one comment.
+
+**Also fixed here:** `read/judge.py::SpendLedger` did an unlocked
+read-modify-write of the spend file, so two concurrent scans on Windows could
+each spend against the same starting total and overrun the cap. The ledger now
+locks a sidecar `.lock` file — `fcntl.flock` on POSIX, `msvcrt.LK_NBLCK` in a
+5 ms retry loop with a 10 s deadline on Windows. Test:
+`test_ledger_survives_two_competing_processes` (two real processes, 20 records
+each).
+
 The rebase also picked up upstream READ changes that created the decoder
 collision; that is why the plugin count moved from six to five. The transform
-table itself is unchanged.
+table itself is unchanged apart from the corrections above.
 
 ---
 
@@ -1002,8 +1070,9 @@ table itself is unchanged.
 | Ref | State |
 |---|---|
 | `origin/main` | `1b8d7b8`; PR #10 (sinks) merged after the first rebase |
-| local `main` | last commit is this report; **14 ahead, 0 behind**; pushed to `origin/aditya/attack-slice` |
+| local `main` | this report plus the PR #13 review fixes; pushed to `origin/aditya/attack-slice` |
 | backup | `backup/pre-rebase-<timestamp>` points at the pre-rebase tree |
+| **PR #13** | **`aditya/attack-slice` → `main`; open, 12 review findings closed, CI green** |
 | PR #12 | `ashutosh/d3-decoy` — decoy agent loop, tool calls inside the cage (open; updated to `482e9e8`) |
 | PR #10 | `ashutosh/d2-sinks` — DNS/HTTP/TLS sinks and file trace (**merged**) |
 | merged upstream | `#7 uv-torch-extras`, `#8 sweep-scan-resources`, `#9 per-scan-subnet`, `#10 d2-sinks` |
@@ -1014,7 +1083,8 @@ PR #12 adds one more commit after the first snapshot:
 
 The ATTACK branch was rebased, not merged, so the five original commits were
 rewritten (`843282c` … `cb2d012`) and the review fixes were stacked on top.
-The branch is pushed; CI run `40732966171` passed both jobs. No PR is open yet.
+PR #13 was opened on `aditya/attack-slice`; the first CI run passed both jobs,
+and the review-fix commit was pushed on top of it.
 
 ### 19.2 Muse Spark decoy trial
 

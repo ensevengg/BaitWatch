@@ -14,15 +14,29 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["InstallReport", "hook_command", "install", "settings_path", "uninstall"]
+__all__ = [
+    "MIN_CLAUDE_VERSION",
+    "InstallReport",
+    "detect_claude_version",
+    "hook_command",
+    "install",
+    "settings_path",
+    "uninstall",
+]
 
 TOOL_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|WebFetch|Read"
+
+# ``onFailure: "block"`` needs a host that honours it.  2.1.295 is the first
+# Claude Code release with the documented fail-closed hook contract.
+MIN_CLAUDE_VERSION = (2, 1, 295)
 
 
 @dataclass
@@ -36,7 +50,46 @@ class InstallReport:
 
 def hook_command(gate: str, python: str | None = None) -> str:
     interpreter = python or sys.executable
-    return f'"{interpreter}" -m hooks gate-{gate}'
+    # ``-I`` isolates the hook from the scanned checkout: without it, Python
+    # puts the current directory first on sys.path, so a hostile repo could
+    # ship ``hooks/__init__.py`` (or ``json.py``) and replace the guard.
+    return f'"{interpreter}" -I -m hooks gate-{gate}'
+
+
+def parse_claude_version(value: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in str(value).strip().split("."):
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        if digits:
+            parts.append(int(digits))
+    return tuple(parts)
+
+
+def detect_claude_version() -> str | None:
+    """Best-effort host version: env override, then ``claude --version``.
+
+    Returns ``None`` when the CLI is not installed or does not answer, so a
+    headless install is still possible; the caller reports that it could not
+    verify the fail-closed contract.
+    """
+    override = os.environ.get("BAITWATCH_CLAUDE_VERSION", "").strip()
+    if override:
+        return override
+    executable = shutil.which("claude")
+    if not executable:
+        return None
+    try:
+        completed = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"\d+(?:\.\d+)+", completed.stdout or "")
+    return match.group(0) if match else None
 
 
 def settings_path(scope: str = "user", *, root: Path | None = None) -> Path:
@@ -62,6 +115,10 @@ def _hook_entry(gate: str, python: str | None, *, matcher: str | None) -> dict:
                 "type": "command",
                 "command": hook_command(gate, python),
                 "timeout": 30,
+                # A timeout or startup failure must never let the action
+                # continue.  The CLI also enforces an internal deadline below
+                # 30 s, so it usually prints a decision first.
+                "onFailure": "block",
             }
         ]
     }
@@ -123,7 +180,16 @@ def install(
     python: str | None = None,
     root: Path | None = None,
     dry_run: bool = False,
+    claude_version: str | None = None,
 ) -> InstallReport:
+    if claude_version is not None:
+        parsed = parse_claude_version(claude_version)
+        if parsed < MIN_CLAUDE_VERSION:
+            raise ValueError(
+                f"Claude Code {claude_version} is too old: BaitWatch needs "
+                f"{'.'.join(str(part) for part in MIN_CLAUDE_VERSION)} or later "
+                "for fail-closed hook timeouts (onFailure: block)."
+            )
     path = settings_path(scope, root=root)
     if path.exists():
         try:

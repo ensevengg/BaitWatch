@@ -15,12 +15,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
-from hooks.cache import ScanCache, default_cache_path
+from hooks.cache import ApprovalStore, ScanCache, default_cache_path
 from hooks.guard import (
     Decision,
     RepoScan,
@@ -28,11 +30,47 @@ from hooks.guard import (
     gate_a,
     gate_b,
     prompt_risk,
+    resolve_project_root,
     run_gate,
 )
-from hooks.install import install, settings_path, uninstall
+from hooks.install import detect_claude_version, install, settings_path, uninstall
 
 __all__ = ["emit", "main", "read_payload", "selftest"]
+
+DEFAULT_DEADLINE_S = 20.0
+
+
+def _deadline_seconds() -> float:
+    raw = os.environ.get("BAITWATCH_HOOK_DEADLINE", str(DEFAULT_DEADLINE_S))
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return DEFAULT_DEADLINE_S
+
+
+def _run_with_deadline(function, seconds: float):
+    """Run ``function`` in a daemon thread; None means the deadline expired.
+
+    A daemon thread cannot keep the process alive, so the CLI can print its
+    fail-closed decision and exit before Claude Code's 30 s hard timeout.
+    """
+    result: queue.Queue = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            result.put((True, function()))
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller
+            result.put((False, exc))
+
+    thread = threading.Thread(target=worker, name="baitwatch-gate", daemon=True)
+    thread.start()
+    try:
+        ok, value = result.get(timeout=seconds)
+    except queue.Empty:
+        return None
+    if ok:
+        return value
+    raise value
 
 
 def _hook_disabled() -> bool:
@@ -59,13 +97,15 @@ def emit(decision: Decision, host: str = "claude") -> None:
         if decision.verdict == "block":
             payload = {"decision": "block", "reason": decision.reason}
         elif decision.verdict == "ask":
-            payload = {
-                "hookSpecificOutput": {
-                    "hookEventName": "UserPromptSubmit",
-                    "additionalContext": f"BaitWatch: {decision.reason}",
-                },
-                "systemMessage": f"BaitWatch asks before continuing: {decision.reason}",
-            }
+            # Claude Code's UserPromptSubmit contract has no ASK: context plus
+            # exit 0 would run the prompt immediately.  Turn the ask into a
+            # block that tells the user exactly how to approve and retry.
+            reason = (
+                f"BaitWatch needs approval before this prompt runs: {decision.reason}. "
+                "Inspect the repository, then run `python -m hooks approve --minutes 15` "
+                "and resubmit the prompt."
+            )
+            payload = {"decision": "block", "reason": reason}
         else:
             payload = {}
     else:
@@ -208,9 +248,17 @@ def _run_gate(gate: str, host: str) -> int:
     if _hook_disabled():
         emit(Decision(gate, "allow", "hook disabled by BAITWATCH_HOOK=off", source="off"), host)
         return 0
+    deadline = _deadline_seconds()
     try:
         payload = read_payload()
-        decision = run_gate(gate, payload, cache=ScanCache())
+        decision = _run_with_deadline(lambda: run_gate(gate, payload, cache=ScanCache()), deadline)
+        if decision is None:
+            decision = error_decision(
+                gate,
+                TimeoutError(f"internal deadline of {deadline:.0f}s expired"),
+                (time.perf_counter() - started) * 1000,
+            )
+            decision.reason += "; blocked before the host timeout"
     except Exception as exc:  # noqa: BLE001 - fail closed
         decision = error_decision(gate, exc, (time.perf_counter() - started) * 1000)
     emit(decision, host)
@@ -226,11 +274,22 @@ def _install_command(args: argparse.Namespace) -> int:
         )
         return 2
     try:
-        report = (
-            uninstall(args.scope, dry_run=args.dry_run)
-            if args.uninstall
-            else install(args.scope, python=args.python, dry_run=args.dry_run)
-        )
+        if args.uninstall:
+            report = uninstall(args.scope, dry_run=args.dry_run)
+        else:
+            version = args.claude_version or detect_claude_version()
+            if version is None:
+                print(
+                    "warning: could not detect Claude Code; hook timeouts are only "
+                    "fail-closed on 2.1.295 or later. Pass --claude-version after upgrading.",
+                    file=sys.stderr,
+                )
+            report = install(
+                args.scope,
+                python=args.python,
+                dry_run=args.dry_run,
+                claude_version=version,
+            )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -251,13 +310,36 @@ def _cache_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _approve_command(args: argparse.Namespace) -> int:
+    repo = args.repo or Path.cwd()
+    root, status = resolve_project_root(repo)
+    if root is None:
+        print(f"error: cannot resolve a project root from {repo} ({status})", file=sys.stderr)
+        return 2
+    store = ApprovalStore()
+    if args.revoke:
+        removed = store.revoke(root)
+        print(f"revoked {removed} approval(s) for {root}")
+        return 0
+    try:
+        fingerprint = store.approve(root, args.minutes)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"approved {root} for {args.minutes:g} minute(s); fingerprint {fingerprint[:16]}...")
+    return 0
+
+
 def _status() -> int:
     print(f"cache: {default_cache_path()}")
     print(f"ttl: {os.environ.get('BAITWATCH_HOOK_TTL', '600')}s")
+    print(f"deadline: {_deadline_seconds():g}s")
     print(f"disabled: {_hook_disabled()}")
     print(f"on_error: {os.environ.get('BAITWATCH_ON_ERROR', 'deny')}")
+    print(f"inline_judge: {os.environ.get('BAITWATCH_HOOK_JUDGE', '0')}")
+    print(f"approvals: {ApprovalStore().path}")
     print(f"claude user settings: {settings_path('user')}")
-    print(f"CLI: {sys.executable} -m hooks gate-a | gate-b")
+    print(f"CLI: {sys.executable} -I -m hooks gate-a | gate-b")
     return 0
 
 
@@ -280,6 +362,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     install_parser.add_argument("--dry-run", action="store_true")
     install_parser.add_argument("--uninstall", action="store_true")
+    install_parser.add_argument(
+        "--claude-version",
+        default=None,
+        help="installed Claude Code version; refuses anything older than 2.1.295",
+    )
+
+    approve_parser = sub.add_parser("approve")
+    approve_parser.add_argument("--repo", type=Path, default=None)
+    approve_parser.add_argument("--minutes", type=float, default=15.0)
+    approve_parser.add_argument("--revoke", action="store_true")
 
     cache_parser = sub.add_parser("cache")
     cache_parser.add_argument("cache_action", choices=("path", "clear"))
@@ -295,6 +387,8 @@ def main(argv: list[str] | None = None) -> int:
         return _status()
     if args.command == "install":
         return _install_command(args)
+    if args.command == "approve":
+        return _approve_command(args)
     if args.command == "cache":
         return _cache_command(args)
     parser.error(f"unknown command {args.command!r}")

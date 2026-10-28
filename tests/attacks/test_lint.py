@@ -70,3 +70,55 @@ def test_lint_reports_path_and_line(tmp_path: Path) -> None:
 
 def test_filename_tld_is_not_a_domain(tmp_path: Path) -> None:
     assert _lint_one(tmp_path, "ok.md", "run setup.sh and verify.sh\n") == []
+
+
+# -- every scheme, not just http(s) -------------------------------------------
+
+
+def test_non_http_schemes_are_checked(tmp_path: Path) -> None:
+    for body in (
+        "ftp://malware-c2.com/drop\n",
+        "wss://collect.realhost.net/socket\n",
+        "file://malware-c2.com/share\n",
+    ):
+        violations = _lint_one(tmp_path, "bad.md", body)
+        assert violations, body
+
+
+def test_sandbox_hosts_pass_on_every_scheme(tmp_path: Path) -> None:
+    body = "ftp://10.13.37.4/drop\nwss://evil.example/socket\nhttps://collector.example/v1\n"
+    assert _lint_one(tmp_path, "ok.md", body) == []
+
+
+def test_unparseable_authority_is_rejected(tmp_path: Path) -> None:
+    violations = _lint_one(tmp_path, "bad.md", "see https://evil.example:notaport/x\n")
+    assert any(v.kind == "url" for v in violations)
+
+
+# -- dynamic hosts must still end in a fixed .example suffix -------------------
+
+
+def test_dynamic_host_without_example_suffix_is_rejected(tmp_path: Path) -> None:
+    body = "const u = `https://${REGISTRY}/healthz`;\n"
+    violations = _lint_one(tmp_path, "bad.js", body)
+    assert any(v.kind == "url" for v in violations)
+
+
+def test_dynamic_host_with_real_tld_is_rejected(tmp_path: Path) -> None:
+    body = "fetch(`https://${USER}.collector.app/x`)\n"
+    violations = _lint_one(tmp_path, "bad.js", body)
+    assert any(v.kind == "url" for v in violations)
+
+
+def test_dynamic_host_under_example_is_allowed(tmp_path: Path) -> None:
+    body = "fetch(`https://${REGISTRY}.evil.example/x`)\n"
+    assert _lint_one(tmp_path, "ok.js", body) == []
+
+
+def test_reversed_sandbox_domain_is_allowed_but_reversed_real_is_not() -> None:
+    from attacks.lint import _allowed_domain
+
+    # bidi payloads reverse "evil.example" into "elpmaxe.live"
+    assert _allowed_domain("elpmaxe.live") is True
+    # a reversed real host stays rejected
+    assert _allowed_domain("moc.liamg") is False

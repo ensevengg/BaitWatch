@@ -2,7 +2,7 @@
 
 The BaitWatch repo is public, so **no raw dataset rows, gated data, or repo
 copies are ever committed**. Everything below is downloaded to
-`~/.local/share/baitwatch/` (or `/mnt/d/hf_datasets`, read-only) by pinned
+`~/.local/share/baitwatch/` (or `$BAITWATCH_DATA_ROOT`, read-only) by pinned
 scripts; only download code and this document live in the repo.
 
 Every number we publish traces back to the input hashes recorded in
@@ -58,8 +58,8 @@ AGENTS.md/CLAUDE.md/.cursorrules agent-config files.
 
 ## Base models
 
-- `meta-llama/Llama-Prompt-Guard-2-22M` and `-86M` — local copies verified at
-  `/mnt/d/hf_models/` (checksums matched the Hub on Oct 25). Llama 4 license
+- `meta-llama/Llama-Prompt-Guard-2-22M` and `-86M` — local copies verified
+  under `$HOME/hf_models/` (checksums matched the Hub on Oct 25). Llama 4 license
   applies to published fine-tunes (name must start with "Llama", plus
   "Built with Llama" and the license file — see MODEL_CARD.md).
 - `meta-llama/Llama-3.2-3B-Instruct` (Q6_K GGUF) — local judge fallback,

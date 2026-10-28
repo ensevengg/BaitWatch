@@ -31,6 +31,7 @@ from dataclasses import dataclass
 __all__ = [
     "DECODER_TRANSFORMS",
     "TRANSFORMS",
+    "DecodeBudget",
     "Transform",
     "decode_payload",
     "encode_seed",
@@ -50,7 +51,6 @@ _HEX_RUN = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}){16,}(?![0-9A-Fa-f])")
 _ZW_BITS = re.compile("[\u200b\u200c]{16,}")
 _TAG_RUN = re.compile("[\U000e0000-\U000e007f]{4,}")
 _VS_RUN = re.compile("[\ufe00-\ufe0f]{8,}")
-_BIDI_SPAN = re.compile(f"{RLO}(.*?){PDF}", re.DOTALL)
 _MD_IMAGE = re.compile(r"!\[([^\]\n]{4,})\]\(([^)\n]*)\)")
 _ATOB = re.compile(
     r"(?:atob|Buffer\.from)\(\s*[\"']([A-Za-z0-9+/=_-]{16,})[\"']"
@@ -58,6 +58,45 @@ _ATOB = re.compile(
 )
 _HEX_ESCAPES = re.compile(r"(?:\\x[0-9A-Fa-f]{2}){8,}")
 _U_ESCAPES = re.compile(r"(?:\\u[0-9A-Fa-f]{4}){4,}")
+
+# Decoder budgets.  Gate A feeds arbitrary prompt text and hostile files reach
+# the same code, so one call may never scan or emit unbounded output.  The
+# input cap matches READ's default max_file_bytes; work is enforced by
+# ``read.decoders.produce_views`` across all decoders for one segment.
+MAX_DECODE_INPUT = 262_144
+MAX_DECODE_OUTPUT = 131_072
+MAX_DECODE_SEGMENTS = 64
+
+
+class DecodeBudget:
+    """Input/output budget for one decoder call on one source string."""
+
+    def __init__(
+        self,
+        input_chars: int = MAX_DECODE_INPUT,
+        output_chars: int = MAX_DECODE_OUTPUT,
+        segments: int = MAX_DECODE_SEGMENTS,
+    ) -> None:
+        self.input_chars = input_chars
+        self.output_chars = output_chars
+        self.segments = segments
+
+    def input(self, text: str) -> tuple[str, bool]:
+        if len(text) <= self.input_chars:
+            return text, False
+        return text[: self.input_chars], True
+
+    def output(self, items: list[str]) -> tuple[list[str], bool]:
+        kept: list[str] = []
+        total = 0
+        spent = False
+        for item in items:
+            if len(kept) >= self.segments or total + len(item) > self.output_chars:
+                spent = True
+                break
+            kept.append(item)
+            total += len(item)
+        return kept, spent
 
 
 def printable_text(data: bytes, min_len: int = 8) -> str | None:
@@ -169,13 +208,29 @@ def _bidi_encode(seed: str) -> str:
 
 
 def _bidi_decode(text: str) -> list[str]:
+    """One left-to-right pass; every RLO is used once, nested or not.
+
+    The previous regex (``RLO(.*?)PDF``) rescanned to end-of-text for every
+    unmatched opener, which is quadratic on hostile input.  This walk is O(n):
+    an opener only starts a span at depth 0, and a span is emitted only when
+    its depth returns to 0.
+    """
     found: list[str] = []
-    for match in _BIDI_SPAN.finditer(text):
-        inner = match.group(1)
-        # Strip nested controls before reversing, so a doubly wrapped seed
-        # still comes back exactly once.
-        inner = "".join(ch for ch in inner if ch not in BIDI_CONTROLS)
-        found.append(inner[::-1])
+    depth = 0
+    start = 0
+    for index, char in enumerate(text):
+        if char == RLO:
+            if depth == 0:
+                start = index + 1
+            depth += 1
+        elif char == PDF and depth:
+            depth -= 1
+            if depth == 0:
+                inner = text[start:index]
+                # Strip nested controls before reversing, so a doubly wrapped
+                # seed still comes back exactly once.
+                inner = "".join(ch for ch in inner if ch not in BIDI_CONTROLS)
+                found.append(inner[::-1])
     stripped = "".join(ch for ch in text if ch not in BIDI_CONTROLS)
     if stripped != text:
         found.append(stripped)
@@ -243,8 +298,14 @@ def _markdown_image_decode(text: str) -> list[str]:
 
 
 def _js_eval_encode(seed: str) -> str:
+    """Base64 around ROT13, with a decode chain the JS runtime can run.
+
+    The generated expression is ``eval(rot13(atob("...")))``; the fixture
+    files define ``rot13`` above it, so the hidden action really executes
+    instead of evaluating ROT13 text.
+    """
     inner = base64.b64encode(_rot13(seed).encode("utf-8")).decode("ascii")
-    return f'eval(atob("{inner}"))'
+    return f'eval(rot13(atob("{inner}")))'
 
 
 def _js_eval_decode(text: str) -> list[str]:
@@ -269,6 +330,37 @@ def _js_escapes_encode(seed: str) -> str:
     return f'eval("{body}")'
 
 
+def _printable_str(text: str, min_len: int = 8) -> str | None:
+    """Printable Unicode text, else None (control-heavy or too short)."""
+    if len(text) < min_len:
+        return None
+    ok = sum(ch.isprintable() or ch in "\n\r\t" for ch in text)
+    return text if ok / len(text) >= 0.95 else None
+
+
+def _decode_u_units(units: list[int]) -> str:
+    """UTF-16 code units -> characters, combining surrogate pairs."""
+    out: list[str] = []
+    index = 0
+    while index < len(units):
+        unit = units[index]
+        if (
+            0xD800 <= unit <= 0xDBFF
+            and index + 1 < len(units)
+            and 0xDC00 <= units[index + 1] <= 0xDFFF
+        ):
+            out.append(chr(0x10000 + ((unit - 0xD800) << 10) + (units[index + 1] - 0xDC00)))
+            index += 2
+            continue
+        if 0xD800 <= unit <= 0xDFFF:
+            # A lone surrogate is not valid text; keep the run readable.
+            out.append("\ufffd")
+        else:
+            out.append(chr(unit))
+        index += 1
+    return "".join(out)
+
+
 def _js_escapes_decode(text: str) -> list[str]:
     found: list[str] = []
     for match in _HEX_ESCAPES.finditer(text):
@@ -277,8 +369,13 @@ def _js_escapes_decode(text: str) -> list[str]:
         if decoded is not None:
             found.append(decoded)
     for match in _U_ESCAPES.finditer(text):
-        raw = bytes(int(pair, 16) for pair in re.findall(r"\\u([0-9A-Fa-f]{4})", match.group()))
-        decoded = printable_text(raw)
+        # ``\uNNNN`` is a *character* escape, not a byte.  Each run is decoded
+        # independently so one bad run cannot discard the others.
+        try:
+            units = [int(group, 16) for group in re.findall(r"\\u([0-9A-Fa-f]{4})", match.group())]
+            decoded = _printable_str(_decode_u_units(units))
+        except (ValueError, OverflowError):
+            continue
         if decoded is not None:
             found.append(decoded)
     return _dedupe(found)

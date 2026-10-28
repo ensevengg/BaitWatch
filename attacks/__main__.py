@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from attacks import build, harness, leakage, lint
+from attacks import build, harness, leakage, lint, publication
 
 __all__ = ["main"]
 
@@ -26,6 +26,14 @@ def _check() -> int:
             print(f"lint: {violation}", file=sys.stderr)
     else:
         print("lint: clean")
+
+    personal = publication.publication_violations()
+    if personal:
+        failures += len(personal)
+        for violation in personal:
+            print(f"publication: {violation}", file=sys.stderr)
+    else:
+        print("publication: clean")
 
     drift = build.check_tree()
     if drift:
@@ -51,14 +59,17 @@ def _check() -> int:
     if failures:
         print(f"FAIL: {failures} problem(s)", file=sys.stderr)
         return 1
-    print("PASS: lint, generated tree, and READ gate")
+    print("PASS: lint, publication, generated tree, and READ gate")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="python -m attacks")
-    parser.add_argument("command", choices=("build", "lint", "harness", "leakage", "check"))
+    parser.add_argument(
+        "command", choices=("build", "lint", "publication", "harness", "leakage", "check")
+    )
+
     # argparse answers `--help` at the dispatcher level and exits before we can
     # route it, so `python -m attacks harness --help` would show the wrong page.
     help_requested = any(arg in ("-h", "--help") for arg in argv[1:])
@@ -74,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         return build.main(rest)
     if args.command == "lint":
         return lint.main(rest)
+    if args.command == "publication":
+        return publication.main(rest)
     if args.command == "harness":
         return harness.main(rest)
     if args.command == "leakage":

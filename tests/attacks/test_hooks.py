@@ -262,9 +262,10 @@ def test_cli_block_json(
     assert payload["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_cli_ask_json_for_prompt(
+def test_cli_turns_gate_a_ask_into_a_block_with_approval_steps(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """UserPromptSubmit has no ASK: an ask must not run the prompt."""
     monkeypatch.setattr(
         hook_cli,
         "run_gate",
@@ -273,7 +274,10 @@ def test_cli_ask_json_for_prompt(
     monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
     assert hook_cli.main(["gate-a"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert "BaitWatch" in payload["hookSpecificOutput"]["additionalContext"]
+    assert payload["decision"] == "block"
+    assert "needs a look" in payload["reason"]
+    assert "python -m hooks approve" in payload["reason"]
+    assert "hookSpecificOutput" not in payload
 
 
 def test_cli_crash_is_a_deny(

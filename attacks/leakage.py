@@ -136,15 +136,19 @@ class LeakReport:
     corpus: list[str] = field(default_factory=list)
     leaks: list[Leak] = field(default_factory=list)
     skipped: bool = False
+    incomplete: bool = False
+    reason: str = ""
 
     @property
     def clean(self) -> bool:
-        return not self.leaks
+        return not self.leaks and not self.incomplete
 
     def as_dict(self) -> dict:
         return {
             "clean": self.clean,
             "skipped": self.skipped,
+            "incomplete": self.incomplete,
+            "reason": self.reason,
             "rows": self.rows,
             "corpus": self.corpus,
             "leaks": [leak.as_dict() for leak in self.leaks],
@@ -154,8 +158,11 @@ class LeakReport:
 def _parquet_rows(path: Path) -> Iterator[str]:
     try:
         import pyarrow.parquet as pq
-    except ModuleNotFoundError:
-        return
+    except ImportError as exc:
+        raise ManifestError(
+            "pyarrow is required to read a Parquet corpus; install the 'train' "
+            "extra (uv sync --extra train) or pass --text with JSONL/plain text"
+        ) from exc
     table = pq.read_table(path)
     columns = [name for name in table.column_names if name == "text"]
     if not columns:
@@ -208,8 +215,10 @@ def _json_rows(path: Path) -> Iterator[str]:
 def _text_rows(path: Path) -> Iterator[str]:
     try:
         yield path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return
+    except UnicodeDecodeError as exc:
+        raise ManifestError(f"corpus file is not valid UTF-8: {path} ({exc})") from exc
+    except OSError as exc:
+        raise ManifestError(f"corpus file is unreadable: {path} ({exc})") from exc
 
 
 def iter_rows(path: Path) -> Iterator[str]:
@@ -265,39 +274,53 @@ def check_corpus(payloads: list[FrozenPayload], corpus: list[Path]) -> LeakRepor
     by_name = {payload.name: payload for payload in payloads}
 
     for path in corpus:
-        for index, row in enumerate(iter_rows(path), start=1):
-            report.rows += 1
-            row_sha = _sha(row)
-            row_norm = _normalize(row)
-            row_norm_sha = _sha(row_norm)
+        file_rows = 0
+        try:
+            for index, row in enumerate(iter_rows(path), start=1):
+                if not row.strip():
+                    # A blank row carries no text and cannot leak; counting it
+                    # would make an empty split look like a scanned corpus.
+                    continue
+                file_rows += 1
+                report.rows += 1
+                row_sha = _sha(row)
+                row_norm = _normalize(row)
+                row_norm_sha = _sha(row_norm)
 
-            if row_sha in exact:
-                report.leaks.append(Leak(exact[row_sha], str(path), index, "exact"))
-                continue
-            if row_norm_sha in normalized:
-                report.leaks.append(
-                    Leak(normalized[row_norm_sha], str(path), index, "exact-normalized")
-                )
-                continue
-
-            counts: dict[str, int] = {}
-            for shingle in _shingles(row):
-                for name in inverted.get(shingle, ()):
-                    counts[name] = counts.get(name, 0) + 1
-            hit = False
-            for name, shared in counts.items():
-                payload = by_name[name]
-                score = shared / max(1, len(payload.shingles))
-                if len(payload.normalized) >= 24 and payload.normalized in row_norm:
-                    report.leaks.append(Leak(name, str(path), index, "embedded"))
-                    hit = True
-                elif score >= FUZZY_THRESHOLD:
+                if row_sha in exact:
+                    report.leaks.append(Leak(exact[row_sha], str(path), index, "exact"))
+                    continue
+                if row_norm_sha in normalized:
                     report.leaks.append(
-                        Leak(name, str(path), index, "fuzzy", f"shingle overlap {score:.2f}")
+                        Leak(normalized[row_norm_sha], str(path), index, "exact-normalized")
                     )
-                    hit = True
-            if hit:
-                continue
+                    continue
+
+                counts: dict[str, int] = {}
+                for shingle in _shingles(row):
+                    for name in inverted.get(shingle, ()):
+                        counts[name] = counts.get(name, 0) + 1
+                hit = False
+                for name, shared in counts.items():
+                    payload = by_name[name]
+                    score = shared / max(1, len(payload.shingles))
+                    if len(payload.normalized) >= 24 and payload.normalized in row_norm:
+                        report.leaks.append(Leak(name, str(path), index, "embedded"))
+                        hit = True
+                    elif score >= FUZZY_THRESHOLD:
+                        report.leaks.append(
+                            Leak(name, str(path), index, "fuzzy", f"shingle overlap {score:.2f}")
+                        )
+                        hit = True
+                if hit:
+                    continue
+        except (OSError, ValueError, ManifestError) as exc:
+            report.incomplete = True
+            report.reason = f"{path}: {exc}"
+            continue
+        if file_rows == 0:
+            report.incomplete = True
+            report.reason = f"{path}: corpus file produced no rows"
     return report
 
 
@@ -342,6 +365,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report.as_dict(), indent=2))
     elif report.skipped:
         print(f"leakage check skipped: no corpus found under {args.data_dir}")
+    elif report.incomplete and not report.leaks:
+        print(
+            f"INCOMPLETE: leakage check could not read the corpus: {report.reason}", file=sys.stderr
+        )
     elif report.clean:
         print(f"PASS: {len(payloads)} attack payloads absent from {report.rows} corpus rows")
     else:
@@ -351,10 +378,16 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
         print(f"FAIL: {len(report.leaks)} leak(s) across {report.rows} rows", file=sys.stderr)
+        if report.incomplete:
+            print(f"INCOMPLETE: {report.reason}", file=sys.stderr)
 
     if report.skipped:
         return 0
-    return 0 if report.clean else 3
+    if report.leaks:
+        return 3
+    if report.incomplete:
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -294,3 +295,43 @@ def test_parallel_judging_spends_budget_on_top_priority(mock_api, tmp_path):
     sent = " ".join(r["messages"][1]["content"] for r in MockAPI.requests)
     assert len(MockAPI.requests) == 2
     assert "number 0" in sent and "number 1" in sent
+
+
+def test_ledger_survives_two_competing_processes(tmp_path):
+    """The ledger lock must hold on Windows too (msvcrt, sidecar file).
+
+    Before the fix, ``record`` did an unlocked read-modify-write, so two scans
+    starting from the same total each replaced the other's spend and the cap
+    could be overrun without any error.
+    """
+    import subprocess
+    import sys
+
+    repo_root = Path(__file__).resolve().parents[2]
+    ledger_path = tmp_path / "spend.json"
+    per_process = 20
+    # ``read/__init__`` imports torch (slow, and irrelevant here), so the child
+    # registers the package without executing it and imports the ledger only.
+    code = (
+        "import sys, types\n"
+        "from pathlib import Path\n"
+        f"root = Path({str(repo_root)!r})\n"
+        "sys.path.insert(0, str(root))\n"
+        "pkg = types.ModuleType('read')\n"
+        "pkg.__path__ = [str(root / 'read')]\n"
+        "sys.modules['read'] = pkg\n"
+        "from read.judge import SpendLedger\n"
+        f"ledger = SpendLedger(Path({str(ledger_path)!r}), usd_cap=1e9,\n"
+        "                     usd_per_1k_input=1.0, usd_per_1k_output=1.0)\n"
+        f"for _ in range({per_process}):\n"
+        "    ledger.record({'input_tokens': 1000, 'output_tokens': 0})\n"
+    )
+    procs = [subprocess.Popen([sys.executable, "-c", code]) for _ in range(2)]
+    for proc in procs:
+        assert proc.wait(timeout=180) == 0
+
+    data = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert data["calls"] == 2 * per_process
+    assert abs(data["total_usd"] - 2 * per_process) < 1e-6
+    # The sidecar is a lock file, not a second ledger.
+    assert (tmp_path / "spend.json.lock").exists()

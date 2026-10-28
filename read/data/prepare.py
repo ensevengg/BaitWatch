@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import random
 import sys
 import time
@@ -36,10 +37,12 @@ from read.data.schema import (SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, Row,
                               normalize_for_dedupe, read_jsonl,
                               text_sha256, write_parquet)
 
+_DATA_ROOT = Path(os.environ.get("BAITWATCH_DATA_ROOT", str(Path.home() / "hf_datasets")))
+
 DEFAULT_RAW_DIRS = {
-    "prodnull": Path("/mnt/d/hf_datasets/prompt-injection-repo-dataset/train.jsonl"),
-    "llmail": Path("/mnt/d/hf_datasets/microsoft-llmail-inject-challenge/data"),
-    "opencodeinstruct": Path("/mnt/d/hf_datasets/NVIDIA-OpencodeInstruct/data"),
+    "prodnull": _DATA_ROOT / "prompt-injection-repo-dataset" / "train.jsonl",
+    "llmail": _DATA_ROOT / "microsoft-llmail-inject-challenge" / "data",
+    "opencodeinstruct": _DATA_ROOT / "NVIDIA-OpencodeInstruct" / "data",
 }
 
 

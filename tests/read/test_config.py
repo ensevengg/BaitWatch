@@ -80,7 +80,7 @@ def test_windows_pin_reports_the_posix_path(monkeypatch, tmp_path):
     import pytest
 
     pin = {
-        "checkpoint_path": "/home/enseven/.local/share/baitwatch/models/v15f_22m",
+        "checkpoint_path": "/srv/baitwatch/models/v15f_22m",
         "tag": "v1.5f",
     }
     monkeypatch.setattr(rc, "MODEL_CONFIG_PATH", tmp_path / "model_config.json")
@@ -90,9 +90,31 @@ def test_windows_pin_reports_the_posix_path(monkeypatch, tmp_path):
     with pytest.raises(FileNotFoundError) as exc:
         rc.resolve_model_path()
     message = str(exc.value)
-    assert "/home/enseven" in message
+    assert "/srv/baitwatch/models/v15f_22m" in message
     assert "POSIX" in message
     assert "BAITWATCH_MODEL_PATH" in message
+
+
+def test_publication_placeholder_pin_is_an_actionable_error(monkeypatch, tmp_path):
+    """The committed pin must not carry a machine path, and must say so."""
+    import pytest
+
+    pin = {"tag": "v1.5f", "checkpoint_path": "<model-dir>/v15f_22m"}
+    monkeypatch.setattr(rc, "MODEL_CONFIG_PATH", tmp_path / "model_config.json")
+    (tmp_path / "model_config.json").write_text(json.dumps(pin))
+    monkeypatch.delenv("BAITWATCH_MODEL_PATH", raising=False)
+    with pytest.raises(FileNotFoundError) as exc:
+        rc.resolve_model_path()
+    message = str(exc.value)
+    assert "placeholder" in message
+    assert "BAITWATCH_MODEL_PATH" in message
+
+
+def test_committed_pin_has_no_personal_path() -> None:
+    pinned = rc.load_model_config()
+    assert pinned is not None
+    for key in ("checkpoint_path", "base_model"):
+        assert str(pinned[key]).startswith("<model-dir>"), key
 
 
 def test_missing_pinned_checkpoint_fails_loudly(monkeypatch, tmp_path):

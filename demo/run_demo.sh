@@ -83,8 +83,10 @@ prompt = "summarise this repository " + encode_seed(
 )
 print(json.dumps({"prompt": prompt, "cwd": sys.argv[1]}))
 PY
-printf '\nInstaller merge (dry run, writes nothing):\n'
-"$PY" -m hooks install --scope project --dry-run
+printf '\nInstaller refuses a host below 2.1.295 (dry run, writes nothing):\n'
+"$PY" -m hooks install --scope project --dry-run --claude-version 2.1.138 || true
+printf '\nInstaller merge for the minimum supported host (dry run, writes nothing):\n'
+"$PY" -m hooks install --scope project --dry-run --claude-version 2.1.295
 
 beat "2:30" "close: safety rails and the leakage gate"
 "$PY" -m attacks lint

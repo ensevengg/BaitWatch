@@ -97,3 +97,64 @@ def test_parquet_corpus_if_available(tmp_path: Path) -> None:
     report = check_corpus(frozen_payloads(), [path])
     assert report.rows == 2
     assert any(leak.kind == "exact" for leak in report.leaks)
+
+
+# -- a corpus that cannot be read is INCOMPLETE, never "clean" -----------------
+
+
+def test_missing_pyarrow_is_an_actionable_manifest_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import builtins
+
+    from attacks.leakage import iter_rows
+    from attacks.manifests import ManifestError
+
+    parquet = tmp_path / "train.parquet"
+    parquet.write_bytes(b"PAR1")
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("pyarrow"):
+            raise ImportError("no pyarrow here")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ManifestError, match="pyarrow"):
+        list(iter_rows(parquet))
+
+
+def test_empty_corpus_file_is_incomplete(tmp_path: Path) -> None:
+    empty = tmp_path / "train.txt"
+    empty.write_text("", encoding="utf-8")
+    report = check_corpus(frozen_payloads(), [empty])
+    assert report.incomplete is True
+    assert report.clean is False
+    assert "no rows" in report.reason
+
+
+def test_unreadable_corpus_file_is_incomplete(tmp_path: Path) -> None:
+    bad = tmp_path / "train.txt"
+    bad.write_bytes(b"\xff\xfe\x00broken")
+    report = check_corpus(frozen_payloads(), [bad])
+    assert report.incomplete is True
+    assert report.clean is False
+
+
+def test_cli_exits_2_for_an_incomplete_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad = tmp_path / "train.txt"
+    bad.write_bytes(b"\xff\xfe\x00broken")
+    assert main(["--text", str(bad)]) == 2
+    assert "INCOMPLETE" in capsys.readouterr().err
+
+
+def test_json_report_exposes_incomplete(tmp_path: Path) -> None:
+    import json
+
+    bad = tmp_path / "train.txt"
+    bad.write_bytes(b"\xff\xfe\x00broken")
+    report = check_corpus(frozen_payloads(), [bad])
+    data = json.loads(json.dumps(report.as_dict()))
+    assert data["incomplete"] is True and data["clean"] is False

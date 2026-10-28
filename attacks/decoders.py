@@ -83,18 +83,32 @@ class TransformDecoder:
 
     join_segments = True
 
-    def __init__(self, name: str, decode) -> None:
+    def __init__(self, name: str, decode, budget_factory=None) -> None:
         self.name = name
         self._decode = decode
+        self._budget_factory = budget_factory
+        # Set when this call had to truncate input or output.  produce_views
+        # turns it into decoder evidence, which makes the scan incomplete.
+        self.budget_spent = False
 
     def decode(self, text: str) -> list[str]:
-        return self._decode(text)
+        self.budget_spent = False
+        if self._budget_factory is None:
+            return self._decode(text)
+        budget = self._budget_factory()
+        source, spent_input = budget.input(text)
+        items, spent_output = budget.output(self._decode(source))
+        self.budget_spent = spent_input or spent_output
+        return items
 
 
 def register(registry: list[_Decoder]) -> None:
     transforms, names = _load_transforms()
+    budget_factory = getattr(
+        sys.modules.get(transforms[names[0]].decode.__module__), "DecodeBudget", None
+    )
     existing = {getattr(item, "name", None) for item in registry} | BUILTIN_NAMES
     for name in names:
         if name in existing:
             continue
-        registry.append(TransformDecoder(name, transforms[name].decode))
+        registry.append(TransformDecoder(name, transforms[name].decode, budget_factory))

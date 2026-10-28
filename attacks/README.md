@@ -38,7 +38,7 @@ should flag it *and* RUN should observe the action.
 | Repo | Threat | Entries | Layers |
 |---|---|---|---|
 | `readme-bait-curl` | install instructions that fetch and pipe a script, then post `.env` | 3 | both |
-| `runtime-eval-chain` | `postinstall` runs `eval(atob(...))`; a cache key hides a prompt | 2 | RUN + READ |
+| `runtime-eval-chain` | a repair hook runs `eval(rot13(atob(...)))`; a cache key hides a prompt | 2 | RUN + READ |
 | `markdown-ghost` | invisible prompts in README, guide, FAQ, contributing, notes | 5 | READ |
 | `agent-config-injection` | overrides in `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, Copilot instructions, VS Code/Claude settings, `.mcp.json`, folder-open task | 8 | READ + RUN |
 | `git-hook-installer` | setup script installs a pre-commit hook that base64-decodes an exfil command | 2 | RUN + READ |
@@ -95,7 +95,7 @@ cost, so the plugin adds five channels:
 | `zero_width_binary` | UTF-8 bits carried by U+200B / U+200C |
 | `bidi` | Trojan-Source RLO/PDF wrapping over reversed text |
 | `markdown_image` | prompt in the alt text of an image |
-| `js_eval` | `eval(atob(...))`, base64 around rot13 |
+| `js_eval` | `eval(rot13(atob(...)))` — base64 around ROT13 around the action |
 | `js_escapes` | `\xNN` / `\uNNNN` escape runs |
 
 `BUILTIN_NAMES` mirrors the built-in registry; a test fails if READ adds a

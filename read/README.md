@@ -122,7 +122,7 @@ base model ships no label names, so index→name mapping is pinned in code:
 - Thresholds are chosen on the **validation** split only
   (`python -m read.training.tune_threshold`), never on test.
 - Model path resolution: explicit arg → `BAITWATCH_MODEL_PATH` → pinned
-  config → `/mnt/d/hf_models/Llama-Prompt-Guard-2-22M|86M`.
+  config → `$HOME/hf_models/Llama-Prompt-Guard-2-22M|86M`.
 
 ## Judge (Muse Spark)
 

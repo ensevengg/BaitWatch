@@ -6,14 +6,14 @@
   "entries": [
     {
       "file": "scripts/doctor.js",
-      "line": 22,
-      "end_line": 22,
+      "line": 29,
+      "end_line": 29,
       "technique": "runtime-eval-chain",
       "encoding": "js_eval",
       "expected_layer": "RUN",
       "target": "evil.example",
-      "payload_sha256": "41c827ac29e6d44a4026942b08cde72743b943713c2ab194d5a497b0e9afca3f",
-      "decoded_sha256": "dd7df33c7aecab65fc192f3b7c2dfe2ee8384729b2d11e2567f108a4a2623cd9"
+      "payload_sha256": "3ddaa90f902ed4653d6651f259fea94d1f6e96c179d418aa2718b5a1a4e42e13",
+      "decoded_sha256": "c2b1cef4fa934e13aec0aa72854288141ba4036d282aced8722de73972538d6a"
     },
     {
       "file": "docs/operations.md",
