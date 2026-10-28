@@ -235,9 +235,8 @@ def read_scanner(root: str | Path) -> ScanOutcome:
         result = scan(Path(root), cfg=cfg)
     except FileNotFoundError as exc:  # pragma: no cover - needs the checkpoint
         raise RuntimeError(
-            f"READ checkpoint unavailable ({exc}). Set BAITWATCH_MODEL_PATH "
-            "or copy the pinned checkpoint from the training machine; use "
-            "--scanner keyword for the CPU gate"
+            f"READ checkpoint unavailable ({exc}). The keyword scanner needs no "
+            "model; use --scanner keyword for the CPU gate."
         ) from exc
     outcome = ScanOutcome(
         flagged={finding.file: finding.score for finding in result.flagged},
