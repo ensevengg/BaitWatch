@@ -2,13 +2,19 @@
 
 ``read.decoders.load_external_decoders`` loads this exact file
 (``<repo_root>/attacks/decoders.py``) during a scan and calls
-``register(registry)``.  It adds **only the channels the built-ins miss**:
+``register(registry)``.  It adds **only the channels the built-ins miss**.
+As of READ v1.5f the built-ins cover base64, base32, hex, HTML comments and
+entities, invisible-character stripping, Unicode tags, variation selectors,
+URL encoding, ROT13 and reversed text.  The plugin therefore adds:
 
-    rot13, zero_width_binary, bidi, markdown_image, js_eval, js_escapes
+    zero_width_binary, bidi, markdown_image, js_eval, js_escapes
 
-Base64, hex, HTML comments, invisible-character stripping, Unicode tags and
-variation selectors already have built-in decoders; registering them again
-would produce duplicate views and double scan cost for no new coverage.
+``rot13`` stays in the transform table because ``js_eval`` uses it, but the
+plugin no longer registers it.  ``BUILTIN_NAMES`` mirrors ``read/decoders.py``;
+``tests/attacks/test_decoders.py`` fails if the two drift apart.
+
+Registering a built-in again would produce duplicate views and double scan
+cost for no new coverage.
 
 The decode logic lives in :mod:`attacks.synth.transforms` so the encoder and
 the decoder can never drift apart: ``decode(encode(seed))`` is tested for
@@ -27,6 +33,26 @@ class _Decoder(Protocol):
     name: str
 
     def decode(self, text: str) -> list[str]: ...
+
+
+# Names returned by read.decoders.builtin_decoders().  Keep in sync: the
+# plugin is loaded by path, so it cannot import that module reliably, and
+# registering a duplicate would silently double every decode view.
+BUILTIN_NAMES = frozenset(
+    {
+        "base64",
+        "base32",
+        "hex",
+        "html_comment",
+        "html_entity",
+        "zero_width",
+        "variation_selector",
+        "unicode_tags",
+        "url_encoding",
+        "rot13",
+        "reversed",
+    }
+)
 
 
 def _load_transforms():
@@ -67,7 +93,7 @@ class TransformDecoder:
 
 def register(registry: list[_Decoder]) -> None:
     transforms, names = _load_transforms()
-    existing = {getattr(item, "name", None) for item in registry}
+    existing = {getattr(item, "name", None) for item in registry} | BUILTIN_NAMES
     for name in names:
         if name in existing:
             continue

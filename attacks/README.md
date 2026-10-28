@@ -60,8 +60,8 @@ payload text: just a line span and two hashes.
   "entries": [
     {
       "file": "README.md",
-      "line": 15,
-      "end_line": 15,
+      "line": 12,
+      "end_line": 12,
       "technique": "readme-bait-http",
       "encoding": "plain",
       "expected_layer": "both",
@@ -85,22 +85,23 @@ line`. Run it through the tests or `python -m attacks check`.
 
 ## Decoders
 
-`read.decoders` already covers base64, hex, HTML comments, zero-width
-stripping, Unicode tags and variation selectors. Registering those again only
-doubles scan cost, so the plugin adds six channels:
+`read.decoders` already covers base64, base32, hex, HTML comments and
+entities, zero-width stripping, Unicode tags, variation selectors, URL
+encoding, ROT13 and reversed text. Registering those again only doubles scan
+cost, so the plugin adds five channels:
 
 | Decoder | Encoding |
 |---|---|
-| `rot13` | letters rotated 13 |
 | `zero_width_binary` | UTF-8 bits carried by U+200B / U+200C |
 | `bidi` | Trojan-Source RLO/PDF wrapping over reversed text |
 | `markdown_image` | prompt in the alt text of an image |
 | `js_eval` | `eval(atob(...))`, base64 around rot13 |
 | `js_escapes` | `\xNN` / `\uNNNN` escape runs |
 
-The transform table also builds `plain`, `base64`, `hex`, `html_comment`,
-`unicode_tags` and `variation_selectors` so the synthesizer and the built-in
-decoders stay in lockstep.
+`BUILTIN_NAMES` mirrors the built-in registry; a test fails if READ adds a
+channel and the plugin starts claiming it again. The transform table still
+builds `plain`, `base64`, `hex`, `rot13`, `html_comment`, `unicode_tags` and
+`variation_selectors` so the synthesizer and the built-ins stay in lockstep.
 
 ## Run it
 
