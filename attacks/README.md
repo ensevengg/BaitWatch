@@ -133,8 +133,11 @@ scanner is `read.scan`, imported lazily so CI never needs torch.
 - **D2:** one seed encoded through `base64`, `hex`, `zero_width_binary`,
   `unicode_tags` and `variation_selectors`; all five recover. Tested in
   `tests/attacks/test_transforms.py` and printed by `demo/run_demo.sh`.
-- **D3:** the decoy runs repo #1; READ flags every READ entry and no other
-  file. `python -m attacks harness --repo readme-bait-curl` prints that table.
+- **D3:** the decoy loop (PR #12) can run repo #1. The Muse Spark trial against
+  repo #1 produced **0/10 bites** — a clean negative result, not a working
+  decoy demo. Evidence and caveats: `docs/DECOY_TRIAL.md` and
+  `docs/decoy-trial/`. Separately, READ flags every READ entry and no other
+  file; `python -m attacks harness --repo readme-bait-curl` prints that table.
 - **Leakage:** `attacks/leakage.py` hashes every payload and checks exact,
   embedded and fuzzy matches against `train/val/test` parquet, JSONL or text.
   The gate runs on the machine that holds the corpus; CI reports "skipped".

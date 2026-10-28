@@ -16,7 +16,7 @@ Each scan follows these steps.
 
 - The cage cannot reach public addresses or the host over the network. It can still reach the other containers on its own bridge, which are the sinks. This milestone makes no claim of resistance to kernel or container escapes.
 - The sinks see only what crosses the scan network. Attacks using channels the sinks do not cover, for example non-DNS UDP protocols or TLS bodies (only the ClientHello SNI is logged), do not light up. Later milestones add TLS body capture and honeytoken attribution.
-- The decoy agent, honeytoken attribution, model transcript scanning and the verdict fusion do not exist yet; the decoy component stays `not_run` and every scan stays incomplete.
+- This branch does not ship the decoy agent (added in PR #12), honeytoken attribution, model transcript scanning or verdict fusion. Without a decoy, the decoy component stays `not_run` and every scan stays incomplete. The PR #12 trial against repo #1 produced 0/10 bites; see `docs/DECOY_TRIAL.md`.
 - Automatic subnet selection tries up to 16 subnets. If every candidate is taken, for example by many concurrent scans or a VPN that covers most of the range, the scan fails closed instead of sharing a network.
 
 Docker references: [bridge networks](https://docs.docker.com/engine/network/drivers/bridge/), [SDK containers](https://docker-py.readthedocs.io/en/stable/containers.html) and [SDK networks](https://docker-py.readthedocs.io/en/stable/networks.html).

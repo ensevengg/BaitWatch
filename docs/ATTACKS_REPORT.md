@@ -2,9 +2,9 @@
 
 **Owner:** Aditya (`Shellghostt`)
 **Repository:** `D:\Hackathon\BaitWatch` (clone of `ensevengg/BaitWatch`)
-**Branch:** `main`, 11 commits ahead of `origin/main` (`1b8d7b8`), pushed as
+**Branch:** `main`, 14 commits ahead of `origin/main` (`1b8d7b8`), pushed as
 `aditya/attack-slice` (PR not opened yet)
-**Report date:** 2026-10-28
+**Report date:** 2026-10-29
 **Local commits:** `843282c`, `334df98`, `78e3ad5`, `cb2d012`, `0bd106c`,
 `c30cab9`, `3a029a5`, `228a1ae`, `52c3e32`, `acea601`, plus the commit that
 added this update. The tree was rebased onto `origin/main` twice (first onto
@@ -71,7 +71,7 @@ cb2d012  fix(attacks): forward --help to the subcommand
 ```
 
 `git status --short` is clean after the report commit above. The work was
-rebased onto `origin/main` twice, so the branch is now `ahead 11, behind 0`.
+rebased onto `origin/main` twice, so the branch is now `ahead 14, behind 0`.
 It is pushed as `aditya/attack-slice`, and CI run `40732966171` passed both
 jobs, including `ATTACK repos, decoders and hook`.
 
@@ -950,8 +950,8 @@ Exit codes:
 | Check | Result |
 |---|---|
 | `git status` | clean after the last commit (this report + `docs/DECOY_TRIAL.md`) |
-| branch | `main` = `origin/aditya/attack-slice`; 11 ahead / 0 behind `origin/main` (`1b8d7b8`) |
-| CI | run `40732966171`: RUN foundation and ATTACK jobs both success |
+| branch | `main` = `origin/aditya/attack-slice`; 14 ahead / 0 behind `origin/main` (`1b8d7b8`) |
+| CI | runs `40732966171` (code) and `40744170648` (docs) both success |
 | ruff check | pass |
 | ruff format check | 57 files formatted |
 | generated tree | 57 files, no drift |
@@ -1002,7 +1002,7 @@ table itself is unchanged.
 | Ref | State |
 |---|---|
 | `origin/main` | `1b8d7b8`; PR #10 (sinks) merged after the first rebase |
-| local `main` | last commit is this report; **11 ahead, 0 behind**; pushed to `origin/aditya/attack-slice` |
+| local `main` | last commit is this report; **14 ahead, 0 behind**; pushed to `origin/aditya/attack-slice` |
 | backup | `backup/pre-rebase-<timestamp>` points at the pre-rebase tree |
 | PR #12 | `ashutosh/d3-decoy` — decoy agent loop, tool calls inside the cage (open; updated to `482e9e8`) |
 | PR #10 | `ashutosh/d2-sinks` — DNS/HTTP/TLS sinks and file trace (**merged**) |
@@ -1059,7 +1059,18 @@ system-only first message with HTTP 400 (`messages` must contain a `user` or
 runs. That patch is not pushed to PR #12.
 
 The full protocol, cage-image build, scoring query, per-run table and caveats
-are in [`docs/DECOY_TRIAL.md`](DECOY_TRIAL.md).
+are in [`docs/DECOY_TRIAL.md`](DECOY_TRIAL.md). The raw evidence is committed in
+[`docs/decoy-trial/`](decoy-trial/): ten `RunEvidence` JSON files, `summary.tsv`,
+`result.json` (`"bites": 0`, `"pass": false`), the environment, a diagnostic
+transcript with the refusal text, and the local d3 patch.
+
+**Trial side finding, fixed here.** The trial also proved the READ judge's
+defaults were wrong against the live Meta API: `api.llama.com/compatible/v1`
+returns HTTP 404 and the model id `muse-spark` returns `model_not_found`. The
+defaults in `read/config.py` are now `https://api.meta.ai/v1` and
+`muse-spark-1.3`, with
+`test_judge_defaults_match_the_live_meta_api` pinning both. `read/docs/JUDGE.md`
+records the checked values.
 
 Do not present this as a successful decoy. Repo #1 is a negative control for
 Muse Spark; a passing run needs a subtler payload or a model without injection
