@@ -75,9 +75,10 @@ def stage_repository(source: Path, destination: Path, limits: StagingLimits) -> 
         check()
         if depth > limits.max_depth:
             raise StagingError("repository exceeds the nesting limit")
-        target.mkdir(mode=0o755)
-        # Docker's non-root uid must be able to read this disposable copy.
-        target.chmod(0o755)
+        target.mkdir(mode=0o777)
+        # The cage's uid 65532 must be able to write this disposable copy so
+        # changes can be traced; the 0700 scan directory keeps other host users out.
+        target.chmod(0o777)
         with os.scandir(source_fd) as entries:
             for entry in entries:
                 check()
@@ -121,7 +122,8 @@ def stage_repository(source: Path, destination: Path, limits: StagingLimits) -> 
                                 if copied > limits.max_file_bytes or total > limits.max_bytes:
                                     raise StagingError("repository exceeds the byte limit")
                                 writer.write(chunk)
-                        output.chmod(0o755 if metadata.st_mode & 0o111 else 0o644)
+                        # Setuid/setgid bits never carry into the writable copy.
+                        output.chmod(0o777 if metadata.st_mode & 0o111 else 0o666)
                     finally:
                         os.close(file_fd)
                 else:

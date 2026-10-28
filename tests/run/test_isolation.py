@@ -58,11 +58,14 @@ assert not pathlib.Path('/var/run/docker.sock').exists()
 assert pathlib.Path('/repo/README.md').read_text() == 'A benign fixture.\n'
 assert pathlib.Path('/repo/host-link').is_symlink()
 assert not pathlib.Path('/repo/host-link').exists()
-for path in ('/should-not-write', '/repo/README.md'):
-    try:
-        pathlib.Path(path).write_text('bad')
-    except OSError: pass
-    else: raise AssertionError('write unexpectedly allowed: '+path)
+try:
+    pathlib.Path('/should-not-write').write_text('bad')
+except OSError: pass
+else: raise AssertionError('write unexpectedly allowed: /should-not-write')
+# The staged copy is writable so cage file changes can be detected; the host repo is never mounted.
+pathlib.Path('/repo/README.md').write_text('cage was here\n')
+assert pathlib.Path('/repo/README.md').read_text() == 'cage was here\n'
+pathlib.Path('/repo/cage-marker.txt').write_text('marker\n')
 deadline = time.monotonic() + 4
 while True:
     try:
@@ -115,12 +118,14 @@ print('ISOLATION_OK'); print('STDERR_OK', file=sys.stderr)
         assert not config["PortBindings"]
         assert cage.attrs["Config"]["User"] == "65532:65532"
         assert cage.attrs["Mounts"][0]["Source"] != str(repo)
-        assert not cage.attrs["Mounts"][0]["RW"]
+        # Writable on purpose: writes land in the disposable copy and are traced.
+        assert cage.attrs["Mounts"][0]["RW"]
         assert list(cage.attrs["NetworkSettings"]["Networks"]) == [sandbox.name]
         network = engine.networks.get(sandbox.network_id)
         assert network.attrs["Internal"]
         assert network.attrs["IPAM"]["Config"][0]["Subnet"] == sandbox.subnet
     assert (repo / "README.md").read_text() == "A benign fixture.\n"
+    assert not (repo / "cage-marker.txt").exists()
     assert sandbox.evidence.status == "incomplete"
     assert sandbox.evidence.components.sandbox == State.COMPLETE
     assert sandbox.evidence.components.http_sink == State.NOT_RUN

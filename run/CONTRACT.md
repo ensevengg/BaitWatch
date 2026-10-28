@@ -14,7 +14,9 @@ An empty list means nothing was recorded. It does not mean the component ran.
 
 - A component's state is `not_run`, `complete` or `error`.
 - The RUN status is `incomplete`, `complete` or `error`.
-- A command that exits 0 marks only the sandbox component complete. Sinks, the decoy and tracing keep their own states.
+- A command that exits 0 marks only the sandbox component complete. `dns_sink`, `http_sink` and `tls_sink` become complete only when the sink reported ready, its container is still running when evidence is collected, and its whole log parses without problems or truncation; otherwise they are error (`SINK_FAILED`, `SINK_LOG`). A `refused` record — a contact dropped at the sink's connection limit — is such a problem, so suppressed evidence cannot look like a clean log. The TLS component shares the HTTP sink's container and log. `trace` is complete only when both staged-tree snapshots parsed strictly and their diff produced `file_diffs`. The decoy has not run yet, so every real scan stays `incomplete`.
+- `dns_hits`, `http_hits` and `tls_hits` carry the peer source IP (the cage), the destination (DNS qname, HTTP host+path or TLS SNI) and a bounded detail line: query type and label-decoded secrets, method and body preview, or a raw preview for unparseable TCP contact.
+- `file_diffs` lists added, modified and deleted paths in the disposable staged copy. Changes to the original repository are impossible to record this way because the original is never mounted.
 - Setup, timeout, truncation, command and cleanup errors stay in `errors`. A component that is not built yet is `not_run`.
 - `stdout` and `stderr` share one byte budget. `timed_out` and `output_truncated` are separate fields.
 

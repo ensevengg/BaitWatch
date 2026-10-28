@@ -2,7 +2,7 @@
 
 BaitWatch checks a repository for attacks aimed at coding agents before a developer lets an agent work in it. The planned product has two parts. READ runs a detector over the files. RUN executes the repository as a decoy inside an isolated Docker network and records what it tries to reach.
 
-This branch builds the first RUN milestone. It copies the repository with limits, creates an internal Docker network, runs a command in a restricted container, records typed evidence, cleans up, and tests each of these steps. It does not yet include the READ model, the production sinks, the LLM decoy, file tracing, the full verdict engine, or agent hooks.
+This branch builds the RUN foundation plus the Day 2 layers. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, records typed evidence, cleans up, and tests each of these steps. It does not yet include the READ model, the LLM decoy, honeytoken attribution, the full verdict engine, or agent hooks.
 
 ## Setup on Linux
 
@@ -45,7 +45,7 @@ evidence = detonate("/path/to/repo", ["echo", "hello"])
 assert evidence.status == "incomplete"
 ```
 
-`Sandbox` is a context manager. Its `start_service()` method starts a container on the internal network, which the DNS and HTTP/TLS sinks will use. See [the sandbox boundary](SANDBOX.md) and [the proposed team contract](CONTRACT.md).
+`Sandbox` is a context manager. `start_sinks()` runs the production DNS and HTTP/TLS sinks, `trace_before()`/`trace_after()` snapshot the staged tree around the command, and `collect_sinks()` reads the sink logs into hits. `start_service()` remains for trusted connectivity fixtures. See [the sandbox boundary](SANDBOX.md), [the sinks](sinks/README.md) and [the proposed team contract](CONTRACT.md).
 
 ## What the tests check
 
