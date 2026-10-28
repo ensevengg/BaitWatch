@@ -92,6 +92,20 @@ class FakeExecApi:
         self.peer.close()
 
 
+@pytest.fixture(autouse=True)
+def fake_exec_start(monkeypatch):
+    from run import capture
+
+    start = capture._start_exec
+
+    def dispatch(api, exec_id, deadline):
+        if isinstance(api, FakeExecApi):
+            return api.exec_start(exec_id, socket=True)
+        return start(api, exec_id, deadline)
+
+    monkeypatch.setattr(capture, "_start_exec", dispatch)
+
+
 class ResettingSocket:
     """A readable exec socket whose first read fails like a reset connection."""
 
@@ -247,7 +261,57 @@ def test_capture_exec_bounds_a_stalled_start_and_restores_the_client_timeout():
     result, failure = capture_exec(
         api, "exec-1", ["caged"], timeout_seconds=0.05, max_output_bytes=4096
     )
-    assert api.seen_timeout == pytest.approx(3.05)  # deadline plus grace bounds the start
+    assert api.seen_timeout == 60  # capture does not mutate the shared client timeout
     assert api.timeout == 60  # restored for every other client call
     assert result.timed_out
     assert isinstance(failure, ConnectionError)
+
+
+@pytest.mark.parametrize("start_delay", [None, 0.12])
+def test_capture_exec_start_obeys_an_absolute_deadline(monkeypatch, start_delay):
+    import docker
+
+    peer, end = socket.socketpair()
+    stop = threading.Event()
+    response = b"HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"
+
+    monkeypatch.setattr("run.capture._connect_exec_socket", lambda *args: end)
+    monkeypatch.setattr("run.capture.EXEC_GRACE_SECONDS", 0.3)
+
+    def answer():
+        try:
+            peer.recv(4096)
+            if start_delay is None:
+                for byte in response:
+                    peer.sendall(bytes([byte]))
+                    if stop.wait(0.2):
+                        break
+            elif not stop.wait(start_delay):
+                peer.sendall(response)
+                stop.wait(1)
+        except OSError:
+            pass
+        finally:
+            peer.close()
+
+    threads_before = threading.active_count()
+    writer = threading.Thread(target=answer)
+    api = docker.APIClient(base_url="unix:///unused.sock", version="1.45", timeout=60)
+    writer.start()
+    try:
+        result, failure = capture_exec(
+            api, "exec-1", ["caged"], timeout_seconds=0.05, max_output_bytes=4096
+        )
+    finally:
+        stop.set()
+        writer.join(timeout=1)
+        api.close()
+    assert result.timed_out
+    assert result.duration_seconds < (0.43 if start_delay is None else 0.22)
+    assert end.fileno() == -1
+    assert api.timeout == 60
+    assert threading.active_count() == threads_before
+    if start_delay is None:
+        assert isinstance(failure, TimeoutError)
+    else:
+        assert failure is None

@@ -6,6 +6,7 @@ import struct
 import subprocess
 import time
 from collections.abc import Callable, Sequence
+from urllib.parse import urlsplit
 
 from run.evidence import CommandResult
 
@@ -110,6 +111,65 @@ def _close_stream(stream):
             raw.close()
 
 
+def _deadline_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("exec transport deadline expired")
+    return remaining
+
+
+def _connect_exec_socket(api, deadline: float):
+    adapter = api.get_adapter(api.base_url)
+    path = getattr(adapter, "socket_path", None)
+    if not isinstance(path, str):
+        raise ValueError("exec capture requires a local Docker Unix socket")
+    stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        stream.settimeout(_deadline_timeout(deadline))
+        stream.connect(path)
+        return stream
+    except BaseException:
+        _close_stream(stream)
+        raise
+
+
+def _start_exec(api, exec_id, deadline: float):
+    path = urlsplit(api._url("/exec/{0}/start", exec_id)).path
+    body = b'{"Tty":false,"Detach":false}'
+    request = (
+        f"POST {path} HTTP/1.1\r\nHost: localhost\r\n"
+        "Connection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\n\r\n"
+    ).encode("ascii") + body
+    stream = _connect_exec_socket(api, deadline)
+    try:
+        stream.settimeout(_deadline_timeout(deadline))
+        stream.sendall(request)
+        header = bytearray()
+        # Read no payload ahead of the framing parser; cap even a trickled header.
+        while not header.endswith(b"\r\n\r\n"):
+            if len(header) >= _READ_CHUNK:
+                raise ValueError("exec HTTP response header exceeds the byte limit")
+            stream.settimeout(_deadline_timeout(deadline))
+            byte = stream.recv(1)
+            if not byte:
+                raise ConnectionError("exec start ended inside the HTTP response header")
+            header.extend(byte)
+        lines = bytes(header).split(b"\r\n")
+        status = lines[0].split()
+        if len(status) < 2 or status[0] not in (b"HTTP/1.0", b"HTTP/1.1"):
+            raise ValueError("invalid exec HTTP response status")
+        if status[1] not in (b"101", b"200"):
+            raise ValueError(f"exec start HTTP status {status[1]!r}")
+        if any(line.lower().startswith(b"transfer-encoding:") for line in lines[1:]):
+            raise ValueError("unsupported exec HTTP transfer encoding")
+        stream.setblocking(False)
+        return stream
+    except BaseException:
+        _close_stream(stream)
+        raise
+
+
 def capture_exec(
     api,
     exec_id,
@@ -122,7 +182,7 @@ def capture_exec(
 
     docker-py's streaming iterator hides socket errors as a clean end of
     stream and cannot be interrupted, so this reader owns the socket that
-    `exec_start(socket=True)` returns and parses Docker's multiplexed
+    the exec-start HTTP upgrade returns and parses Docker's multiplexed
     framing itself: an 8-byte header (stream type, padding, big-endian
     length) then exactly that many payload bytes. An EOF inside a header or
     payload, an unknown stream type or a socket error is returned as the
@@ -141,20 +201,16 @@ def capture_exec(
     stream = None
     selector = selectors.DefaultSelector()
     try:
-        # The socket deadline below cannot interrupt an exec_start that has
-        # not answered, so the start request gets the whole deadline plus
-        # grace as its HTTP timeout and is restored immediately after.
-        previous_timeout = getattr(api, "timeout", None)
-        api.timeout = timeout_seconds + EXEC_GRACE_SECONDS
+        hard_deadline = started + timeout_seconds + EXEC_GRACE_SECONDS
         try:
-            stream = api.exec_start(exec_id, socket=True)
+            stream = _start_exec(api, exec_id, hard_deadline)
         except Exception as exc:
             failure = exc
             if time.monotonic() - started >= timeout_seconds:
                 result.timed_out = True
-        finally:
-            api.timeout = previous_timeout
-        if stream is not None:
+        if stream is not None and time.monotonic() - started >= timeout_seconds:
+            result.timed_out = True
+        elif stream is not None:
             selector.register(stream, selectors.EVENT_READ)
             pending = bytearray()
             frame_name = "stdout"
@@ -164,10 +220,13 @@ def capture_exec(
                 now = time.monotonic()
                 if stopped_at is None and now - started >= timeout_seconds:
                     result.timed_out = True
-                    stopped_at = now
-                if stopped_at is not None and now - stopped_at >= EXEC_GRACE_SECONDS:
+                    stopped_at = started + timeout_seconds
+                read_deadline = hard_deadline
+                if stopped_at is not None:
+                    read_deadline = min(read_deadline, stopped_at + EXEC_GRACE_SECONDS)
+                if now >= read_deadline:
                     break
-                if not selector.select(0.05):
+                if not selector.select(min(0.05, read_deadline - now)):
                     continue
                 try:
                     chunk = _read_chunk(stream)

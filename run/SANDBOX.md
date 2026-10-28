@@ -15,6 +15,8 @@ Each scan follows these steps.
 
 ## Known limits
 
+- If Docker drops whole output frames at a frame boundary while reporting a clean exit, capture cannot detect the loss; this requires a Docker transport fault rather than cage control, and a per-stream end-of-output record is the planned fix.
+
 - The cage cannot reach public addresses or the host over the network. It can still reach the other containers on its own bridge, which are the sinks. This milestone makes no claim of resistance to kernel or container escapes.
 - The isolated gateway also means the container resolver has no working upstream: name lookups inside the cage fail even though the DNS sink logs the forwarded queries. Sink contacts are made by IP, which is how the tests exercise them.
 - The sinks see only what crosses the scan network. Attacks using channels the sinks do not cover, for example non-DNS UDP protocols or TLS bodies (only the ClientHello SNI is logged), do not light up. Later milestones add TLS body capture and honeytoken attribution.

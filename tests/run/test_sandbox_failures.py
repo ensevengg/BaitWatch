@@ -1037,13 +1037,13 @@ def test_exec_frame_cut_mid_payload_with_a_clean_record_is_a_transport_failure(
     peer.sendall(struct.pack(">BxxxL", 2, len(marker)) + marker)
     peer.sendall(struct.pack(">BxxxL", 1, 12) + b"abc")  # declares 12 bytes, delivers 3
     peer.close()
-    client.api.exec_start.return_value = end  # real capture_exec reads this raw socket
+    monkeypatch.setattr("run.capture._start_exec", lambda *args: end)
     client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
     sandbox = Sandbox(repo, client_factory=lambda: client)
     with sandbox:
         sandbox.open_cage()
         result = sandbox.exec(["sh", "-c", "echo hi"])
-    assert client.api.exec_start.call_args.kwargs["socket"] is True
+    assert end.fileno() == -1
     assert result.stdout == "abc"
     assert result.exit_code == 0
     assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TRANSPORT_FAILED"]
