@@ -134,10 +134,18 @@ def _tls_hit(record) -> NetworkHit:
     sni = record.get("sni")
     if sni is not None and not isinstance(sni, str):
         raise SinkLogLineError("sni is not a string or null")
+    capture_incomplete = record.get("capture_incomplete", False)
+    if not isinstance(capture_incomplete, bool):
+        raise SinkLogLineError("capture_incomplete is not a boolean")
+    notes = []
+    if sni is None:
+        notes.append("ClientHello without SNI")
+    if capture_incomplete:
+        notes.append("capture_incomplete")
     return NetworkHit(
         source_ip=_text(record, "source_ip"),
         destination=sni if sni is not None else "<no sni>",
-        detail="" if sni is not None else "ClientHello without SNI",
+        detail=" ".join(notes),
     )
 
 
@@ -206,7 +214,13 @@ def read_sink_log(path: Path, *, max_bytes: int = DEFAULT_MAX_BYTES) -> SinkLog:
             elif kind == "http":
                 _append(http_hits, problems, number, _http_hit, record)
             elif kind == "tls":
+                hits_before = len(tls_hits)
                 _append(tls_hits, problems, number, _tls_hit, record)
+                if len(tls_hits) > hits_before and record.get("capture_incomplete") is True:
+                    problems.append(
+                        f"line {number}: tls capture is incomplete; "
+                        "the full ClientHello was not captured"
+                    )
             else:
                 problems.append(f"line {number}: unknown kind {kind!r}")
         except SinkLogLineError as exc:

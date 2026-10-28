@@ -20,7 +20,10 @@ HEADER_VALUE_LIMIT = 4096
 METHOD_LIMIT = 32
 PATH_LIMIT = 2048
 BODY_LIMIT = 64 * 1024
-TLS_READ_LIMIT = 16 * 1024
+# Real ClientHellos pass 16 KiB (post-quantum key shares, ECH, padding); the
+# bound is four maximal plaintext records, and anything past it is flagged
+# capture_incomplete rather than silently read as a null SNI.
+TLS_READ_LIMIT = 64 * 1024
 RAW_LIMIT = 200
 POLL_SECONDS = 0.2
 SHUTDOWN_SECONDS = 1.5
@@ -32,6 +35,7 @@ RESPONSE = (
     b"\r\n"
     b"ok"
 )
+CONTINUE = b"HTTP/1.1 100 Continue\r\n\r\n"
 
 
 class JsonlLog:
@@ -86,8 +90,9 @@ class JsonlLog:
             self._closed = True
 
 
-def first_handshake(buf):
-    """Concatenated payloads of the leading handshake records."""
+def first_handshake(buf, *, partial=False):
+    """Concatenated payloads of the leading handshake records; partial keeps a
+    trailing record cut short by the read limit or a stalled peer."""
     payload = bytearray()
     offset = 0
     while offset + 5 <= len(buf) and len(payload) < TLS_READ_LIMIT:
@@ -95,6 +100,8 @@ def first_handshake(buf):
             break
         length = int.from_bytes(buf[offset + 3 : offset + 5], "big")
         if offset + 5 + length > len(buf):
+            if partial:
+                payload += buf[offset + 5 :]
             break
         payload += buf[offset + 5 : offset + 5 + length]
         offset += 5 + length
@@ -121,8 +128,9 @@ def server_name_from(data):
 
 
 def parse_sni(buf):
-    """Best-effort SNI from concatenated handshake records; None for anything unclear."""
-    hello = first_handshake(buf)
+    """Best-effort SNI from the handshake records, a cut-short trailing record
+    included; None for anything unclear."""
+    hello = first_handshake(buf, partial=True)
     if len(hello) < 4 or hello[0] != 0x01:  # ClientHello
         return None
     body = hello[4 : 4 + int.from_bytes(hello[1:4], "big")]
@@ -236,8 +244,14 @@ def _log_request(conn, addr, log, lines, parts, body_prefix):
         content_length = max(0, int(headers.get("content-length", "0"), 10))
     except ValueError:
         content_length = 0
+    chunked = "chunked" in headers.get("transfer-encoding", "").lower()
     body = bytearray(body_prefix[:BODY_LIMIT])
-    needed = min(content_length, BODY_LIMIT) - len(body)
+    # Chunked framing carries no length to satisfy, so its drain runs to the cap.
+    needed = (BODY_LIMIT if chunked else min(content_length, BODY_LIMIT)) - len(body)
+    if needed > 0 and "100-continue" in headers.get("expect", "").lower():
+        # The client is holding its body until an interim response arrives.
+        with contextlib.suppress(OSError):
+            conn.sendall(CONTINUE)
     while needed > 0:
         try:
             chunk = conn.recv(min(needed, 16384))
@@ -258,8 +272,9 @@ def _log_request(conn, addr, log, lines, parts, body_prefix):
             "headers": headers,
             "headers_truncated": headers_truncated,
             "body": body.decode("utf-8", errors="replace"),
-            # A connection that ends early is as truncated as one past the capture cap.
-            "body_truncated": content_length > BODY_LIMIT or len(body) < content_length,
+            # Chunked framing is never decoded, so its capture cannot claim to be
+            # whole; a connection that ends early is as truncated as one past the cap.
+            "body_truncated": chunked or content_length > BODY_LIMIT or len(body) < content_length,
             **({"raw": raw_preview(lines[0])} if len(parts) > 3 else {}),
         }
     )
@@ -279,14 +294,19 @@ def handle_tls(conn, addr, log):
         buffer.extend(chunk)
         if client_hello_done(bytes(buffer)):
             break
-    log.write(
-        {
-            "kind": "tls",
-            "ts": time.time(),
-            "source_ip": addr[0],
-            "sni": parse_sni(bytes(buffer)),
-        }
-    )
+    data = bytes(buffer)
+    record = {
+        "kind": "tls",
+        "ts": time.time(),
+        "source_ip": addr[0],
+        "sni": parse_sni(data),
+    }
+    # A TLS-looking prefix without a whole ClientHello was cut short by the read
+    # limit, a stall or an early end; the SNI may still be recoverable, but the
+    # capture cannot pose as complete.
+    if data[:1] == b"\x16" and not client_hello_done(data):
+        record["capture_incomplete"] = True
+    log.write(record)
 
 
 class Sink:

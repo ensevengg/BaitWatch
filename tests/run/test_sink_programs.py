@@ -911,3 +911,154 @@ def test_dns_over_tcp_frames_past_the_budget_flag_incomplete_capture(dns_sink):
     assert len(unparsed) == 1
     assert unparsed[0]["capture_incomplete"] is True
     assert unparsed[0]["source_ip"] == "127.0.0.1"
+
+
+def build_client_hello(sni: str, total: int) -> bytes:
+    """Synthetic ClientHello handshake message padded to exactly `total` bytes."""
+    name = sni.encode()
+    sni_ext = b"\x00\x00" + (len(name) + 5).to_bytes(2, "big")
+    sni_ext += (len(name) + 3).to_bytes(2, "big") + b"\x00" + len(name).to_bytes(2, "big") + name
+    body = (
+        b"\x03\x03"
+        + bytes(32)
+        + b"\x00"  # version, random, empty session id
+        + b"\x00\x02\x13\x01"  # one cipher suite
+        + b"\x01\x00"  # null compression
+        + len(sni_ext).to_bytes(2, "big")
+        + sni_ext
+    )
+    pad = total - 4 - len(body)
+    assert pad >= 0
+    return b"\x01" + (len(body) + pad).to_bytes(3, "big") + body + b"\x00" * pad
+
+
+def tls_records(payload: bytes, chunk: int) -> bytes:
+    return b"".join(
+        b"\x16\x03\x01" + len(part).to_bytes(2, "big") + part
+        for part in (payload[start : start + chunk] for start in range(0, len(payload), chunk))
+    )
+
+
+def test_tls_clienthello_past_the_read_limit_keeps_sni_and_flags_incomplete(http_sink):
+    module = load_sink_module("http_sink.py")
+    hello = build_client_hello("big-pq.evil.example", module.TLS_READ_LIMIT + 4096)
+    wire = tls_records(hello, 60_000)
+    sock = socket.create_connection(("127.0.0.1", http_sink["tls_port"]), timeout=SINK_TIMEOUT)
+
+    def deliver():
+        try:
+            sock.sendall(wire[: module.TLS_READ_LIMIT + 469])
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+    threading.Thread(target=deliver, daemon=True).start()
+    deadline = time.monotonic() + SINK_TIMEOUT
+    hit = None
+    while time.monotonic() < deadline:
+        tls_hits = read_records(http_sink["log"], "tls")
+        if tls_hits:
+            hit = tls_hits[-1]
+            break
+        time.sleep(0.05)
+    sock.close()
+    assert hit is not None, "an oversized ClientHello was never logged"
+    assert hit["sni"] == "big-pq.evil.example"
+    assert hit.get("capture_incomplete") is True
+
+
+class FakeTlsConn(SegmentedConn):
+    def settimeout(self, timeout):
+        pass
+
+
+def run_handle_tls(segments: list[bytes]) -> dict:
+    module = load_sink_module("http_sink.py")
+    records = []
+
+    class Log:
+        def write(self, record):
+            records.append(record)
+
+    module.handle_tls(FakeTlsConn(segments), ("127.0.0.1", 40000), Log())
+    return records[0]
+
+
+def test_tls_clienthello_cut_short_before_the_record_completes_flags_incomplete():
+    record = run_handle_tls([b"\x16\x03\x01\x00\x20\x01"])  # promises 32 bytes, sends 1
+    assert record["sni"] is None
+    assert record.get("capture_incomplete") is True
+
+
+def test_tls_complete_clienthello_and_non_tls_contacts_are_not_flagged_incomplete():
+    hello = build_client_hello("whole.evil.example", 200)
+    whole = run_handle_tls([tls_records(hello, 60_000)])
+    assert whole["sni"] == "whole.evil.example"
+    assert "capture_incomplete" not in whole
+    not_tls = run_handle_tls([b"\x00\x01\x02 not-tls\r\n"])
+    assert not_tls["sni"] is None
+    assert "capture_incomplete" not in not_tls
+    empty = run_handle_tls([b""])
+    assert empty["sni"] is None
+    assert "capture_incomplete" not in empty
+
+
+def test_http_expect_100_continue_client_gets_interim_response_and_full_body_capture(http_sink):
+    body = "bw_secret=" + "z" * 5000
+    with socket.create_connection(
+        ("127.0.0.1", http_sink["http_port"]), timeout=SINK_TIMEOUT
+    ) as sock:
+        sock.sendall(
+            b"POST /continue HTTP/1.1\r\nHost: exfil.evil.example\r\n"
+            b"Content-Length: " + str(len(body)).encode() + b"\r\nExpect: 100-Continue\r\n\r\n"
+        )
+        interim = recv_exact(sock, len(b"HTTP/1.1 100 Continue\r\n\r\n"))
+        assert interim == b"HTTP/1.1 100 Continue\r\n\r\n"
+        sock.sendall(body.encode())
+        assert sock.recv(4096).startswith(b"HTTP/1.1 200 OK")
+    hit = next(
+        record for record in read_records(http_sink["log"], "http") if record["path"] == "/continue"
+    )
+    assert hit["body"] == body
+    assert hit["body_truncated"] is False
+    assert hit["headers"]["expect"] == "100-Continue"
+
+
+def test_http_expect_header_with_an_unwaiting_client_still_captures_the_body(http_sink):
+    body = "bw_secret=" + "q" * 6000
+    status, response_body = http_request(
+        http_sink["http_port"],
+        "POST",
+        "/expect",
+        body=body,
+        headers={"Host": "expect.evil.example", "Expect": "100-continue"},
+    )
+    assert status == 200
+    assert response_body == b"ok"
+    hit = next(
+        record for record in read_records(http_sink["log"], "http") if record["path"] == "/expect"
+    )
+    assert hit["body"] == body
+    assert hit["body_truncated"] is False
+
+
+def test_http_chunked_body_is_drained_and_marked_truncated(http_sink):
+    first = b"4\r\nbw_s"
+    second = b"ecret=1\r\n0\r\n\r\n"
+    with socket.create_connection(
+        ("127.0.0.1", http_sink["http_port"]), timeout=SINK_TIMEOUT
+    ) as sock:
+        sock.sendall(
+            b"POST /chunks HTTP/1.1\r\nHost: chunks.evil.example\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n" + first
+        )
+        time.sleep(0.2)
+        sock.sendall(second)
+        sock.shutdown(socket.SHUT_WR)
+        while sock.recv(4096):
+            pass
+    hit = next(
+        record for record in read_records(http_sink["log"], "http") if record["path"] == "/chunks"
+    )
+    assert hit["body"] == (first + second).decode()
+    assert hit["body_truncated"] is True

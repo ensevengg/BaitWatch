@@ -457,3 +457,33 @@ def test_dns_capture_incomplete_wrong_type_is_a_problem(tmp_path, value):
     assert not log.dns_hits
     assert len(log.problems) == 1
     assert "capture_incomplete is not a boolean" in log.problems[0]
+
+
+def test_tls_capture_incomplete_record_is_a_hit_and_a_problem(tmp_path):
+    path = write_log(tmp_path / "sink.jsonl", [ready("http"), tls_record(capture_incomplete=True)])
+    log = read_sink_log(path)
+    assert len(log.tls_hits) == 1
+    assert log.tls_hits[0].destination == "exfil.evil.example"
+    assert "capture_incomplete" in log.tls_hits[0].detail
+    assert len(log.problems) == 1
+    assert "capture is incomplete" in log.problems[0]
+
+
+def test_tls_capture_incomplete_without_sni_keeps_the_hit(tmp_path):
+    path = write_log(tmp_path / "sink.jsonl", [tls_record(sni=None, capture_incomplete=True)])
+    log = read_sink_log(path)
+    assert len(log.tls_hits) == 1
+    assert log.tls_hits[0].destination == "<no sni>"
+    assert "ClientHello without SNI" in log.tls_hits[0].detail
+    assert "capture_incomplete" in log.tls_hits[0].detail
+    assert len(log.problems) == 1
+    assert "capture is incomplete" in log.problems[0]
+
+
+@pytest.mark.parametrize("value", [1, 0, "yes", None, [], {}])
+def test_tls_capture_incomplete_wrong_type_is_a_problem(tmp_path, value):
+    path = write_log(tmp_path / "sink.jsonl", [tls_record(capture_incomplete=value)])
+    log = read_sink_log(path)
+    assert not log.tls_hits
+    assert len(log.problems) == 1
+    assert "capture_incomplete is not a boolean" in log.problems[0]
