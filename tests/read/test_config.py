@@ -66,6 +66,25 @@ def test_quick_preset_disables_judge():
     assert cfg.judge.enabled is False, "the inline hook must not block on judge calls"
 
 
+def test_windows_pin_reports_the_posix_path(monkeypatch, tmp_path):
+    import pytest
+
+    pin = {
+        "checkpoint_path": "/home/enseven/.local/share/baitwatch/models/v15f_22m",
+        "tag": "v1.5f",
+    }
+    monkeypatch.setattr(rc, "MODEL_CONFIG_PATH", tmp_path / "model_config.json")
+    (tmp_path / "model_config.json").write_text(json.dumps(pin))
+    monkeypatch.delenv("BAITWATCH_MODEL_PATH", raising=False)
+    monkeypatch.setattr(rc, "_IS_WINDOWS", True)
+    with pytest.raises(FileNotFoundError) as exc:
+        rc.resolve_model_path()
+    message = str(exc.value)
+    assert "/home/enseven" in message
+    assert "POSIX" in message
+    assert "BAITWATCH_MODEL_PATH" in message
+
+
 def test_missing_pinned_checkpoint_fails_loudly(monkeypatch, tmp_path):
     import pytest
 

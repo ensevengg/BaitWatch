@@ -19,6 +19,7 @@ DEFAULT_MODEL_DIRS = (
     Path("/mnt/d/hf_models/Llama-Prompt-Guard-2-22M"),
     Path("/mnt/d/hf_models/Llama-Prompt-Guard-2-86M"),
 )
+_IS_WINDOWS = os.name == "nt"
 
 # Prompt Guard 2's config.json ships no label names: index 0 is benign,
 # index 1 is injection (verified against the sanity strings in tests).
@@ -181,7 +182,16 @@ def resolve_model_path(explicit: Path | str | None = None) -> Path:
         return p
     pinned = load_model_config()
     if pinned:
-        p = Path(pinned["checkpoint_path"])
+        raw = str(pinned["checkpoint_path"])
+        if _IS_WINDOWS and raw.startswith("/"):
+            # Path("/home/...") becomes "\home\..." on Windows and points at
+            # the current drive, which looks like a real path but never is.
+            raise FileNotFoundError(
+                f"pinned checkpoint path is POSIX ({raw}) and this is Windows "
+                f"(read/model_config.json, tag {pinned.get('tag')!r}). Copy it to "
+                "a Windows path and set BAITWATCH_MODEL_PATH explicitly."
+            )
+        p = Path(raw)
         if p.exists():
             return p
         # Never fall back silently: the pinned thresholds belong to the pinned
