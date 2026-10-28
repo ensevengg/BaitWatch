@@ -273,7 +273,7 @@ def manifest_from_json(text: str) -> dict[str, Entry]:
     """Strict validation: the text may be a helper container's tampered stdout."""
     try:
         payload = json.loads(text)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise TraceError(f"manifest is not valid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise TraceError("manifest must be a JSON object")

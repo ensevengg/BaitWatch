@@ -175,13 +175,13 @@ def read_head(conn):
 
 def raw_preview(data: bytes) -> str:
     """Printable one-line preview: control characters survive as escapes."""
-    text = data.decode("utf-8", errors="backslashreplace")
+    text = data[:RAW_LIMIT].decode("utf-8", errors="backslashreplace")
     return "".join(
         ch
         if ch.isprintable()
         else (f"\\x{ord(ch):02x}" if ord(ch) < 0x100 else f"\\u{ord(ch):04x}")
         for ch in text
-    )[:RAW_LIMIT]
+    )
 
 
 def handle_http(conn, addr, log):
@@ -204,6 +204,7 @@ def handle_http(conn, addr, log):
             "path": "",
             "host": "",
             "headers": {},
+            "headers_truncated": False,
             "body": "",
             "body_truncated": False,
             "raw": raw_preview(raw or b""),
@@ -216,6 +217,7 @@ def _log_request(conn, addr, log, lines, parts, body_prefix):
     path = parts[1].decode("utf-8", errors="backslashreplace")
     headers = {}
     host = ""
+    headers_truncated = len(lines) - 1 > MAX_HEADERS
     for line in lines[1 : MAX_HEADERS + 1]:
         name, separator, value = line.partition(b":")
         if not separator:
@@ -223,7 +225,10 @@ def _log_request(conn, addr, log, lines, parts, body_prefix):
         key = name.strip().decode("ascii", errors="backslashreplace").lower()
         if not key:
             continue
-        text = value.strip()[:HEADER_VALUE_LIMIT].decode("utf-8", errors="replace")
+        stripped = value.strip()
+        if len(stripped) > HEADER_VALUE_LIMIT:
+            headers_truncated = True
+        text = stripped[:HEADER_VALUE_LIMIT].decode("utf-8", errors="replace")
         headers[key] = f"{headers[key]}, {text}" if key in headers else text
         if key == "host":
             host = headers[key]
@@ -251,9 +256,11 @@ def _log_request(conn, addr, log, lines, parts, body_prefix):
             "path": path,
             "host": host,
             "headers": headers,
+            "headers_truncated": headers_truncated,
             "body": body.decode("utf-8", errors="replace"),
             # A connection that ends early is as truncated as one past the capture cap.
             "body_truncated": content_length > BODY_LIMIT or len(body) < content_length,
+            **({"raw": raw_preview(lines[0])} if len(parts) > 3 else {}),
         }
     )
     conn.sendall(RESPONSE)

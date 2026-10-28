@@ -72,6 +72,11 @@ def _dns_hit(record) -> NetworkHit:
         decoded.append(f"{encoding}({label})={entry['text']}")
     if decoded:
         detail += " decoded: " + "; ".join(decoded)
+    raw = record.get("raw")
+    if raw is not None and not isinstance(raw, str):
+        raise SinkLogLineError("raw is not a string")
+    if raw:
+        detail += f" raw={raw[:BODY_PREVIEW_CHARS]}"
     return NetworkHit(
         source_ip=_text(record, "source_ip"),
         destination=qname,
@@ -97,6 +102,9 @@ def _http_hit(record) -> NetworkHit:
     truncated = record.get("body_truncated", False)
     if not isinstance(truncated, bool):
         raise SinkLogLineError("body_truncated is not a boolean")
+    headers_truncated = record.get("headers_truncated")
+    if not isinstance(headers_truncated, bool):
+        raise SinkLogLineError("headers_truncated is not a boolean")
     raw = record.get("raw")
     if raw is not None and not isinstance(raw, str):
         raise SinkLogLineError("raw is not a string")
@@ -105,6 +113,8 @@ def _http_hit(record) -> NetworkHit:
         parts.append(f"body={body[:BODY_PREVIEW_CHARS]}")
     if truncated:
         parts.append("body_truncated")
+    if headers_truncated:
+        parts.append("headers_truncated")
     if raw:
         parts.append(f"raw={raw[:BODY_PREVIEW_CHARS]}")
     return NetworkHit(

@@ -39,6 +39,7 @@ def http_record(**overrides):
         "path": "/collect",
         "host": "exfil.evil.example",
         "headers": {"host": "exfil.evil.example"},
+        "headers_truncated": False,
         "body": "bw_secret=fake",
         "body_truncated": False,
     }
@@ -369,3 +370,59 @@ def test_log_without_a_trailing_newline_is_a_problem(tmp_path):
     log = read_sink_log(path)
     assert log.ready
     assert log.problems == ["sink log ends with a partial line"]
+
+
+def test_http_headers_truncated_is_surfaced_in_detail(tmp_path):
+    path = write_log(
+        tmp_path / "sink.jsonl", [http_record(headers_truncated=True, body="", raw="GET /x EXTRA")]
+    )
+    log = read_sink_log(path)
+    assert not log.problems
+    assert "headers_truncated" in log.http_hits[0].detail
+    assert "raw=GET /x EXTRA" in log.http_hits[0].detail
+
+
+def test_http_record_without_headers_truncated_is_a_problem(tmp_path):
+    record = http_record()
+    del record["headers_truncated"]
+    path = write_log(tmp_path / "sink.jsonl", [record])
+    log = read_sink_log(path)
+    assert not log.http_hits
+    assert len(log.problems) == 1
+    assert "headers_truncated is not a boolean" in log.problems[0]
+
+
+@pytest.mark.parametrize("value", [1, 0, "yes", None, [], {}])
+def test_http_headers_truncated_wrong_type_is_a_problem(tmp_path, value):
+    path = write_log(tmp_path / "sink.jsonl", [http_record(headers_truncated=value)])
+    log = read_sink_log(path)
+    assert not log.http_hits
+    assert len(log.problems) == 1
+    assert "headers_truncated is not a boolean" in log.problems[0]
+
+
+def test_dns_unparsed_record_maps_to_a_hit_with_its_raw_preview(tmp_path):
+    path = write_log(
+        tmp_path / "sink.jsonl",
+        [
+            ready(),
+            dns_record(qname="<unparsed>", qtype="unknown", decoded=[], raw="\\x00\\x01partial"),
+        ],
+    )
+    log = read_sink_log(path)
+    assert not log.problems
+    assert log.dns_hits == [
+        NetworkHit(
+            source_ip="10.13.37.20",
+            destination="<unparsed>",
+            detail="qtype=unknown raw=\\x00\\x01partial",
+        )
+    ]
+
+
+def test_dns_record_with_a_non_string_raw_is_a_problem(tmp_path):
+    path = write_log(tmp_path / "sink.jsonl", [ready(), dns_record(raw=42)])
+    log = read_sink_log(path)
+    assert not log.dns_hits
+    assert len(log.problems) == 1
+    assert "raw is not a string" in log.problems[0]

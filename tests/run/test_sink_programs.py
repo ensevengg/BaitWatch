@@ -635,3 +635,207 @@ def test_dns_decodes_lowercase_base32_label(dns_sink):
     assert any(
         entry["encoding"] == "base32" and entry["text"] == secret for entry in hit["decoded"]
     )
+
+
+def raw_http_exchange(port: int, payload: bytes) -> None:
+    with socket.create_connection(("127.0.0.1", port), timeout=SINK_TIMEOUT) as sock:
+        sock.sendall(payload)
+        while sock.recv(4096):
+            pass
+
+
+def test_raw_preview_limits_raw_bytes_before_escaping():
+    module = load_sink_module("http_sink.py")
+    assert module.raw_preview(b"\xff" * 60) == "\\xff" * 60
+    preview = module.raw_preview(b"\xff" * 300)
+    assert preview == "\\xff" * module.RAW_LIMIT
+    assert len(preview) <= 4 * module.RAW_LIMIT
+    assert module.raw_preview(b"A" * 250) == "A" * module.RAW_LIMIT
+
+
+def test_http_excess_headers_are_marked_truncated(http_sink):
+    headers = b"".join(b"X-H%d: v\r\n" % index for index in range(120))
+    raw_http_exchange(
+        http_sink["http_port"],
+        b"GET /many HTTP/1.1\r\nHost: many.evil.example\r\n" + headers + b"\r\n",
+    )
+    hit = next(
+        record for record in read_records(http_sink["log"], "http") if record["path"] == "/many"
+    )
+    assert len(hit["headers"]) == 100
+    assert hit["headers_truncated"] is True
+
+
+def test_http_long_header_value_is_marked_truncated(http_sink):
+    raw_http_exchange(
+        http_sink["http_port"],
+        b"GET /long HTTP/1.1\r\nHost: long.evil.example\r\nX-Long: " + b"x" * 5000 + b"\r\n\r\n",
+    )
+    hit = next(
+        record for record in read_records(http_sink["log"], "http") if record["path"] == "/long"
+    )
+    assert len(hit["headers"]["x-long"]) == 4096
+    assert hit["headers_truncated"] is True
+
+
+def test_http_complete_headers_are_not_marked_truncated(http_sink):
+    status, _ = http_request(http_sink["http_port"], "GET", "/complete")
+    assert status == 200
+    hit = next(
+        record for record in read_records(http_sink["log"], "http") if record["path"] == "/complete"
+    )
+    assert hit["headers_truncated"] is False
+
+
+def test_http_extra_request_line_token_is_preserved(http_sink):
+    raw_http_exchange(
+        http_sink["http_port"],
+        b"GET /path EXTRATOKEN HTTP/1.1\r\nHost: extra.evil.example\r\n\r\n",
+    )
+    hit = next(
+        record for record in read_records(http_sink["log"], "http") if record["path"] == "/path"
+    )
+    assert hit["method"] == "GET"
+    assert "EXTRATOKEN" in hit["raw"]
+
+
+def wait_for_unparsed_dns(log_path: Path) -> list[dict]:
+    deadline = time.monotonic() + SINK_TIMEOUT
+    hits = []
+    while time.monotonic() < deadline:
+        hits = [
+            record for record in read_records(log_path, "dns") if record["qname"] == "<unparsed>"
+        ]
+        if hits:
+            break
+        time.sleep(0.05)
+    return hits
+
+
+def test_dns_over_tcp_query_larger_than_the_udp_limit_is_answered_and_logged(dns_sink):
+    base = build_dns_query(b"\x5a\xa5", "big.evil.example")
+    payload = base + b"\x00" * (65535 - len(base))
+    assert len(payload) == 65535
+    with socket.create_connection(("127.0.0.1", dns_sink["port"]), timeout=SINK_TIMEOUT) as sock:
+        sock.sendall(len(payload).to_bytes(2, "big") + payload)
+        length = int.from_bytes(recv_exact(sock, 2), "big")
+        response = recv_exact(sock, length)
+    assert response[:2] == b"\x5a\xa5"
+    assert response[-4:] == socket.inet_aton(SINK_ANSWER)
+    hit = next(
+        record
+        for record in read_records(dns_sink["log"], "dns")
+        if record["qname"] == "big.evil.example"
+    )
+    assert hit["source_ip"] == "127.0.0.1"
+    assert hit["qtype"] == "A"
+
+
+def test_dns_over_tcp_unparseable_message_is_logged_as_unparsed(dns_sink):
+    packet = b"\xff" * 32
+    with socket.create_connection(("127.0.0.1", dns_sink["port"]), timeout=SINK_TIMEOUT) as sock:
+        sock.sendall(len(packet).to_bytes(2, "big") + packet)
+    hits = wait_for_unparsed_dns(dns_sink["log"])
+    assert hits, "an unparseable TCP DNS message was never logged"
+    assert hits[-1]["source_ip"] == "127.0.0.1"
+    assert hits[-1]["qtype"] == "unknown"
+    assert hits[-1]["raw"].startswith("\\xff")
+
+
+def test_dns_over_tcp_truncated_message_is_logged_as_unparsed(dns_sink):
+    with socket.create_connection(("127.0.0.1", dns_sink["port"]), timeout=SINK_TIMEOUT) as sock:
+        sock.sendall((100).to_bytes(2, "big") + b"truncated-payload")
+        sock.shutdown(socket.SHUT_WR)
+    hits = wait_for_unparsed_dns(dns_sink["log"])
+    assert hits, "a truncated TCP DNS message was never logged"
+    assert hits[-1]["source_ip"] == "127.0.0.1"
+    assert hits[-1]["raw"].startswith("truncated-payload")
+
+
+def test_dns_stop_tcp_shuts_down_a_connection_accepted_as_the_listener_closes(monkeypatch):
+    module = load_sink_module("dns_sink.py")
+    monkeypatch.setattr(module, "SHUTDOWN_SECONDS", 0.3)
+
+    class FakeLog:
+        def __init__(self):
+            self.records = []
+
+        def write(self, record):
+            self.records.append(record)
+
+    class FakeConn:
+        def __init__(self):
+            self.entered_recv = threading.Event()
+            self.released = threading.Event()
+            self.shutdown_calls = 0
+            self.closed = False
+
+        def settimeout(self, timeout):
+            pass
+
+        def recv(self, size):
+            self.entered_recv.set()
+            self.released.wait(timeout=SINK_TIMEOUT)
+            return b""
+
+        def shutdown(self, how):
+            self.shutdown_calls += 1
+            self.released.set()
+
+        def close(self):
+            self.closed = True
+            self.released.set()
+
+    class FakeListener:
+        def __init__(self, conn):
+            self.conn = conn
+            self.accept_released = threading.Event()
+            self.closed = False
+
+        def accept(self):
+            self.accept_released.wait(timeout=SINK_TIMEOUT)
+            return self.conn, ("127.0.0.1", 40000)
+
+        def close(self):
+            self.closed = True
+            self.accept_released.set()
+            # The connection is accepted and stalls in recv before shutdown proceeds.
+            assert self.conn.entered_recv.wait(timeout=SINK_TIMEOUT)
+
+    log = FakeLog()
+    conn = FakeConn()
+    listener = FakeListener(conn)
+    stopping = threading.Event()
+    active: set = set()
+    active_lock = threading.Lock()
+    thread = threading.Thread(
+        target=module.serve_tcp,
+        args=(log, listener, socket.inet_aton(SINK_ANSWER), stopping, active, active_lock),
+        daemon=True,
+    )
+    thread.start()
+
+    assert module.stop_tcp(listener, thread, stopping, active, active_lock) is True
+    assert not thread.is_alive()
+    assert listener.closed
+    assert conn.shutdown_calls == 1
+    assert any(record["qname"] == "<unparsed>" for record in log.records)
+
+
+def test_dns_stop_tcp_tolerates_an_unstarted_accept_thread():
+    module = load_sink_module("dns_sink.py")
+
+    class FakeListener:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    listener = FakeListener()
+    stopping = threading.Event()
+    thread = threading.Thread(target=lambda: None)
+
+    assert module.stop_tcp(listener, thread, stopping, set(), threading.Lock()) is True
+    assert stopping.is_set()
+    assert listener.closed

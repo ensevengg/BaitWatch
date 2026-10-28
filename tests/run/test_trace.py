@@ -311,3 +311,8 @@ def test_malformed_manifests_are_rejected(payload: str):
 def test_limit_validation_rejects_bad_values(kwargs: dict):
     with pytest.raises(ValueError):
         TraceLimits(**kwargs)
+
+
+def test_manifest_from_json_rejects_deeply_nested_input():
+    with pytest.raises(TraceError):
+        manifest_from_json("[" * 100_000 + "]" * 100_000)

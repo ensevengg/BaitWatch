@@ -16,6 +16,8 @@ import time
 
 LOG_CAP_BYTES = 4 * 1024 * 1024
 PACKET_LIMIT = 4096
+TCP_PACKET_LIMIT = 65535
+RAW_LIMIT = 200
 ANSWER_TTL = 30
 DECODED_LIMIT = 8
 MIN_DECODED_BYTES = 4
@@ -253,12 +255,39 @@ def serve(log, sock, answer, stopping):
 
 def read_exact(conn, count):
     data = bytearray()
-    while len(data) < count:
-        chunk = conn.recv(count - len(data))
-        if not chunk:
-            raise OSError("connection closed mid-message")
-        data.extend(chunk)
+    try:
+        while len(data) < count:
+            chunk = conn.recv(count - len(data))
+            if not chunk:
+                break
+            data.extend(chunk)
+    except OSError:
+        pass  # the caller logs the partial bytes as an unparsed contact
     return bytes(data)
+
+
+def raw_preview(data):
+    text = data.decode("utf-8", errors="backslashreplace")
+    return "".join(
+        ch
+        if ch.isprintable()
+        else (f"\\x{ord(ch):02x}" if ord(ch) < 0x100 else f"\\u{ord(ch):04x}")
+        for ch in text
+    )[:RAW_LIMIT]
+
+
+def log_unparsed(log, source_ip, data):
+    log.write(
+        {
+            "kind": "dns",
+            "ts": time.time(),
+            "source_ip": source_ip,
+            "qname": "<unparsed>",
+            "qtype": "unknown",
+            "decoded": [],
+            "raw": raw_preview(data),
+        }
+    )
 
 
 def serve_tcp(log, listener, answer, stopping, active, active_lock):
@@ -270,28 +299,72 @@ def serve_tcp(log, listener, answer, stopping, active, active_lock):
         except TimeoutError:
             continue
         except OSError:
+            if stopping.is_set():
+                return  # the listener was closed to stop this loop
             os._exit(1)  # a dead listener must not look like a clean stop
         with active_lock:
             active.add(conn)
+        prefix = b""
+        packet = b""
+        logged = False
         try:
             conn.settimeout(TCP_TIMEOUT)
-            length = int.from_bytes(read_exact(conn, 2), "big")
-            if not 12 <= length <= PACKET_LIMIT:
+            prefix = read_exact(conn, 2)
+            if len(prefix) < 2:
+                log_unparsed(log, source[0], prefix)
+                logged = True
                 continue
+            length = int.from_bytes(prefix, "big")
+            if length < 12 or length > TCP_PACKET_LIMIT:
+                packet = read_exact(conn, length) if 0 < length < 12 else b""
+                log_unparsed(log, source[0], packet or prefix)
+                logged = True
+                continue
+            # TCP framing carries up to 64 KiB, unlike the UDP datagram bound.
             packet = read_exact(conn, length)
+            if len(packet) < length:
+                log_unparsed(log, source[0], packet)
+                logged = True
+                continue
             parsed = parse_query(packet)
             if parsed is None:
+                log_unparsed(log, source[0], packet)
+                logged = True
                 continue
             log_query(log, source[0], packet, parsed)
+            logged = True
             response = build_response(packet[:2], parsed[0], parsed[2], answer)
             conn.sendall(len(response).to_bytes(2, "big") + response)
         except Exception:
-            continue  # attacker-controlled input must never stop the sink
+            if not logged:
+                # Attacker-controlled input must never stop the sink or vanish.
+                with contextlib.suppress(Exception):
+                    log_unparsed(log, source[0], packet or prefix)
         finally:
             with active_lock:
                 active.discard(conn)
             with contextlib.suppress(OSError):
                 conn.close()
+
+
+def stop_tcp(listener, thread, stopping, active, active_lock):
+    """Stop accepting before snapshotting live connections, then abort them.
+
+    False means a handler is still running and the log may be incomplete.
+    """
+    stopping.set()
+    with contextlib.suppress(OSError):
+        listener.close()
+    if thread.ident is not None:  # ident is None until the thread is started
+        thread.join(SHUTDOWN_SECONDS)
+    with active_lock:
+        pending = list(active)
+    for conn in pending:
+        with contextlib.suppress(OSError):
+            conn.shutdown(socket.SHUT_RDWR)
+    if thread.ident is not None:
+        thread.join(SHUTDOWN_SECONDS)
+    return not thread.is_alive()
 
 
 def main():
@@ -335,13 +408,7 @@ def main():
             )
             tcp_thread.start()
             serve(log, sock, answer, stopping)
-            with active_lock:
-                pending = list(active)
-            for conn in pending:
-                with contextlib.suppress(OSError):
-                    conn.shutdown(socket.SHUT_RDWR)
-            tcp_thread.join(SHUTDOWN_SECONDS)
-            if tcp_thread.is_alive():
+            if not stop_tcp(tcp, tcp_thread, stopping, active, active_lock):
                 print("dns_sink: a TCP handler did not stop", file=sys.stderr)
                 os._exit(1)  # no stopped record; the host must see an incomplete sink
             log.close()
