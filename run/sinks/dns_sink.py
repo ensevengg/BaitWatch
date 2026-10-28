@@ -7,6 +7,8 @@ import binascii
 import contextlib
 import ipaddress
 import json
+import os
+import signal
 import socket
 import sys
 import threading
@@ -20,6 +22,8 @@ MIN_DECODED_BYTES = 4
 MIN_LABEL_CHARS = 8
 PRINTABLE_RATIO = 0.9
 TCP_TIMEOUT = 5.0
+POLL_SECONDS = 0.2
+SHUTDOWN_SECONDS = 1.5
 
 QTYPE_NAMES = {
     1: "A",
@@ -47,33 +51,55 @@ HEX_ALPHABET = set("0123456789abcdefABCDEF")
 
 
 class JsonlLog:
-    """One JSON object per line, flushed immediately; stops logging at the cap."""
+    """One JSON object per line, flushed immediately; stops logging at the cap.
+
+    The UDP and TCP paths write concurrently, so every cap check, append and
+    flush happens under one lock. A failed write kills the process: a clean
+    log prefix must never outlive contacts whose records were lost.
+    """
 
     def __init__(self, file):
         self._file = file
+        self._lock = threading.Lock()
         self._written = 0
         self.truncated = False
+        self._closed = False
 
-    def write(self, record):
-        if self.truncated:
+    def _write_locked(self, record):
+        if self.truncated or self._closed:
             return
         line = json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"
-        if self._written + len(line) > LOG_CAP_BYTES:
-            # The truncation marker must be the last record even if it does not fit.
-            self._file.write(
-                json.dumps(
-                    {"kind": "log_truncated", "ts": time.time()},
-                    ensure_ascii=True,
-                    separators=(",", ":"),
+        try:
+            if self._written + len(line) > LOG_CAP_BYTES:
+                # The truncation marker must be the last record even if it does not fit.
+                self._file.write(
+                    json.dumps(
+                        {"kind": "log_truncated", "ts": time.time()},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
                 )
-                + "\n"
-            )
+                self._file.flush()
+                self.truncated = True
+                return
+            self._file.write(line)
             self._file.flush()
-            self.truncated = True
-            return
-        self._file.write(line)
-        self._file.flush()
-        self._written += len(line)
+            self._written += len(line)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                print(f"dns_sink: cannot write log: {exc}", file=sys.stderr)
+            os._exit(1)
+
+    def write(self, record):
+        with self._lock:
+            self._write_locked(record)
+
+    def close(self):
+        """Acknowledge a graceful stop; no record can follow this one."""
+        with self._lock:
+            self._write_locked({"kind": "stopped", "ts": time.time(), "sink": "dns"})
+            self._closed = True
 
 
 def printable_ratio(data):
@@ -150,7 +176,9 @@ def parse_query(packet):
         offset += length
     if offset + 4 > len(packet):
         return None
-    return packet[12:offset], labels, int.from_bytes(packet[offset : offset + 2], "big")
+    # The echoed question carries its QTYPE and QCLASS; resolvers reject replies without them.
+    qtype = int.from_bytes(packet[offset : offset + 2], "big")
+    return packet[12 : offset + 4], labels, qtype
 
 
 def build_response(query_id, question, qtype, answer):
@@ -189,21 +217,35 @@ def log_query(log, source_ip, packet, parsed):
     )
 
 
-def serve(log, sock, answer):
+def handle_query(log, sock, answer, packet, source):
+    try:
+        parsed = parse_query(packet)
+        if parsed is None:
+            return
+        log_query(log, source[0], packet, parsed)
+        sock.sendto(build_response(packet[:2], parsed[0], parsed[2], answer), source)
+    except Exception:
+        # Attacker-controlled input must never stop the sink; this query is lost.
+        pass
+
+
+def serve(log, sock, answer, stopping):
+    while not stopping.is_set():
+        try:
+            packet, source = sock.recvfrom(PACKET_LIMIT)
+        except TimeoutError:
+            continue
+        except OSError:
+            os._exit(1)  # a dead socket must not look like a clean stop
+        handle_query(log, sock, answer, packet, source)
+    # Datagrams queued when the stop arrived are contacts too; drain them.
+    sock.setblocking(False)
     while True:
         try:
             packet, source = sock.recvfrom(PACKET_LIMIT)
         except OSError:
-            return  # a dead socket ends the sink so the host sees it exit
-        try:
-            parsed = parse_query(packet)
-            if parsed is None:
-                continue
-            log_query(log, source[0], packet, parsed)
-            sock.sendto(build_response(packet[:2], parsed[0], parsed[2], answer), source)
-        except Exception:
-            # Attacker-controlled input must never stop the sink; this query is lost.
-            continue
+            break
+        handle_query(log, sock, answer, packet, source)
 
 
 def read_exact(conn, count):
@@ -216,14 +258,18 @@ def read_exact(conn, count):
     return bytes(data)
 
 
-def serve_tcp(log, listener, answer):
+def serve_tcp(log, listener, answer, stopping, active, active_lock):
     """DNS over TCP on the same port: 2-byte length framing, one query per
     connection, sequentially so a stalled peer cannot pile up handlers."""
-    while True:
+    while not stopping.is_set():
         try:
             conn, source = listener.accept()
+        except TimeoutError:
+            continue
         except OSError:
-            return  # a dead listener ends the sink so the host sees it exit
+            os._exit(1)  # a dead listener must not look like a clean stop
+        with active_lock:
+            active.add(conn)
         try:
             conn.settimeout(TCP_TIMEOUT)
             length = int.from_bytes(read_exact(conn, 2), "big")
@@ -239,6 +285,8 @@ def serve_tcp(log, listener, answer):
         except Exception:
             continue  # attacker-controlled input must never stop the sink
         finally:
+            with active_lock:
+                active.discard(conn)
             with contextlib.suppress(OSError):
                 conn.close()
 
@@ -265,14 +313,35 @@ def main():
     except OSError as exc:
         print(f"dns_sink: cannot bind {args.bind}:{args.port}: {exc}", file=sys.stderr)
         return 1
+    stopping = threading.Event()
+    active: set[socket.socket] = set()
+    active_lock = threading.Lock()
+    signal.signal(signal.SIGTERM, lambda signum, frame: stopping.set())
     try:
         with open(args.log, "a", encoding="utf-8", buffering=1) as log_file:
             log = JsonlLog(log_file)
             # Only after both transports are bound can the host rely on both.
             log.write({"kind": "ready", "ts": time.time(), "sink": "dns"})
             answer = socket.inet_aton(str(address))
-            threading.Thread(target=serve_tcp, args=(log, tcp, answer), daemon=True).start()
-            serve(log, sock, answer)
+            sock.settimeout(POLL_SECONDS)
+            tcp.settimeout(POLL_SECONDS)
+            tcp_thread = threading.Thread(
+                target=serve_tcp,
+                args=(log, tcp, answer, stopping, active, active_lock),
+                daemon=True,
+            )
+            tcp_thread.start()
+            serve(log, sock, answer, stopping)
+            with active_lock:
+                pending = list(active)
+            for conn in pending:
+                with contextlib.suppress(OSError):
+                    conn.shutdown(socket.SHUT_RDWR)
+            tcp_thread.join(SHUTDOWN_SECONDS)
+            if tcp_thread.is_alive():
+                print("dns_sink: a TCP handler did not stop", file=sys.stderr)
+                os._exit(1)  # no stopped record; the host must see an incomplete sink
+            log.close()
     except OSError as exc:
         print(f"dns_sink: cannot write log: {exc}", file=sys.stderr)
         return 1

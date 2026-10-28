@@ -4,6 +4,8 @@ without terminating TLS. Stdlib only; bind-mounted into the sink container."""
 import argparse
 import contextlib
 import json
+import os
+import signal
 import socket
 import sys
 import threading
@@ -20,6 +22,8 @@ PATH_LIMIT = 2048
 BODY_LIMIT = 64 * 1024
 TLS_READ_LIMIT = 16 * 1024
 RAW_LIMIT = 200
+POLL_SECONDS = 0.2
+SHUTDOWN_SECONDS = 1.5
 RESPONSE = (
     b"HTTP/1.1 200 OK\r\n"
     b"Content-Type: text/plain\r\n"
@@ -31,33 +35,55 @@ RESPONSE = (
 
 
 class JsonlLog:
-    """One JSON object per line, flushed immediately; stops logging at the cap."""
+    """One JSON object per line, flushed immediately; stops logging at the cap.
+
+    HTTP, TLS and refusal paths write concurrently, so every cap check, append
+    and flush happens under one lock. A failed write kills the process: a clean
+    log prefix must never outlive contacts whose records were lost.
+    """
 
     def __init__(self, file):
         self._file = file
+        self._lock = threading.Lock()
         self._written = 0
         self.truncated = False
+        self._closed = False
 
-    def write(self, record):
-        if self.truncated:
+    def _write_locked(self, record):
+        if self.truncated or self._closed:
             return
         line = json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n"
-        if self._written + len(line) > LOG_CAP_BYTES:
-            # The truncation marker must be the last record even if it does not fit.
-            self._file.write(
-                json.dumps(
-                    {"kind": "log_truncated", "ts": time.time()},
-                    ensure_ascii=True,
-                    separators=(",", ":"),
+        try:
+            if self._written + len(line) > LOG_CAP_BYTES:
+                # The truncation marker must be the last record even if it does not fit.
+                self._file.write(
+                    json.dumps(
+                        {"kind": "log_truncated", "ts": time.time()},
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
                 )
-                + "\n"
-            )
+                self._file.flush()
+                self.truncated = True
+                return
+            self._file.write(line)
             self._file.flush()
-            self.truncated = True
-            return
-        self._file.write(line)
-        self._file.flush()
-        self._written += len(line)
+            self._written += len(line)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                print(f"http_sink: cannot write log: {exc}", file=sys.stderr)
+            os._exit(1)
+
+    def write(self, record):
+        with self._lock:
+            self._write_locked(record)
+
+    def close(self):
+        """Acknowledge a graceful stop; no record can follow this one."""
+        with self._lock:
+            self._write_locked({"kind": "stopped", "ts": time.time(), "sink": "http"})
+            self._closed = True
 
 
 def first_handshake(buf):
@@ -130,7 +156,10 @@ def read_head(conn):
     """(head, None) once a request head arrives, else (None, raw bytes seen)."""
     buffer = bytearray()
     while b"\r\n\r\n" not in buffer and len(buffer) <= HEAD_LIMIT:
-        chunk = conn.recv(4096)
+        try:
+            chunk = conn.recv(4096)
+        except OSError:
+            break  # a stalled or reset peer still leaves the bytes it sent
         if not chunk:
             break
         buffer.extend(chunk)
@@ -219,7 +248,8 @@ def _log_request(conn, addr, log, lines, parts, body_prefix):
             "host": host,
             "headers": headers,
             "body": body.decode("utf-8", errors="replace"),
-            "body_truncated": content_length > BODY_LIMIT,
+            # A connection that ends early is as truncated as one past the capture cap.
+            "body_truncated": content_length > BODY_LIMIT or len(body) < content_length,
         }
     )
     conn.sendall(RESPONSE)
@@ -253,32 +283,42 @@ class Sink:
         self.log = log
         self._lock = threading.Lock()
         self._active = 0
+        self._connections: set[socket.socket] = set()
+        self._threads: set[threading.Thread] = set()
+        self._stopping = threading.Event()
 
-    def _track(self):
+    def _track(self, conn, thread):
         with self._lock:
-            if self._active >= MAX_CONNECTIONS:
+            if self._stopping.is_set() or self._active >= MAX_CONNECTIONS:
                 return False
             self._active += 1
+            self._connections.add(conn)
+            self._threads.add(thread)
             return True
 
-    def _release(self):
+    def _release(self, conn):
         with self._lock:
             self._active -= 1
+            self._connections.discard(conn)
+            self._threads.discard(threading.current_thread())
 
     def accept_loop(self, listener, handler):
-        while True:
+        while not self._stopping.is_set():
             try:
                 conn, addr = listener.accept()
+            except TimeoutError:
+                continue
             except OSError:
-                return  # a dead listener ends the sink so the host sees it exit
-            if not self._track():
+                os._exit(1)  # a dead listener must not look like a clean stop
+            thread = threading.Thread(target=self._serve, args=(conn, addr, handler), daemon=True)
+            if not self._track(conn, thread):
                 # A dropped contact must stay evidence; the host turns the
                 # refusal into a log problem so the component cannot look complete.
                 self.log.write({"kind": "refused", "ts": time.time(), "source_ip": addr[0]})
                 with contextlib.suppress(OSError):
                     conn.close()
                 continue
-            threading.Thread(target=self._serve, args=(conn, addr, handler), daemon=True).start()
+            thread.start()
 
     def _serve(self, conn, addr, handler):
         try:
@@ -286,9 +326,27 @@ class Sink:
         except Exception:
             pass  # attacker-controlled input must never kill the sink
         finally:
-            self._release()
+            self._release(conn)
             with contextlib.suppress(OSError):
                 conn.close()
+
+    def stop(self):
+        """Abort in-flight reads so their partial evidence is logged within the bound.
+
+        False means a handler is still running and the log may be incomplete.
+        """
+        self._stopping.set()
+        with self._lock:
+            connections = list(self._connections)
+            threads = list(self._threads)
+        for conn in connections:
+            with contextlib.suppress(OSError):
+                conn.shutdown(socket.SHUT_RDWR)
+        for thread in threads:
+            thread.join(SHUTDOWN_SECONDS)
+        with self._lock:
+            remaining = list(self._threads)
+        return not any(thread.is_alive() for thread in remaining)
 
 
 def main():
@@ -305,12 +363,15 @@ def main():
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((args.bind, port))
             sock.listen(MAX_CONNECTIONS)
+            sock.settimeout(POLL_SECONDS)
             listeners.append(sock)
     except OSError as exc:
         for sock in listeners:
             sock.close()
         print(f"http_sink: cannot bind {args.bind}: {exc}", file=sys.stderr)
         return 1
+    stopping = threading.Event()
+    signal.signal(signal.SIGTERM, lambda signum, frame: stopping.set())
     try:
         with open(args.log, "a", encoding="utf-8", buffering=1) as log_file:
             log = JsonlLog(log_file)
@@ -324,8 +385,23 @@ def main():
                 )
                 thread.start()
                 threads.append(thread)
+            while not stopping.is_set() and all(thread.is_alive() for thread in threads):
+                stopping.wait(POLL_SECONDS)
+            if not stopping.is_set():
+                return 1  # a listener died on its own; the host must see a failure
+            handlers_stopped = sink.stop()
             for thread in threads:
-                thread.join()
+                thread.join(SHUTDOWN_SECONDS)
+            if any(thread.is_alive() for thread in threads):
+                print("http_sink: an accept loop did not stop", file=sys.stderr)
+                os._exit(1)
+            for sock in listeners:
+                with contextlib.suppress(OSError):
+                    sock.close()
+            if not handlers_stopped:
+                print("http_sink: a connection handler did not stop", file=sys.stderr)
+                os._exit(1)  # no stopped record; the host must see an incomplete sink
+            log.close()
     except OSError as exc:
         print(f"http_sink: cannot write log: {exc}", file=sys.stderr)
         return 1

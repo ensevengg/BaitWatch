@@ -198,3 +198,41 @@ def test_unparseable_http_contact_maps_to_a_hit(tmp_path):
     assert log.http_hits[0].detail.startswith(" raw=\\x00\\x01binary")
     assert len(log.problems) == 1
     assert "raw is not a string" in log.problems[0]
+
+
+def test_stopped_record_is_parsed(tmp_path):
+    path = write_log(
+        tmp_path / "sink.jsonl",
+        [ready("dns"), {"kind": "stopped", "ts": 1.0, "sink": "dns"}],
+    )
+    log = read_sink_log(path)
+    assert log.ready and log.stopped and not log.problems
+
+
+def test_stopped_record_naming_no_known_sink_is_a_problem(tmp_path):
+    path = write_log(
+        tmp_path / "sink.jsonl",
+        [ready("dns"), {"kind": "stopped", "ts": 1.0, "sink": "mystery"}],
+    )
+    log = read_sink_log(path)
+    assert not log.stopped
+    assert len(log.problems) == 1 and "stopped record names no known sink" in log.problems[0]
+
+
+def test_record_after_the_stopped_marker_is_a_problem(tmp_path):
+    path = write_log(
+        tmp_path / "sink.jsonl",
+        [ready("dns"), {"kind": "stopped", "ts": 1.0, "sink": "dns"}, dns_record()],
+    )
+    log = read_sink_log(path)
+    assert log.stopped
+    assert log.problems == ["line 3: record after the stopped marker"]
+    assert not log.dns_hits
+
+
+def test_log_without_a_trailing_newline_is_a_problem(tmp_path):
+    path = tmp_path / "sink.jsonl"
+    path.write_text('{"kind":"ready","sink":"dns"}', encoding="utf-8")
+    log = read_sink_log(path)
+    assert log.ready
+    assert log.problems == ["sink log ends with a partial line"]

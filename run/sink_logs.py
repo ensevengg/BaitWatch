@@ -22,6 +22,7 @@ class SinkLogLineError(ValueError):
 @dataclass(frozen=True)
 class SinkLog:
     ready: bool = False
+    stopped: bool = False
     truncated: bool = False
     dns_hits: list[NetworkHit] = field(default_factory=list)
     http_hits: list[NetworkHit] = field(default_factory=list)
@@ -100,6 +101,7 @@ def _tls_hit(record) -> NetworkHit:
 
 def read_sink_log(path: Path, *, max_bytes: int = DEFAULT_MAX_BYTES) -> SinkLog:
     ready = False
+    stopped = False
     truncated = False
     dns_hits: list[NetworkHit] = []
     http_hits: list[NetworkHit] = []
@@ -115,8 +117,13 @@ def read_sink_log(path: Path, *, max_bytes: int = DEFAULT_MAX_BYTES) -> SinkLog:
             f"sink log exceeds {max_bytes} bytes; only the first {max_bytes} were parsed"
         )
         data = data[:max_bytes]
+    elif data and not data.endswith(b"\n"):
+        problems.append("sink log ends with a partial line")
     for number, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), 1):
         if not line.strip():
+            continue
+        if stopped:
+            problems.append(f"line {number}: record after the stopped marker")
             continue
         try:
             record = json.loads(line)
@@ -134,6 +141,13 @@ def read_sink_log(path: Path, *, max_bytes: int = DEFAULT_MAX_BYTES) -> SinkLog:
                 problems.append(
                     f"line {number}: ready record names no known sink ({record.get('sink')!r})"
                 )
+        elif kind == "stopped":
+            if record.get("sink") in {"dns", "http"}:
+                stopped = True
+            else:
+                problems.append(
+                    f"line {number}: stopped record names no known sink ({record.get('sink')!r})"
+                )
         elif kind == "log_truncated":
             truncated = True
         elif kind == "refused":
@@ -150,6 +164,7 @@ def read_sink_log(path: Path, *, max_bytes: int = DEFAULT_MAX_BYTES) -> SinkLog:
             problems.append(f"line {number}: unknown kind {kind!r}")
     return SinkLog(
         ready=ready,
+        stopped=stopped,
         truncated=truncated,
         dns_hits=dns_hits,
         http_hits=http_hits,

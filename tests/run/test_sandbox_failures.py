@@ -40,6 +40,25 @@ def requested_subnets(client) -> list[str]:
     ]
 
 
+def stoppable_client(exit_code: int = 0, stops: bool = True):
+    client = fake_client()
+    containers = []
+    for _ in range(2):
+        container = MagicMock()
+        state = {"Status": "running", "ExitCode": None}
+
+        def kill(signal=None, state=state):
+            if stops:
+                state.update({"Status": "exited", "ExitCode": exit_code})
+
+        container.attrs = {"State": state}
+        container.kill.side_effect = kill
+        container.reload.side_effect = lambda: None
+        containers.append(container)
+    client.containers.create.side_effect = containers
+    return client
+
+
 def test_default_subnet_and_addresses_are_preserved_when_free(repo: Path):
     client = fake_client()
     sandbox = Sandbox(repo, client_factory=lambda: client)
@@ -462,16 +481,17 @@ def test_sink_container_that_exits_fails_closed(repo: Path):
 
 def test_dirty_sink_logs_fail_closed_at_collection(repo: Path, monkeypatch):
     monkeypatch.setattr(Sandbox, "_wait_ready", lambda self, container, log, role: None)
-    client = fake_client()
-    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    client = stoppable_client()
     sandbox = Sandbox(repo, client_factory=lambda: client)
     with sandbox:
         sandbox.start_sinks()
         sandbox._sink_logs["dns"].write_text(
-            '{"kind":"ready","sink":"dns"}\nnot-json\n', encoding="utf-8"
+            '{"kind":"ready","sink":"dns"}\nnot-json\n{"kind":"stopped","sink":"dns"}\n',
+            encoding="utf-8",
         )
         sandbox._sink_logs["http"].write_text(
-            '{"kind":"ready","sink":"http"}\n{"kind":"log_truncated","ts":1.0}\n',
+            '{"kind":"ready","sink":"http"}\n'
+            '{"kind":"log_truncated","ts":1.0}\n{"kind":"stopped","sink":"http"}\n',
             encoding="utf-8",
         )
         sandbox.collect_sinks()
@@ -482,6 +502,56 @@ def test_dirty_sink_logs_fail_closed_at_collection(repo: Path, monkeypatch):
     assert components.tls_sink == State.ERROR
     assert not sandbox.evidence.dns_hits and not sandbox.evidence.http_hits
     assert sandbox.evidence.status == "error"
+
+
+def test_sink_without_a_stopped_record_fails_closed(repo: Path, monkeypatch):
+    monkeypatch.setattr(Sandbox, "_wait_ready", lambda self, container, log, role: None)
+    client = stoppable_client()
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.start_sinks()
+        sandbox._sink_logs["dns"].write_text(
+            '{"kind":"ready","sink":"dns"}\n'
+            '{"kind":"dns","ts":1.0,"source_ip":"10.13.37.20","qname":"a.evil.example",'
+            '"qtype":"A","decoded":[]}\n',
+            encoding="utf-8",
+        )
+        sandbox._sink_logs["http"].write_text('{"kind":"ready","sink":"http"}\n', encoding="utf-8")
+        sandbox.collect_sinks()
+    assert [error.code for error in sandbox.evidence.errors] == ["SINK_LOG", "SINK_LOG"]
+    assert "no stopped record" in sandbox.evidence.errors[0].message
+    assert not sandbox.evidence.dns_hits
+    assert sandbox.evidence.components.dns_sink == State.ERROR
+
+
+def test_sink_exiting_nonzero_on_stop_fails_closed(repo: Path, monkeypatch):
+    monkeypatch.setattr(Sandbox, "_wait_ready", lambda self, container, log, role: None)
+    client = stoppable_client(exit_code=1)
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.start_sinks()
+        for role, sink in (("dns", "dns"), ("http", "http")):
+            sandbox._sink_logs[role].write_text(
+                f'{{"kind":"ready","sink":"{sink}"}}\n{{"kind":"stopped","sink":"{sink}"}}\n',
+                encoding="utf-8",
+            )
+        sandbox.collect_sinks()
+    assert [error.code for error in sandbox.evidence.errors] == ["SINK_FAILED", "SINK_FAILED"]
+    assert "exited with code 1" in sandbox.evidence.errors[0].message
+    assert sandbox.evidence.components.http_sink == State.ERROR
+
+
+def test_sink_that_does_not_stop_fails_closed(repo: Path, monkeypatch):
+    monkeypatch.setattr(Sandbox, "_wait_ready", lambda self, container, log, role: None)
+    monkeypatch.setattr("run.sandbox.SINK_STOP_SECONDS", 0.05)
+    client = stoppable_client(stops=False)
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.start_sinks()
+        sandbox.collect_sinks()
+    assert [error.code for error in sandbox.evidence.errors] == ["SINK_FAILED", "SINK_FAILED"]
+    assert "did not stop" in sandbox.evidence.errors[0].message
+    assert sandbox.evidence.components.tls_sink == State.ERROR
 
 
 def test_sink_that_died_before_collection_fails_closed(repo: Path, monkeypatch):
@@ -498,3 +568,73 @@ def test_sink_that_died_before_collection_fails_closed(repo: Path, monkeypatch):
     assert "not running" in sandbox.evidence.errors[0].message
     assert sandbox.evidence.components.tls_sink == State.ERROR
     assert not sandbox.evidence.tls_hits
+
+
+def test_pre_command_trace_error_does_not_block_the_sandbox_state(repo: Path, monkeypatch):
+    client = fake_client()
+    cage = client.containers.create.return_value
+    cage.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+    results = [
+        CommandResult(command=["snapshot"], exit_code=1),
+        CommandResult(command=["true"], exit_code=0),
+    ]
+    monkeypatch.setattr("run.sandbox.capture_attached", lambda *args, **kwargs: results.pop(0))
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        assert not sandbox.trace_before()
+        result = sandbox.run_command(["true"])
+    assert result.exit_code == 0
+    assert [error.code for error in sandbox.evidence.errors] == ["TRACE_FAILED"]
+    assert sandbox.evidence.components.trace == State.ERROR
+    assert sandbox.evidence.components.sandbox == State.COMPLETE
+
+
+def test_staging_leak_stays_visible_when_the_unlock_helper_survives(repo: Path, monkeypatch):
+    client = fake_client()
+    cage = MagicMock()
+    cage.id = "cage"
+    cage.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+    helper = MagicMock()
+    helper.id = "unlock-helper"
+    helper.wait.return_value = {"StatusCode": 0}
+    helper.remove.side_effect = RuntimeError("helper removal failed")
+    client.containers.create.side_effect = [cage, helper]
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    rmtree = MagicMock(side_effect=[OSError("locked"), None])
+    monkeypatch.setattr("run.sandbox.shutil.rmtree", rmtree)
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        assert sandbox.run_command(["true"]).exit_code == 0
+    assert [error.code for error in sandbox.evidence.errors] == [
+        "CONTAINER_CLEANUP",
+        "STAGING_CLEANUP",
+    ]
+    assert "not removed" in sandbox.evidence.errors[1].message
+    assert rmtree.call_count == 1  # no retry while the helper may still hold the tree
+
+
+def test_unlock_helper_with_a_lost_create_reply_is_swept_after_staging(repo: Path, monkeypatch):
+    client = fake_client()
+    cage = MagicMock()
+    cage.id = "cage"
+    cage.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+    stray = MagicMock()
+    stray.id = "unlock-helper-stray"
+    client.containers.create.side_effect = [cage, TimeoutError("create reply lost")]
+    client.containers.list.side_effect = [[], [stray]]
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    rmtree = MagicMock(side_effect=OSError("locked"))
+    monkeypatch.setattr("run.sandbox.shutil.rmtree", rmtree)
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        assert sandbox.run_command(["true"]).exit_code == 0
+    assert [error.code for error in sandbox.evidence.errors] == ["STAGING_CLEANUP"]
+    assert rmtree.call_count == 1
+    stray.remove.assert_called_once()
+    assert client.containers.list.call_count == 2

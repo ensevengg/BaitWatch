@@ -126,3 +126,40 @@ def test_cage_locked_directories_still_clean_up(repo: Path, engine):
     assert ("locked", "added") in changes
     assert not sandbox.staged_path.parent.exists()
     assert_no_leftovers(engine, sandbox.evidence)
+
+
+RESOLVE_CODE = r"""
+import http.client, socket, sys
+http_ip = sys.argv[1]
+addresses = {
+    info[4][0]
+    for info in socket.getaddrinfo("x.evil.example", 80, type=socket.SOCK_STREAM)
+}
+assert addresses == {http_ip}, addresses
+conn = http.client.HTTPConnection("x.evil.example", 80, timeout=5)
+conn.request("GET", "/by-name")
+assert conn.getresponse().status == 200
+conn.close()
+print("RESOLVED")
+"""
+
+
+def test_cage_resolver_gets_the_sink_address_and_connects_by_hostname(repo: Path, engine):
+    sandbox = Sandbox(repo, SandboxConfig(image=PYTHON_IMAGE))
+    with sandbox:
+        sandbox.start_sinks()
+        result = sandbox.run_command(["python", "-c", RESOLVE_CODE, sandbox.http_ip])
+        assert result.exit_code == 0, result.model_dump_json()
+        assert result.stdout == "RESOLVED\n"
+        sandbox.collect_sinks()
+    assert not sandbox.evidence.errors
+    components = sandbox.evidence.components
+    assert components.sandbox == State.COMPLETE
+    assert components.dns_sink == State.COMPLETE
+    assert components.http_sink == State.COMPLETE
+    assert components.tls_sink == State.COMPLETE
+    assert any("x.evil.example" in hit.destination for hit in sandbox.evidence.dns_hits)
+    http = next(hit for hit in sandbox.evidence.http_hits if hit.destination.endswith("/by-name"))
+    assert http.destination == "x.evil.example/by-name"
+    assert http.source_ip == sandbox.cage_ip
+    assert_no_leftovers(engine, sandbox.evidence)

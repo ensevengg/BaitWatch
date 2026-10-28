@@ -27,6 +27,9 @@ SINKS_DIR = Path(__file__).parent / "sinks"
 TRACE_SCRIPT = Path(__file__).parent / "trace.py"
 # A 10k-entry manifest is ~1 MiB; past this bound the snapshot is not trustworthy.
 TRACE_OUTPUT_BYTES = 8 * 1024 * 1024
+# Collection waits this long for a sink to drain in-flight contacts and acknowledge.
+SINK_STOP_SECONDS = 5.0
+SINK_POLL_SECONDS = 0.05
 
 
 class SandboxError(RuntimeError):
@@ -417,33 +420,67 @@ class Sandbox:
         except Exception:
             return False
 
+    def _stop_sink(self, container) -> tuple[bool, int | None]:
+        """Ask a sink to drain and exit; (stopped, exit code) within the bound."""
+        try:
+            container.kill(signal="SIGTERM")
+        except NotFound:
+            pass
+        except Exception:
+            pass  # a reload below decides whether it really stopped
+        deadline = time.monotonic() + SINK_STOP_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                container.reload()
+                state = container.attrs["State"]
+            except Exception:
+                return False, None
+            if state.get("Status") != "running":
+                return True, state.get("ExitCode")
+            time.sleep(SINK_POLL_SECONDS)
+        return False, None
+
+    def _collect_sink(self, role: str) -> tuple[str | None, str | None]:
+        sink_log = read_sink_log(self._sink_logs[role])
+        if not sink_log.ready:
+            return f"{role} sink log has no ready record", "SINK_FAILED"
+        if sink_log.problems:
+            return "; ".join(sink_log.problems), "SINK_LOG"
+        if sink_log.truncated:
+            return f"{role} sink log stopped at its size cap", "SINK_LOG"
+        if not sink_log.stopped:
+            return f"{role} sink log has no stopped record", "SINK_LOG"
+        if role == "dns":
+            self.evidence.dns_hits.extend(sink_log.dns_hits)
+        else:
+            self.evidence.http_hits.extend(sink_log.http_hits)
+            self.evidence.tls_hits.extend(sink_log.tls_hits)
+        return None, None
+
     def collect_sinks(self) -> None:
-        """Read both sink logs into hits; a sink is complete only when it stayed
-        up and its whole log parsed cleanly."""
+        """Stop each sink, then read its log. A component is complete only when
+        the sink acknowledged the stop after draining everything it accepted."""
         for role in ("dns", "http"):
             container = self._sinks.get(role)
             if container is None:
                 continue  # never started, or its start already failed closed
             components = self._sink_components(role)
-            sink_log = read_sink_log(self._sink_logs[role])
-            running = self._container_running(container)
-            if not running:
+            if not self._container_running(container):
                 problem, code = f"{role} sink container is not running at collection", "SINK_FAILED"
-            elif not sink_log.ready:
-                problem, code = f"{role} sink log has no ready record", "SINK_FAILED"
-            elif sink_log.problems:
-                problem, code = "; ".join(sink_log.problems), "SINK_LOG"
-            elif sink_log.truncated:
-                problem, code = f"{role} sink log stopped at its size cap", "SINK_LOG"
             else:
-                if role == "dns":
-                    self.evidence.dns_hits.extend(sink_log.dns_hits)
+                stopped, exit_code = self._stop_sink(container)
+                if not stopped:
+                    problem = f"{role} sink did not stop within {SINK_STOP_SECONDS:g}s"
+                    code = "SINK_FAILED"
+                elif exit_code != 0:
+                    problem = f"{role} sink exited with code {exit_code} after stopping"
+                    code = "SINK_FAILED"
                 else:
-                    self.evidence.http_hits.extend(sink_log.http_hits)
-                    self.evidence.tls_hits.extend(sink_log.tls_hits)
-                for component in components:
-                    setattr(self.evidence.components, component, State.COMPLETE)
-                continue
+                    problem, code = self._collect_sink(role)
+                if problem is None:
+                    for component in components:
+                        setattr(self.evidence.components, component, State.COMPLETE)
+                    continue
             for component in components:
                 setattr(self.evidence.components, component, State.ERROR)
             self.evidence.errors.append(RunError(code=code, message=f"{role}: {problem}"[:1000]))
@@ -525,6 +562,9 @@ class Sandbox:
             raise SandboxError("one command per sandbox; create a new sandbox for another run")
         self._command_started = True
         result = CommandResult(command=list(command))
+        # Sink or trace failures that happened before this command must not
+        # decide whether the command itself ran cleanly.
+        errors_before = len(self.evidence.errors)
         try:
             # Writable so cage file changes can be traced; the original
             # repository is never mounted, only this disposable copy.
@@ -578,9 +618,9 @@ class Sandbox:
                 self._error("COMMAND_TIMEOUT", "command exceeded its execution deadline")
             if result.output_truncated:
                 self._error("OUTPUT_TRUNCATED", "command exceeded its combined output limit")
-            if result.exit_code != 0 and not self.evidence.errors:
+            if result.exit_code != 0 and len(self.evidence.errors) == errors_before:
                 self._error("COMMAND_FAILED", f"container exited with code {result.exit_code}")
-            if not self.evidence.errors:
+            if len(self.evidence.errors) == errors_before:
                 self.evidence.components.sandbox = State.COMPLETE
         except Exception as exc:
             self._error("COMMAND_ERROR", str(exc))
@@ -638,9 +678,13 @@ class Sandbox:
             except Exception as exc:
                 self._error("NETWORK_CLEANUP", str(exc))
 
-    def _unlock_staging(self) -> bool:
+    def _unlock_staging(self) -> tuple[bool, bool]:
         """Let the cage's own uid lift the mode bits it used to lock the staged
-        tree against the host user; symlinks are never followed."""
+        tree against the host user; symlinks are never followed.
+
+        Returns (unlocked, helper removed). A helper whose create reply was lost
+        has no handle here, so it counts as not removed and the caller sweeps.
+        """
         try:
             container = self._create(
                 self.config.sink_image,
@@ -653,34 +697,42 @@ class Sandbox:
                     Mount("/trace/trace.py", str(TRACE_SCRIPT), type="bind", read_only=True),
                 ],
             )
-            try:
-                container.start()
-                status = container.wait(timeout=self.config.timeout_seconds)
-                code = status.get("StatusCode") if isinstance(status, dict) else None
-                return code == 0
-            finally:
-                self._remove_container(container, set())
         except Exception:
-            return False
+            return False, False
+        try:
+            container.start()
+            status = container.wait(timeout=self.config.timeout_seconds)
+            code = status.get("StatusCode") if isinstance(status, dict) else None
+            return code == 0, self._remove_container(container, set())
+        except Exception:
+            return False, self._remove_container(container, set())
 
-    def _remove_staging(self) -> None:
+    def _remove_staging(self) -> bool:
+        """Returns True when an unlock helper was attempted and may need sweeping."""
         try:
             shutil.rmtree(self._temporary)
-            return
+            return False
         except Exception as first:
             error = str(first)
         if not self._command_started:
             self._error("STAGING_CLEANUP", error)
-            return
+            return False
         # The cage's uid can lock directories against the host user; only that
         # uid can lift the mode bits. An error is recorded only if the tree
         # still survives, because that is the only leak there is.
-        if not self._unlock_staging():
+        unlocked, removed = self._unlock_staging()
+        if not unlocked:
             error = f"{error}; the unlock helper failed"
+        if not removed:
+            # Retrying against a helper that is still mounted would only hide
+            # the leak from the label sweep that follows.
+            self._error("STAGING_CLEANUP", f"{error}; the unlock helper was not removed")
+            return True
         try:
             shutil.rmtree(self._temporary)
         except Exception as exc:
             self._error("STAGING_CLEANUP", f"{exc}; {error}")
+        return True
 
     def close(self) -> None:
         if self._closed:
@@ -704,8 +756,12 @@ class Sandbox:
             except Exception as exc:
                 self._error("NETWORK_CLEANUP", str(exc))
         self._sweep_labelled_networks(handled)
-        if self._temporary is not None and all_removed:
-            self._remove_staging()
+        staged = self._temporary is not None and all_removed
+        helper_used = staged and self._remove_staging()
+        # The unlock helper is created after the first sweep, so find one whose
+        # create reply was lost before the scan can end.
+        if helper_used and not self._sweep_labelled_containers(handled):
+            all_removed = False
         if self._client is not None:
             try:
                 self._client.close()

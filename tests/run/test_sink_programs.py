@@ -2,11 +2,14 @@
 
 import base64
 import http.client
+import importlib.util
 import json
+import os
 import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -82,7 +85,7 @@ def dns_sink(tmp_path: Path):
     )
     try:
         wait_for_ready(log, "dns", process)
-        yield {"log": log, "port": port}
+        yield {"log": log, "port": port, "process": process}
     finally:
         stop_sink(process)
 
@@ -110,7 +113,7 @@ def http_sink(tmp_path: Path):
     )
     try:
         wait_for_ready(log, "http", process)
-        yield {"log": log, "http_port": http_port, "tls_port": tls_port}
+        yield {"log": log, "http_port": http_port, "tls_port": tls_port, "process": process}
     finally:
         stop_sink(process)
 
@@ -269,7 +272,8 @@ def test_garbage_on_all_ports_does_not_kill_the_http_sink(http_sink):
             sock.sendall(b"\x00\x01\x02 not-a-request\r\n\r\n")
     status, _ = http_request(http_sink["http_port"], "GET", "/after-garbage")
     assert status == 200
-    assert read_records(http_sink["log"], "http")[-1]["path"] == "/after-garbage"
+    # Garbage contacts are logged by their own worker threads, so order is not guaranteed.
+    assert any(r["path"] == "/after-garbage" for r in read_records(http_sink["log"], "http"))
 
 
 def test_unparseable_tcp_contact_on_the_http_port_is_a_hit(http_sink):
@@ -339,3 +343,183 @@ def test_log_stops_at_the_cap_but_serving_continues(http_sink):
     assert http_sink["log"].read_text() == text  # nothing new was logged after the marker
     status, _ = http_request(http_sink["http_port"], "GET", "/still-alive")
     assert status == 200
+
+
+def build_dns_query(query_id: bytes, name: str, qtype: int = 1) -> bytes:
+    query = query_id + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+    for part in name.split("."):
+        query += bytes([len(part)]) + part.encode()
+    return query + b"\x00" + qtype.to_bytes(2, "big") + b"\x00\x01"
+
+
+def test_dns_response_echoes_the_full_question_and_an_answer_rr(dns_sink):
+    query = build_dns_query(b"\xbe\xef", "full.evil.example")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(SINK_TIMEOUT)
+        sock.sendto(query, ("127.0.0.1", dns_sink["port"]))
+        response, _ = sock.recvfrom(4096)
+    assert response[:2] == b"\xbe\xef"
+    assert response[2:4] == b"\x81\x80"  # QR, RD, RA, NOERROR
+    assert response[4:6] == b"\x00\x01"  # QDCOUNT
+    assert response[6:8] == b"\x00\x01"  # ANCOUNT
+    assert response[8:12] == b"\x00\x00\x00\x00"
+    question = query[12:]
+    assert question.endswith(b"\x00\x01\x00\x01")  # QTYPE A, QCLASS IN
+    assert response[12 : 12 + len(question)] == question
+    answer = response[12 + len(question) :]
+    assert answer == (
+        b"\xc0\x0c"
+        + b"\x00\x01"  # type A
+        + b"\x00\x01"  # class IN
+        + (30).to_bytes(4, "big")  # the sink's answer TTL
+        + b"\x00\x04"
+        + socket.inet_aton(SINK_ANSWER)
+    )
+
+
+def test_dns_sink_stop_is_acknowledged(dns_sink):
+    process = dns_sink["process"]
+    process.terminate()
+    assert process.wait(timeout=SINK_TIMEOUT) == 0
+    record = json.loads(dns_sink["log"].read_text().splitlines()[-1])
+    assert (record["kind"], record["sink"]) == ("stopped", "dns")
+
+
+def test_http_sink_stop_is_acknowledged(http_sink):
+    process = http_sink["process"]
+    process.terminate()
+    assert process.wait(timeout=SINK_TIMEOUT) == 0
+    record = json.loads(http_sink["log"].read_text().splitlines()[-1])
+    assert (record["kind"], record["sink"]) == ("stopped", "http")
+
+
+def test_http_contact_that_stalls_mid_head_is_still_logged(http_sink):
+    raw = b"GET /stalled HTTP/1.1\r\nHost: stall.evil.example"
+    with socket.create_connection(
+        ("127.0.0.1", http_sink["http_port"]), timeout=SINK_TIMEOUT
+    ) as sock:
+        sock.sendall(raw)
+        deadline = time.monotonic() + SINK_TIMEOUT
+        hits = []
+        while time.monotonic() < deadline and not hits:
+            hits = [
+                record
+                for record in read_records(http_sink["log"], "http")
+                if "/stalled" in record.get("raw", "")
+            ]
+            time.sleep(0.1)
+    assert hits, "a stalled partial request was never logged"
+    assert hits[-1]["method"] == "" and hits[-1]["path"] == ""
+    assert hits[-1]["raw"].startswith("GET /stalled HTTP/1.1")
+
+
+def test_tls_contact_that_stalls_mid_clienthello_is_still_logged(http_sink):
+    partial = b"\x16\x03\x01\x00\x20\x01"  # promises 32 handshake bytes, sends 1
+    with socket.create_connection(
+        ("127.0.0.1", http_sink["tls_port"]), timeout=SINK_TIMEOUT
+    ) as sock:
+        sock.sendall(partial)
+        deadline = time.monotonic() + SINK_TIMEOUT
+        hits = []
+        while time.monotonic() < deadline and not hits:
+            hits = read_records(http_sink["log"], "tls")
+            time.sleep(0.1)
+    assert hits, "a stalled partial ClientHello was never logged"
+    assert hits[-1]["sni"] is None
+
+
+def test_body_shorter_than_content_length_is_marked_truncated(http_sink):
+    with socket.create_connection(
+        ("127.0.0.1", http_sink["http_port"]), timeout=SINK_TIMEOUT
+    ) as sock:
+        sock.sendall(
+            b"POST /early HTTP/1.1\r\nHost: early.evil.example\r\nContent-Length: 100\r\n\r\nhello"
+        )
+        sock.shutdown(socket.SHUT_WR)
+        while sock.recv(4096):
+            pass
+    hit = next(
+        record for record in read_records(http_sink["log"], "http") if record["path"] == "/early"
+    )
+    assert hit["body"] == "hello"
+    assert hit["body_truncated"] is True
+
+
+def load_sink_module(script: str):
+    spec = importlib.util.spec_from_file_location(script.removesuffix(".py"), SINKS / script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("script", ["dns_sink.py", "http_sink.py"])
+def test_log_writer_serializes_concurrent_writers_and_keeps_the_marker_last(
+    tmp_path: Path, monkeypatch, script
+):
+    module = load_sink_module(script)
+    monkeypatch.setattr(module, "LOG_CAP_BYTES", 20_000)
+    kind = "dns" if script == "dns_sink.py" else "http"
+    barrier = threading.Barrier(8, timeout=SINK_TIMEOUT)
+    path = tmp_path / "sink.jsonl"
+
+    with open(path, "w", encoding="utf-8") as file:
+        log = module.JsonlLog(file)
+
+        def worker(index):
+            barrier.wait()
+            for number in range(100):
+                log.write({"kind": kind, "ts": float(number), "worker": index, "pad": "x" * 200})
+
+        threads = [threading.Thread(target=worker, args=(index,)) for index in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(SINK_TIMEOUT)
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records[-1]["kind"] == "log_truncated"
+    assert sum(record["kind"] == "log_truncated" for record in records) == 1
+    assert all(record["kind"] in {kind, "log_truncated"} for record in records)
+
+
+@pytest.mark.parametrize("script", ["dns_sink.py", "http_sink.py"])
+def test_log_write_failure_kills_the_sink(tmp_path: Path, script):
+    fifo = tmp_path / "sink.fifo"
+    os.mkfifo(fifo)
+    ready: list[str] = []
+
+    def take_ready_line():
+        with open(fifo, encoding="utf-8") as pipe:
+            ready.append(pipe.readline())
+
+    reader = threading.Thread(target=take_ready_line, daemon=True)
+    reader.start()
+    dns_port, http_port, tls_port = free_port(udp=True), free_port(udp=False), free_port(udp=False)
+    command = [sys.executable, str(SINKS / script), "--log", str(fifo), "--bind", "127.0.0.1"]
+    if script == "dns_sink.py":
+        command += ["--answer", SINK_ANSWER, "--port", str(dns_port)]
+    else:
+        command += ["--http-port", str(http_port), "--tls-port", str(tls_port)]
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + SINK_TIMEOUT
+        while not ready and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready and json.loads(ready[0])["kind"] == "ready"
+        reader.join(timeout=SINK_TIMEOUT)  # the reader is gone; the next write must fail
+        assert not reader.is_alive()
+        if script == "dns_sink.py":
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.sendto(
+                    build_dns_query(b"\x01\x02", "logfail.evil.example"),
+                    ("127.0.0.1", dns_port),
+                )
+        else:
+            with pytest.raises((OSError, http.client.HTTPException)):
+                http_request(http_port, "GET", "/logfail")
+        assert process.wait(timeout=SINK_TIMEOUT) != 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=SINK_TIMEOUT)
+        reader.join(timeout=SINK_TIMEOUT)
