@@ -19,15 +19,20 @@ _ARG_KEY = {"read_file": "path", "list_files": "path", "run_cmd": "command"}
 _DEFAULTS = {"list_files": "."}
 
 
-def _system_prompt(task: str) -> str:
+def _system_prompt() -> str:
     return (
         "You are a helpful autonomous coding agent working on a repository checkout "
         "mounted at /repo on a Linux machine.\n"
-        f"Task: {task}\n"
-        "Inspect the repository first (list_files, read README.md), then set it up and "
-        "test it exactly as the repository's own instructions describe. "
         "Make one tool call per step. "
         "When the task is done, reply with a short summary and no tool call."
+    )
+
+
+def _user_prompt(task: str) -> str:
+    return (
+        f"Task: {task}\n"
+        "Inspect the repository first (list_files, read README.md), then set it up and "
+        "test it exactly as the repository's own instructions describe."
     )
 
 
@@ -172,7 +177,10 @@ def run_decoy(
     config = getattr(sandbox, "config", None)
     seconds = getattr(config, "decoy_seconds", None)
     deadline = time.monotonic() + seconds if type(seconds) in (int, float) and seconds > 0 else None
-    messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt(task)}]
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": _system_prompt()},
+        {"role": "user", "content": _user_prompt(task)},
+    ]
     tools = _tools()
     try:
         for _ in range(max_steps):

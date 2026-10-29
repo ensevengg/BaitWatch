@@ -82,8 +82,15 @@ def test_tool_calls_dispatch_through_sandbox_exec():
     assert sandbox.evidence.components.decoy == State.COMPLETE
     assert not sandbox.evidence.errors
     messages, tools = backend.turns[1]
-    assert [entry["role"] for entry in messages] == ["system", "assistant", "tool", "tool", "tool"]
-    assert [entry["content"] for entry in messages[2:]] == ["(no output)"] * 3
+    assert [entry["role"] for entry in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+        "tool",
+    ]
+    assert [entry["content"] for entry in messages[3:]] == ["(no output)"] * 3
     assert [entry["function"]["name"] for entry in tools] == [
         "read_file",
         "list_files",
@@ -91,14 +98,16 @@ def test_tool_calls_dispatch_through_sandbox_exec():
     ]
 
 
-def test_system_prompt_carries_the_task():
+def test_first_request_has_system_role_then_the_task_as_user():
     backend = FakeBackend(LLMReply(text="done"))
     run_decoy(FakeSandbox(), backend, task="audit the lockfile")
     messages, _ = backend.turns[0]
-    assert "audit the lockfile" in messages[0]["content"]
+    assert [entry["role"] for entry in messages[:2]] == ["system", "user"]
+    assert "audit the lockfile" in messages[1]["content"]
+    assert "audit the lockfile" not in messages[0]["content"]
     default = FakeBackend(LLMReply(text="done"))
     run_decoy(FakeSandbox(), default)
-    assert DEFAULT_TASK in default.turns[0][0][0]["content"]
+    assert DEFAULT_TASK in default.turns[0][0][1]["content"]
 
 
 def test_unknown_tool_is_logged_and_reported_without_exec():
@@ -113,7 +122,7 @@ def test_unknown_tool_is_logged_and_reported_without_exec():
     assert entry.command == ["rm_rf"]
     assert "unknown tool" in entry.stderr
     messages, _ = backend.turns[1]
-    assert messages[2]["content"].startswith("tool error: unknown tool")
+    assert messages[3]["content"].startswith("tool error: unknown tool")
     assert sandbox.evidence.components.decoy == State.COMPLETE
 
 
@@ -149,7 +158,7 @@ def test_feedback_is_truncated_for_the_model_but_logged_in_full():
     run_decoy(sandbox, backend)
     assert sandbox.evidence.tool_log[0].stdout == "x" * 50_000
     messages, _ = backend.turns[1]
-    content = messages[2]["content"]
+    content = messages[3]["content"]
     assert content.startswith("x" * FEEDBACK_CHARS)
     assert "[truncated" in content
     assert len(content) < FEEDBACK_CHARS + 200
@@ -163,8 +172,8 @@ def test_stderr_and_exit_code_reach_the_model():
     )
     run_decoy(sandbox, backend)
     messages, _ = backend.turns[1]
-    assert "boom" in messages[2]["content"]
-    assert "exit code 1" in messages[2]["content"]
+    assert "boom" in messages[3]["content"]
+    assert "exit code 1" in messages[3]["content"]
 
 
 def test_llm_error_fails_the_decoy_closed():
@@ -403,7 +412,7 @@ def test_run_decoy_ends_complete_or_fails_closed_for_arbitrary_model_behaviour()
             reply = self.replies[min(self.index, len(self.replies) - 1)]
             self.index += 1
             for message in messages:
-                assert message["role"] in {"system", "assistant", "tool"}
+                assert message["role"] in {"system", "user", "assistant", "tool"}
             return reply
 
     rng = random.Random(20261030)
