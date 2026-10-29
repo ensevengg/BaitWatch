@@ -1,3 +1,4 @@
+import random
 import socket
 import struct
 import sys
@@ -315,3 +316,76 @@ def test_capture_exec_start_obeys_an_absolute_deadline(monkeypatch, start_delay)
         assert isinstance(failure, TimeoutError)
     else:
         assert failure is None
+
+
+def test_start_exec_turns_any_response_into_a_stream_or_a_handled_failure(monkeypatch):
+    # hypothesis is not installed, so a seeded stdlib generator sweeps the
+    # response-byte domain instead; no dependency may be added for this.
+    from run import capture
+
+    rng = random.Random(20261029)
+    status_lines = [
+        b"HTTP/1.1 101 UPGRADED",
+        b"HTTP/1.1 200 OK",
+        b"HTTP/1.0 200",
+        b"HTTP/2 101",
+        b"HTTP/1.1 404",
+        b"HTTP/1.1 404 no exec",
+        b"HTTP/1.1",
+        b"garbage",
+    ]
+    header_lines = [
+        b"Content-Type: application/vnd.docker.raw-stream",
+        b"Connection: Upgrade",
+        b"Upgrade: tcp",
+        b"Transfer-Encoding: chunked",
+        b"transfer-encoding:identity",
+        b"X-Junk: \x00\xff",
+    ]
+
+    class ResponseOnlyApi:
+        # only _url runs; the socket comes from the patched _connect_exec_socket
+        def _url(self, fmt, *args):
+            return "http+docker://localhost/v1.45" + fmt.format(*args)
+
+    def expects_stream(response: bytes) -> bool:
+        cut = response.find(b"\r\n\r\n")
+        if cut == -1:
+            return False
+        lines = response[: cut + 4].split(b"\r\n")
+        status = lines[0].split()
+        return (
+            len(status) >= 2
+            and status[0] in (b"HTTP/1.0", b"HTTP/1.1")
+            and status[1] in (b"101", b"200")
+            and not any(line.lower().startswith(b"transfer-encoding:") for line in lines[1:])
+        )
+
+    for _ in range(150):
+        parts = [rng.choice(status_lines), b"\r\n"]
+        for _ in range(rng.randrange(4)):
+            parts.append(rng.choice(header_lines) + b"\r\n")
+        if rng.random() < 0.85:
+            parts.append(b"\r\n")
+        parts.append(rng.randbytes(rng.randrange(64)))
+        response = b"".join(parts)
+
+        peer, end = socket.socketpair()
+        monkeypatch.setattr("run.capture._connect_exec_socket", lambda *args, sock=end: sock)
+        # Half-close only: the peer must stay readable for the request sendall,
+        # so a full close cannot be mistaken for a handled transport failure.
+        peer.sendall(response)
+        peer.shutdown(socket.SHUT_WR)
+        try:
+            stream = capture._start_exec(ResponseOnlyApi(), "exec-1", time.monotonic() + 5)
+        except (ValueError, ConnectionError):
+            assert not expects_stream(response)
+            assert end.fileno() == -1  # a rejected response still closes the socket
+        else:
+            assert expects_stream(response)
+            assert stream.gettimeout() == 0.0  # handed back ready for the selector
+            capture._close_stream(stream)
+        finally:
+            peer.close()
+            if end.fileno() != -1:
+                end.close()
