@@ -115,6 +115,20 @@ def test_dynamic_host_under_example_is_allowed(tmp_path: Path) -> None:
     assert _lint_one(tmp_path, "ok.js", body) == []
 
 
+def test_placeholder_at_the_end_cannot_hide_a_real_suffix(tmp_path: Path) -> None:
+    """``evil.example${TAIL}`` ends wherever TAIL says, e.g. ``.com``."""
+    body = "fetch(`https://evil.example${TAIL}/x`)\n"
+    violations = _lint_one(tmp_path, "bad.js", body)
+    assert any(v.kind == "url" for v in violations)
+
+
+def test_fixed_suffix_after_the_last_placeholder_decides(tmp_path: Path) -> None:
+    # The tail after the last placeholder is fixed and inside .example.
+    assert _lint_one(tmp_path, "ok.js", "fetch(`https://evil.example${TAIL}.example/x`)\n") == []
+    # A fixed-looking prefix does not help when the tail is empty.
+    assert _lint_one(tmp_path, "bad.js", "fetch(`https://evil.example${TAIL}`)\n")
+
+
 def test_reversed_sandbox_domain_is_allowed_but_reversed_real_is_not() -> None:
     from attacks.lint import _allowed_domain
 

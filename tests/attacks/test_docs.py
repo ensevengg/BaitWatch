@@ -36,6 +36,8 @@ def test_hook_docs_cover_fail_closed_and_bypass() -> None:
     assert "fail" in text.lower()
     assert "UserPromptSubmit" in text
     assert "PreToolUse" in text
+    assert "-I -m hooks approve" in text
+    assert "2.1.295" in text
 
 
 def test_attack_readme_names_prior_work_without_a_url() -> None:

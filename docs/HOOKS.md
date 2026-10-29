@@ -38,9 +38,10 @@ not overwritten.
 `--claude-version` is a hard gate: fail-closed hook timeouts need Claude Code
 **2.1.295 or later**, so an older host is refused with exit 2 instead of
 silently installing a hook that can time out open. When the flag is omitted the
-installer asks `claude --version` (or `BAITWATCH_CLAUDE_VERSION`) and refuses an
-old host; if the CLI cannot be found it prints a warning and installs, so
-headless bootstrap still works.
+installer asks `claude --version` (or `BAITWATCH_CLAUDE_VERSION`); if that
+detection fails it **refuses** with exit 2 and asks for an explicit
+`--claude-version`, because an unknown host cannot be assumed to honour
+`onFailure: block`.
 
 The generated hook entries look like this:
 
@@ -125,7 +126,7 @@ Output, Claude Code format:
 | Gate | Verdict | Output |
 |---|---|---|
 | A | block | `{"decision":"block","reason":"..."}` |
-| A | ask | `{"decision":"block","reason":"… run `python -m hooks approve` …"}` |
+| A | ask | `{"decision":"block","reason":"… run `\"<installed python>\" -I -m hooks approve --minutes 15` …"}` |
 | A | allow | `{}` |
 | B | block | `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}` |
 | B | ask | same with `permissionDecision":"ask"` |
@@ -133,7 +134,9 @@ Output, Claude Code format:
 
 `UserPromptSubmit` has no ASK verdict, and an exit-0 hook runs the prompt. So a
 Gate A ask is emitted as a **block** whose reason states exactly how to approve
-and retry. A block caused by prompt risk is never approvable.
+and retry. The printed command uses the installed interpreter and `-I`, so
+following the hook's advice cannot import a `hooks` package or `json.py` from
+the guarded checkout. A block caused by prompt risk is never approvable.
 
 `--host generic` prints BaitWatch's own record instead:
 `{"gate":"B","verdict":"block","source":"repo","files":[...],"duration_ms":42.1,...}`.
@@ -195,16 +198,19 @@ A Gate A ask is a block that can be lifted by an explicit, fingerprint-bound
 approval:
 
 ```bash
-python -m hooks approve --minutes 15      # approve the current project root
-python -m hooks approve --repo PATH
-python -m hooks approve --revoke
+"<installed python>" -I -m hooks approve --minutes 15   # approve the current root
+"<installed python>" -I -m hooks approve --repo PATH
+"<installed python>" -I -m hooks approve --revoke
 ```
 
-The approval is stored in `~/.cache/baitwatch/approvals.json` and bound to a
-content fingerprint of the whole scanned tree. Editing, adding or deleting any
-file invalidates it, and it expires (`BAITWATCH_APPROVAL_TTL`, default 900 s).
-A prompt-risk block, an unresolved root, or a non-approvable error is never
-lifted by an approval.
+The Gate A block prints this command with the interpreter that installed the
+hook. Keep `-I`: without it, a hostile checkout's `hooks` package or `json.py`
+could run before the approval is checked. The approval is stored in
+`~/.cache/baitwatch/approvals.json` and bound to a content fingerprint of the
+whole scanned tree, including files READ reaches through in-repo symlinks.
+Editing, adding or deleting any such file invalidates it, and it expires
+(`BAITWATCH_APPROVAL_TTL`, default 900 s). A prompt-risk block, an unresolved
+root, or a non-approvable error is never lifted by an approval.
 
 ## Cache and the three-second target
 

@@ -19,6 +19,7 @@ import contextlib
 import hashlib
 import json
 import os
+import stat
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -36,7 +37,10 @@ __all__ = [
 DEFAULT_TTL = 600.0
 DEFAULT_APPROVAL_TTL = 900.0
 MAX_FINGERPRINT_FILES = 4_000
+MAX_FINGERPRINT_DIRS = 4_000
 MAX_FINGERPRINT_BYTES = 8 * 1024 * 1024
+# Mirrors read.config.WalkerConfig.excluded_dirs: a directory READ never scans
+# must not be fingerprinted either, so the key changes only when the scan can.
 _SKIP_DIRS = {
     ".git",
     ".hg",
@@ -51,6 +55,9 @@ _SKIP_DIRS = {
     "node_modules",
     "dist",
     "build",
+    ".next",
+    ".parcel-cache",
+    "target",
 }
 
 
@@ -68,20 +75,78 @@ def default_approval_path() -> Path:
     return Path.home() / ".cache" / "baitwatch" / "approvals.json"
 
 
+def _within(root: Path, target: Path) -> bool:
+    try:
+        target.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def _walk_files(root: Path) -> list[tuple[str, Path]]:
+    """Every file READ can reach, including through in-repo symlinks.
+
+    READ follows directory links whose resolved target stays inside the repo,
+    even when the target is an excluded build dir (``.cursor/rules`` ->
+    ``dist/rules``), so the fingerprint has to follow them too.  Otherwise an
+    edit to the linked instruction file would keep a cached ALLOW and an
+    approval alive.  Links that leave the repo are skipped exactly as READ
+    skips them, and a resolved-directory set cuts loops.
+    """
+    root = root.resolve()
     files: list[tuple[str, Path]] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(name for name in dirnames if name not in _SKIP_DIRS)
-        for name in sorted(filenames):
-            path = Path(dirpath) / name
+    seen_dirs: set[str] = set()
+    stack: list[tuple[Path, str]] = [(root, "")]
+    while stack:
+        logical, rel_dir = stack.pop()
+        try:
+            key = str(logical.resolve())
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"cannot resolve {logical}") from exc
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        if len(seen_dirs) > MAX_FINGERPRINT_DIRS:
+            raise ValueError("too many directories")
+        try:
+            with os.scandir(logical) as entries:
+                names = sorted(entry.name for entry in entries)
+        except OSError as exc:
+            raise ValueError(f"cannot read {logical}") from exc
+        for name in names:
+            full = logical / name
+            rel = f"{rel_dir}/{name}" if rel_dir else name
             try:
-                rel = path.relative_to(root).as_posix()
-            except ValueError:
-                rel = path.as_posix()
-            files.append((rel, path))
+                info = full.lstat()
+            except OSError as exc:
+                raise ValueError(f"cannot stat {rel}") from exc
+            if stat.S_ISLNK(info.st_mode):
+                try:
+                    target = full.resolve(strict=True)
+                except (OSError, RuntimeError) as exc:
+                    raise ValueError(f"broken symlink {rel}") from exc
+                if not _within(root, target):
+                    continue  # READ never scans outside the repo
+                if target.is_dir():
+                    # READ applies the excluded-name rule to the link name,
+                    # not to the (possibly excluded) target.
+                    if name in _SKIP_DIRS:
+                        continue
+                    stack.append((full, rel))
+                    continue
+                if not target.is_file():
+                    continue
+            elif stat.S_ISDIR(info.st_mode):
+                if name in _SKIP_DIRS:
+                    continue
+                stack.append((full, rel))
+                continue
+            elif not stat.S_ISREG(info.st_mode):
+                continue
+            files.append((rel, full))
             if len(files) > MAX_FINGERPRINT_FILES:
                 raise ValueError("too many files")
-    return files
+    return sorted(files)
 
 
 def repo_fingerprint(repo: str | Path, *, exclude: list[str | Path] | None = None) -> str | None:
@@ -93,29 +158,32 @@ def repo_fingerprint(repo: str | Path, *, exclude: list[str | Path] | None = Non
     root = Path(repo)
     if not root.is_dir():
         return None
+    root = root.resolve()
     excluded = {Path(item).resolve() for item in (exclude or [])}
     try:
         files = _walk_files(root)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
         return None
     digest = hashlib.sha256()
     total = 0
     for rel, path in files:
         try:
-            if path.resolve() in excluded:
+            resolved = path.resolve()
+            if resolved in excluded:
                 continue
-            stat = path.lstat()
             if path.is_symlink():
+                # Hash the link text and the content READ actually reads
+                # through it, so editing the target invalidates the key.
                 digest.update(f"{rel}\0link\0{os.readlink(path)}\0".encode())
+            info = resolved.stat()
+            if not stat.S_ISREG(info.st_mode):
                 continue
-            if not path.is_file():
-                continue
-            size = stat.st_size
+            size = info.st_size
             total += size
             if total > MAX_FINGERPRINT_BYTES:
                 return None
-            digest.update(f"{rel}\0{size}\0{stat.st_mtime_ns}\0".encode())
-            with open(path, "rb") as handle:
+            digest.update(f"{rel}\0{size}\0{info.st_mtime_ns}\0".encode())
+            with open(resolved, "rb") as handle:
                 while chunk := handle.read(1024 * 1024):
                     digest.update(chunk)
         except OSError:

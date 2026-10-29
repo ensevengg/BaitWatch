@@ -7,9 +7,11 @@
 **Report date:** 2026-10-29
 **Local commits:** `843282c`, `334df98`, `78e3ad5`, `cb2d012`, `0bd106c`,
 `c30cab9`, `3a029a5`, `228a1ae`, `52c3e32`, `acea601`, `9e4ce3e`, `72b2af6`,
-`b5622c8`, `6d9a59e`, and `ace52f7` (the PR #13 review fixes). The tree was
-rebased onto `origin/main` twice (first onto `f9f7083`, then onto `1b8d7b8` after
-PR #10 merged), so the hashes differ from the pre-rebase report.
+`b5622c8`, `6d9a59e`, `ace52f7` (round-2 review fixes), plus the round-3
+review-fix commit described in §18.3, which is local and not yet pushed. The
+tree was rebased onto `origin/main` twice (first onto `f9f7083`, then onto
+`1b8d7b8` after PR #10 merged), so the hashes differ from the pre-rebase
+report.
 
 This report is the audit trail for the ATTACK side: every file, every contract,
 every command, and the exact verification result. Open it in Cursor with
@@ -46,8 +48,12 @@ require the fine-tuned READ checkpoint or the training corpus.
 | De-Caffeinator credit without external URLs | root README + `attacks/README.md` | `test_attack_readme_names_prior_work_without_a_url` |
 
 **Test result on this machine:** `python -m pytest tests/attacks -q` →
-`217 passed`, `0 failed`. Node 22 is present, so the runtime-execution test
-ran; on a machine without `node` those three tests skip by design.
+`226 passed, 4 skipped`, `0 failed` (230 collected). The four skips are the
+symlink tests: this Windows account cannot create symlinks
+(`WinError 1314`), so they run on POSIX CI; the same logic was additionally
+executed under WSL Ubuntu against freshly built symlink fixtures. Node 22 is
+present, so the runtime-execution test ran; on a machine without `node` those
+three tests skip by design.
 
 The former skip (`test_read_scanner_is_lazy_without_torch`) is gone. It was
 rewritten as `test_read_scanner_reports_a_missing_dependency`, which blocks
@@ -75,7 +81,8 @@ cb2d012  fix(attacks): forward --help to the subcommand
 `git status --short` is clean after the report commit above. The work was
 rebased onto `origin/main` twice, then the PR #13 review fixes were added as one
 more commit. It is pushed as `aditya/attack-slice`, and PR #13 is open with CI
-green on the review-fix commit (see §17 and §19.1).
+green on `ace52f7`. The round-3 fixes in §18.3 are local and not pushed yet, so
+they have no CI run.
 
 ### 2.1 Files changed in the existing tree
 
@@ -177,17 +184,17 @@ Generated tree size: **57 files** (`build.build_tree()`), of which
 | `test_cli.py` | 2 | `--help` reaches the subcommand, top-level help |
 | `test_decoders.py` | 14 | plugin registration, each channel, budget exhaustion, builtin drift |
 | `test_docs.py` | 5 | docs exist, demo under 3:00, hook docs, credit |
-| `test_hardening.py` | 31 | the PR #13 review findings, one test group per comment |
+| `test_hardening.py` | 41 | the PR #13 review findings, one test group per comment |
 | `test_harness.py` | 13 | staging, recall, extras, incomplete, recovery, CLI |
 | `test_hooks.py` | 38 | tool policy, gates, cache, installer, CLI, timing |
 | `test_leakage.py` | 16 | exact/embedded/fuzzy, skip, parquet, incomplete, exit 2 |
-| `test_lint.py` | 17 | URL/domain/IP/key/.env rules, every scheme, dynamic hosts |
+| `test_lint.py` | 19 | URL/domain/IP/key/.env rules, every scheme, dynamic hosts |
 | `test_manifests.py` | 15 | schema, hashes, spans, neutrality, coverage |
-| `test_publication.py` | 8 | repo-wide personal-path check and its exemptions |
+| `test_publication.py` | 9 | repo-wide personal-path check and its exemptions |
 | `test_repos.py` | 13 | 5 repos, markers, recovery, layers, encodings |
 | `test_runtime_payloads.py` | 3 | Node executes the JS eval chain; every generated `.js` parses |
 | `test_transforms.py` | 36 | round trip per transform, invisibility, bidi, escapes, budgets |
-| **Total** | **217** | |
+| **Total** | **230** | |
 
 ### 4.4 Other new paths
 
@@ -624,12 +631,13 @@ selftest: 11/11
 
 ```text
 $ python -m pytest tests/attacks -q
-217 passed
+226 passed, 4 skipped
 ```
 
-No test is skipped on a machine with Node 22: the runtime-eval tests execute the
-generated JavaScript with stubbed `https`/`fs`. Without `node`, those three
-tests skip. The per-file split is in §4.3.
+No test is skipped on a machine with Node 22 except the four symlink tests on
+Windows without symlink privilege; the runtime-eval tests execute the generated
+JavaScript with stubbed `https`/`fs`. Without `node`, those three tests skip.
+The per-file split is in §4.3.
 
 READ-side tests that the change touches:
 
@@ -854,16 +862,21 @@ Use this as a file-by-file read. Each item names the exact symbol or assertion.
       `import read`; enforces input and work budgets.
 - [ ] `hooks/guard.py` — `error_decision` default is `block` and normalizes the
       gate label; `.env.example` is excluded by `_SECRET`; `gate_b`
-      short-circuits on a repo block; `resolve_project_root` walks upward and
-      never adopts home; `_url_host` reads `.hostname` **and** `.port`.
+      short-circuits on a repo block; `resolve_project_root` walks upward for a
+      marker **or a README-only root**, and never adopts home; `_url_host` reads
+      `.hostname` **and** `.port`.
 - [ ] `hooks/cache.py` — key includes `repo_head`, the content fingerprint
-      (tracked and untracked) and the scanner config; a missing fingerprint
-      returns `None`; `ApprovalStore` is fingerprint- and TTL-bound.
+      (tracked, untracked, and content behind in-repo symlinks) and the scanner
+      config; outside links are skipped and loops are cut; a missing
+      fingerprint returns `None`; `ApprovalStore` is fingerprint- and TTL-bound.
 - [ ] `hooks/install.py` — merge keeps unrelated hooks/env; invalid JSON
       raises; atomic replace; emits `-I -m hooks` and `onFailure: "block"`;
-      refuses Claude Code `< 2.1.295`.
-- [ ] `hooks/cli.py` — Gate A ask becomes a blocking decision; the internal
+      refuses an unknown version and Claude Code `< 2.1.295`.
+- [ ] `hooks/cli.py` — Gate A ask becomes a blocking decision whose printed
+      approval command uses the installed interpreter and `-I`; the internal
       deadline prints a deny before the host's 30 s timeout.
+- [ ] `attacks/lint.py` — a dynamic host is accepted only when the fixed text
+      after its **last** placeholder ends in `.example` (or is a sink IP).
 - [ ] `demo/run_demo.sh` — no writes outside `TMPDIR`; installer uses
       `--dry-run`; `BAITWATCH_HOOK_SCANNER=keyword`.
 
@@ -979,9 +992,10 @@ Exit codes:
 
 | Check | Result |
 |---|---|
-| `git status` | clean after the review-fix commit `ace52f7` |
+| `git status` | clean after the round-3 review fixes (local commit) |
 | branch | `main` = `origin/aditya/attack-slice`; PR #13 open |
 | CI | `ace52f7` green: runs `40789984001` and `40789987188`, both jobs `pass` |
+| round-2 commit | local; not pushed at the time of writing, so it has no CI run yet |
 | ruff check | pass |
 | ruff format check | 61 files formatted |
 | generated tree | 57 files, no drift |
@@ -989,9 +1003,10 @@ Exit codes:
 | publication check | clean |
 | READ gate | 5/5 repos, 20/20 payloads recovered |
 | RUN coverage gate | 5/5 repos |
-| tests | 217 passed |
+| tests | 230 collected: 226 passed, 4 symlink tests skipped on this Windows host |
 | READ judge/config | 32 passed |
 | READ decoders | 27 passed |
+| Windows ledger test | 3 ledger tests pass (`msvcrt` sidecar lock, 58 s) |
 | hook selftest | 11/11 |
 | demo | all beats, ~4 s |
 | packaging | wheel 57/57 corpus files, 6 manifests, 5 markers, no `__pycache__` |
@@ -1061,6 +1076,39 @@ The rebase also picked up upstream READ changes that created the decoder
 collision; that is why the plugin count moved from six to five. The transform
 table itself is unchanged apart from the corrections above.
 
+### 18.3 Round 3 (third review: 3 high, 3 medium)
+
+The reviewer called nine rows from the round-2 table fixed and four partly
+fixed. Each partial became a narrower finding; the sixth finding (the `.git`
+worktree file) came from the reviewer's own test run on Linux, and the ledger
+row was "fixed in code" but had not actually been executed on Windows.
+
+| # | Severity | Finding | Fix | Regression test |
+|---|---|---|---|---|
+| 1 | high | the cache fingerprint skipped content READ reaches through in-repo symlinks, so editing `.cursor/rules/style.mdc` (-> `dist/rules/`) kept a cached ALLOW and an approval | `hooks/cache.py::_walk_files` is a manual, bounded walk that follows in-repo directory links exactly as READ does (link name decides exclusion, target location does not), hashes the content behind file links, skips links that leave the repo, and cuts loops with a resolved-dir set | `test_cache_key_changes_when_a_linked_file_is_edited`, `test_approval_dies_when_a_linked_file_changes`, `test_fingerprint_survives_a_symlink_loop`, `test_fingerprint_does_not_follow_links_outside_the_repo` |
+| 2 | high | the approval command the hook prints dropped `-I`, so following the security advice could import the guarded checkout's own `hooks` package or `json.py` | `hooks/cli.py::approve_command` prints `"<installed python>" -I -m hooks approve --minutes 15`; `docs/HOOKS.md` shows the same | `test_approval_hint_keeps_import_isolation`, `test_cli_turns_gate_a_ask_into_a_block_with_approval_steps` |
+| 3 | high | the README fallback only checked the starting directory, so a session in `src/` of a README-only project was `not_a_repo` and Gate B never scanned the root | `resolve_project_root` now walks parents for a `README.md` too, stopping before home/volume root | `test_readme_only_root_is_found_from_a_subdirectory`, `test_gate_b_scans_the_readme_only_root_from_a_subfolder`, `test_home_is_not_adopted_from_a_subdirectory` |
+| 4 | medium | when Claude Code detection failed, the installer warned and installed with `claude_version=None`, skipping the version gate | `install()` raises `ValueError("... version is unknown ...")`; the CLI prints the reason and exits 2, asking for `--claude-version` or `BAITWATCH_CLAUDE_VERSION` | `test_install_refuses_an_unknown_version`, `test_cli_install_refuses_an_unknown_version` |
+| 5 | medium | the lint removed placeholders anywhere in the host, so `https://evil.example${TAIL}/x` passed even though `TAIL` can be `.com` | only the literal text after the **last** placeholder is trusted; it must itself be `example`, `*.example` or a sink IP. `${REGISTRY}.evil.example` still passes, `evil.example${TAIL}` does not | `test_placeholder_at_the_end_cannot_hide_a_real_suffix`, `test_fixed_suffix_after_the_last_placeholder_decides` |
+| 6 | medium | `publication.py` scanned `.git` when a linked worktree stores it as a file, so a clean tree failed on the gitdir pointer | `text_files` skips filenames in the skip set, not just directories, so the `.git` pointer is never read as published content | `test_worktree_git_pointer_file_is_skipped` |
+
+**Windows evidence for the ledger.** The round-2 review noted that the sidecar
+lock had only been reasoned about, never executed on Windows. This machine is
+Windows, and `python -m pytest tests/read/test_judge.py -k ledger -q` now reports
+`3 passed` (58 s), including the two-process test that exercises
+`msvcrt.LK_NBLCK`. The POSIX path is covered by Linux CI.
+
+The symlink tests skip on this Windows account because creating a symlink needs
+Developer Mode (`WinError 1314`). To avoid shipping an unexecuted branch, the
+same three properties were run under WSL Ubuntu directly against
+`hooks.cache.repo_fingerprint`:
+
+```text
+linked edit changes fingerprint: True
+loop terminates: True
+outside link ignored: True
+```
+
 ---
 
 ## 19. Branch, PR and decoy-trial status
@@ -1070,9 +1118,9 @@ table itself is unchanged apart from the corrections above.
 | Ref | State |
 |---|---|
 | `origin/main` | `1b8d7b8`; PR #10 (sinks) merged after the first rebase |
-| local `main` | this report plus the PR #13 review fixes; pushed to `origin/aditya/attack-slice` |
+| local `main` | this report plus the PR #13 review fixes; the round-3 fixes are committed locally and **not pushed yet** |
 | backup | `backup/pre-rebase-<timestamp>` points at the pre-rebase tree |
-| **PR #13** | **`aditya/attack-slice` → `main`; open, 12 review findings closed, CI green** |
+| **PR #13** | **`aditya/attack-slice` → `main`; open, 18 review findings closed, CI green at `ace52f7`, round-3 CI pending push** |
 | PR #12 | `ashutosh/d3-decoy` — decoy agent loop, tool calls inside the cage (open; updated to `482e9e8`) |
 | PR #10 | `ashutosh/d2-sinks` — DNS/HTTP/TLS sinks and file trace (**merged**) |
 | merged upstream | `#7 uv-torch-extras`, `#8 sweep-scan-resources`, `#9 per-scan-subnet`, `#10 d2-sinks` |
@@ -1084,7 +1132,8 @@ PR #12 adds one more commit after the first snapshot:
 The ATTACK branch was rebased, not merged, so the five original commits were
 rewritten (`843282c` … `cb2d012`) and the review fixes were stacked on top.
 PR #13 was opened on `aditya/attack-slice`; the first CI run passed both jobs,
-and the review-fix commit was pushed on top of it.
+and the review-fix commit was pushed on top of it. The round-3 fixes stay
+local until the reviewer is told they are ready.
 
 ### 19.2 Muse Spark decoy trial
 

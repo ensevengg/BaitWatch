@@ -68,9 +68,9 @@ def parse_claude_version(value: str) -> tuple[int, ...]:
 def detect_claude_version() -> str | None:
     """Best-effort host version: env override, then ``claude --version``.
 
-    Returns ``None`` when the CLI is not installed or does not answer, so a
-    headless install is still possible; the caller reports that it could not
-    verify the fail-closed contract.
+    Returns ``None`` when the CLI is not installed or does not answer.  The
+    installer refuses that case: an unknown host may ignore
+    ``onFailure: block``, so the user has to state a supported version.
     """
     override = os.environ.get("BAITWATCH_CLAUDE_VERSION", "").strip()
     if override:
@@ -182,14 +182,22 @@ def install(
     dry_run: bool = False,
     claude_version: str | None = None,
 ) -> InstallReport:
-    if claude_version is not None:
-        parsed = parse_claude_version(claude_version)
-        if parsed < MIN_CLAUDE_VERSION:
-            raise ValueError(
-                f"Claude Code {claude_version} is too old: BaitWatch needs "
-                f"{'.'.join(str(part) for part in MIN_CLAUDE_VERSION)} or later "
-                "for fail-closed hook timeouts (onFailure: block)."
-            )
+    if claude_version is None:
+        # Fail closed: without a known host version we cannot prove that
+        # ``onFailure: block`` is honoured, and an unverified hook that times
+        # out lets the action run.
+        raise ValueError(
+            "Claude Code version is unknown: refusing to install a hook that may "
+            "not fail closed. Upgrade Claude Code, then pass --claude-version "
+            "X.Y.Z (2.1.295 or later) or set BAITWATCH_CLAUDE_VERSION."
+        )
+    parsed = parse_claude_version(claude_version)
+    if parsed < MIN_CLAUDE_VERSION:
+        raise ValueError(
+            f"Claude Code {claude_version} is too old: BaitWatch needs "
+            f"{'.'.join(str(part) for part in MIN_CLAUDE_VERSION)} or later "
+            "for fail-closed hook timeouts (onFailure: block)."
+        )
     path = settings_path(scope, root=root)
     if path.exists():
         try:

@@ -33,9 +33,9 @@ from hooks.guard import (
     resolve_project_root,
     run_gate,
 )
-from hooks.install import detect_claude_version, install, settings_path, uninstall
+from hooks.install import detect_claude_version, hook_command, install, settings_path, uninstall
 
-__all__ = ["emit", "main", "read_payload", "selftest"]
+__all__ = ["approve_command", "emit", "main", "read_payload", "selftest"]
 
 DEFAULT_DEADLINE_S = 20.0
 
@@ -77,6 +77,16 @@ def _hook_disabled() -> bool:
     return os.environ.get("BAITWATCH_HOOK", "").strip().lower() in ("off", "0", "false")
 
 
+def approve_command(interpreter: str | None = None, minutes: float = 15.0) -> str:
+    """The exact approval command printed to the user.
+
+    It keeps the installed interpreter and ``-I``: the hook asks the user to
+    run this, so it must not import a ``hooks`` package or ``json.py`` from
+    the guarded checkout any more than the hook itself does.
+    """
+    return f'"{interpreter or sys.executable}" -I -m hooks approve --minutes {minutes:g}'
+
+
 def read_payload(stream=None) -> dict:
     stream = stream or sys.stdin
     raw = stream.read()
@@ -102,7 +112,7 @@ def emit(decision: Decision, host: str = "claude") -> None:
             # block that tells the user exactly how to approve and retry.
             reason = (
                 f"BaitWatch needs approval before this prompt runs: {decision.reason}. "
-                "Inspect the repository, then run `python -m hooks approve --minutes 15` "
+                f"Inspect the repository, then run `{approve_command()}` "
                 "and resubmit the prompt."
             )
             payload = {"decision": "block", "reason": reason}
@@ -280,10 +290,12 @@ def _install_command(args: argparse.Namespace) -> int:
             version = args.claude_version or detect_claude_version()
             if version is None:
                 print(
-                    "warning: could not detect Claude Code; hook timeouts are only "
-                    "fail-closed on 2.1.295 or later. Pass --claude-version after upgrading.",
+                    "error: the Claude Code version is unknown, and fail-closed "
+                    "hook timeouts need 2.1.295 or later. Upgrade Claude Code, then pass "
+                    "--claude-version X.Y.Z (or set BAITWATCH_CLAUDE_VERSION).",
                     file=sys.stderr,
                 )
+                return 2
             report = install(
                 args.scope,
                 python=args.python,
@@ -339,7 +351,7 @@ def _status() -> int:
     print(f"inline_judge: {os.environ.get('BAITWATCH_HOOK_JUDGE', '0')}")
     print(f"approvals: {ApprovalStore().path}")
     print(f"claude user settings: {settings_path('user')}")
-    print(f"CLI: {sys.executable} -I -m hooks gate-a | gate-b")
+    print(f"CLI: {hook_command('a')} | {hook_command('b')}")
     return 0
 
 
@@ -365,7 +377,10 @@ def main(argv: list[str] | None = None) -> int:
     install_parser.add_argument(
         "--claude-version",
         default=None,
-        help="installed Claude Code version; refuses anything older than 2.1.295",
+        help=(
+            "installed Claude Code version (2.1.295 or later); required when "
+            "detection fails, refused when older"
+        ),
     )
 
     approve_parser = sub.add_parser("approve")

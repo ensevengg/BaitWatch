@@ -231,10 +231,10 @@ def resolve_project_root(path: str | Path) -> tuple[Path | None, str]:
 
     Returns ``(root, status)`` where status is:
 
-    - ``ok``: a marker was found walking up from ``path``;
+    - ``ok``: a marker (or a README-only project root) was found walking up
+      from ``path``;
     - ``not_a_repo``: a real directory with no project marker (not a repo);
-    - ``unresolved``: the path is missing, not a directory, or home/root was
-      reached without a marker and the start directory has no README.
+    - ``unresolved``: the path is missing or is not a directory.
     """
     start = Path(path).expanduser()
     try:
@@ -270,8 +270,16 @@ def resolve_project_root(path: str | Path) -> tuple[Path | None, str]:
         # A README in the home directory does not make home a project: scanning
         # it would read unrelated files and blow the scan budget.
         return None, "not_a_repo"
-    if (start / "README.md").is_file():
-        return start, "ok"
+    # README-only projects have no marker file, so walk up for one too.  A
+    # session started in ``src/`` must find the README at the project root;
+    # otherwise Gate B would treat that root as unscanned and allow the read.
+    current = start
+    for _ in range(64):
+        if current == home or current.parent == current:
+            break
+        if (current / "README.md").is_file():
+            return current, "ok"
+        current = current.parent
     return None, "not_a_repo"
 
 

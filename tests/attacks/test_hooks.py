@@ -197,7 +197,7 @@ def test_install_is_a_merge_and_is_idempotent(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    report = install("project", root=tmp_path, python="py")
+    report = install("project", root=tmp_path, python="py", claude_version="2.1.295")
     assert report.changed
     data = json.loads(settings.read_text(encoding="utf-8"))
     assert data["env"] == {"KEEP": "1"}
@@ -210,7 +210,7 @@ def test_install_is_a_merge_and_is_idempotent(tmp_path: Path) -> None:
         for command in [hook["command"]]
     )
 
-    again = install("project", root=tmp_path, python="py")
+    again = install("project", root=tmp_path, python="py", claude_version="2.1.295")
     assert again.changed is False
 
     removed = uninstall("project", root=tmp_path)
@@ -225,7 +225,7 @@ def test_install_refuses_to_overwrite_invalid_json(tmp_path: Path) -> None:
     settings.parent.mkdir(parents=True)
     settings.write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError, match="invalid JSON"):
-        install("project", root=tmp_path)
+        install("project", root=tmp_path, claude_version="2.1.295")
 
 
 def test_settings_path_validates_scope() -> None:
@@ -276,7 +276,8 @@ def test_cli_turns_gate_a_ask_into_a_block_with_approval_steps(
     payload = json.loads(capsys.readouterr().out)
     assert payload["decision"] == "block"
     assert "needs a look" in payload["reason"]
-    assert "python -m hooks approve" in payload["reason"]
+    assert "-I -m hooks approve" in payload["reason"]
+    assert "python -m hooks approve" not in payload["reason"]
     assert "hookSpecificOutput" not in payload
 
 

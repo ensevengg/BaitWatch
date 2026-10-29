@@ -73,3 +73,11 @@ def test_only_text_suffixes_are_read(tmp_path: Path) -> None:
     (tmp_path / "blob.parquet").write_bytes((_win("Users", "someone")).encode())
     assert text_files(tmp_path) == []
     assert publication_violations(tmp_path) == []
+
+
+def test_worktree_git_pointer_file_is_skipped(tmp_path: Path) -> None:
+    """A linked worktree's ``.git`` is a file holding a local gitdir pointer."""
+    pointer = "gitdir: " + _posix("home", "someone", "repo", ".git", "worktrees", "wt") + "\n"
+    (tmp_path / ".git").write_text(pointer, encoding="utf-8")
+    assert text_files(tmp_path) == []
+    assert publication_violations(tmp_path) == []

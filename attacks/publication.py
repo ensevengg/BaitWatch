@@ -90,6 +90,11 @@ def text_files(root: Path) -> list[Path]:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(name for name in dirnames if name not in _SKIP_DIRS)
         for name in sorted(filenames):
+            # A linked worktree stores ``.git`` as a file containing a local
+            # gitdir pointer.  It has no suffix, so it would otherwise be read
+            # as published content and fail the check on a clean tree.
+            if name in _SKIP_DIRS:
+                continue
             path = Path(dirpath) / name
             if path.suffix.lower() in _TEXT_SUFFIXES:
                 found.append(path)

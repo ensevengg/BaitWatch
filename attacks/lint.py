@@ -68,22 +68,31 @@ class Violation:
         return f"{self.path}:{self.line}: {self.kind}: {self.detail}"
 
 
-def _allowed_host(host: str) -> bool:
+def _fixed_host(host: str) -> bool:
     host = host.lower().rstrip(".")
     if not host:
         return False
-    fixed = _PLACEHOLDER_RE.sub("", host).strip(".")
-    if fixed != host:
-        # A template is only safe when everything that is left after removing
-        # its placeholders is a fixed ``*.example`` suffix (never empty, never
-        # a real domain such as ``$USER.collector.app``).
-        return fixed == "example" or fixed.endswith(".example")
-    if host == "evil.example" or host.endswith(".example"):
+    if host == "evil.example" or host == "example" or host.endswith(".example"):
         return True
     try:
         return ipaddress.ip_address(host) in SINK_NETWORK
     except ValueError:
         return False
+
+
+def _allowed_host(host: str) -> bool:
+    host = host.lower().rstrip(".")
+    if not host:
+        return False
+    placeholders = list(_PLACEHOLDER_RE.finditer(host))
+    if placeholders:
+        # A placeholder can expand to anything, including a different TLD.
+        # Only the literal text after the LAST placeholder is fixed, so that
+        # tail has to be the allowed suffix: ``${REGISTRY}.evil.example``
+        # passes, ``evil.example${TAIL}`` does not (TAIL could be ``.com``).
+        tail = host[placeholders[-1].end() :].strip(".")
+        return _fixed_host(tail)
+    return _fixed_host(host)
 
 
 def _allowed_domain(domain: str) -> bool:
