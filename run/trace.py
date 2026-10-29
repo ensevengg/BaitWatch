@@ -260,6 +260,11 @@ def diff(before: dict[str, Entry], after: dict[str, Entry]) -> list[tuple[str, s
     return changes
 
 
+def error_paths(manifest: dict[str, Entry]) -> list[str]:
+    """Sorted paths whose snapshot entry carries an error marker."""
+    return sorted(path for path, entry in manifest.items() if entry.error is not None)
+
+
 def manifest_to_json(manifest: dict[str, Entry]) -> str:
     payload = {
         # None fields are omitted; surrogateescape names escape to pure-ASCII \udcXX.

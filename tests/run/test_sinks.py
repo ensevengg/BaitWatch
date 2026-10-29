@@ -120,8 +120,11 @@ def test_cage_locked_directories_still_clean_up(repo: Path, engine):
         assert result.exit_code == 0, result.model_dump_json()
         sandbox.collect_sinks()
         sandbox.trace_after()
-    assert not sandbox.evidence.errors
-    assert sandbox.evidence.components.trace == State.COMPLETE
+    # The snapshot could not read inside the locked dirs, so the trace is an
+    # error naming them, while every diff that was captured stays evidence.
+    assert [error.code for error in sandbox.evidence.errors] == ["TRACE_INCOMPLETE"]
+    assert "locked" in sandbox.evidence.errors[0].message
+    assert sandbox.evidence.components.trace == State.ERROR
     changes = {(item.path, item.change) for item in sandbox.evidence.file_diffs}
     assert ("locked", "added") in changes
     assert not sandbox.staged_path.parent.exists()
