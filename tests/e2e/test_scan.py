@@ -109,7 +109,7 @@ def test_benign_fixture_allows(engine):
 
 def test_cli_scan_end_to_end(monkeypatch, engine, tmp_path):
     # The real CLI path; only the READ model is injected (checkpoint may not exist).
-    monkeypatch.setattr("run.scan.default_read_scanner", lambda path: CLEAN_READ)
+    monkeypatch.setattr("run.scan.default_read_scanner", lambda path, **kwargs: CLEAN_READ)
     target = tmp_path / "verdict.json"
     result = CliRunner().invoke(
         app,
