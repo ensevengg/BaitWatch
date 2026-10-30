@@ -538,3 +538,110 @@ def test_distinct_deleted_files_with_colliding_display_names_still_count():
     ]
     assert run.file_diffs[0].path == run.file_diffs[1].path
     assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize(
+    "tree",
+    [
+        "node_modules",
+        ".venv",
+        "venv",
+        "site-packages",
+        "vendor",
+        "target",
+        "dist",
+        "build",
+        "__pycache__",
+        ".cache",
+        ".npm",
+        ".yarn",
+        ".pnpm-store",
+    ],
+)
+@pytest.mark.parametrize(
+    "control",
+    [
+        "AGENTS.md",
+        ".vscode/settings.json",
+        ".claude/settings.json",
+        "mcp.json",
+        ".envrc",
+        ".github/workflows/ci.yml",
+    ],
+)
+@pytest.mark.parametrize("prefix", ["pkg/", "/home/agent/"])
+def test_dependency_control_files_allow(tree, control, prefix):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{prefix}{tree}/example/{control}", change="added")]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_benign_install_with_dependency_agent_files_allows():
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [
+        FileDiff(path=path, change=change)
+        for path, change in [
+            ("build/output.txt", "added"),
+            ("node_modules/example/index.js", "added"),
+            ("node_modules/example/AGENTS.md", "added"),
+            ("node_modules/example/.vscode/settings.json", "added"),
+            (".venv/pyvenv.cfg", "added"),
+            ("src/ready.py", "added"),
+            ("package-lock.json", "modified"),
+        ]
+    ]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".git/hooks/pre-commit",
+        "pkg/.git/hooks/pre-commit",
+        "node_modules/pkg/.git/hooks/pre-commit",
+        "pkg/AGENTS.md",
+        "AGENTS.md",
+    ],
+)
+def test_active_agent_files_and_git_hooks_still_block(path):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=path, change="added")]
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize(
+    "name", [".claude.json", ".claude.json.backup", ".clinerules", ".aider.conf.yml"]
+)
+@pytest.mark.parametrize("prefix", ["", "pkg/", "/home/agent/"])
+@pytest.mark.parametrize("change", ["added", "modified", "deleted"])
+def test_single_file_agent_configs_block(name, prefix, change):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=prefix + name, change=change)]
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/ci.yml",
+        "pkg/.github/workflows/nested/job.yaml",
+        ".envrc",
+        "pkg/.envrc",
+        "/home/agent/.envrc",
+    ],
+)
+@pytest.mark.parametrize("change", ["added", "modified", "deleted"])
+def test_ci_and_direnv_persistence_changes_block(path, change):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=path, change=change)]
+    assert fuse(CLEAN, run).verdict == "BLOCK"

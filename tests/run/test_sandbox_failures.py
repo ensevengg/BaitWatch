@@ -1436,3 +1436,67 @@ def test_home_writes_share_repository_collection_limits(repo, monkeypatch, bound
     assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
     assert sandbox.evidence.status == "error"
     assert any(entry.path.startswith("/home/agent/") for entry in sandbox.evidence.file_diffs)
+
+
+@pytest.mark.parametrize(
+    "changed,total,after_size,expected",
+    [(50, 50, 0, "BLOCK"), (1, 50, 0, "FLAG"), (50, 50, 4, "ALLOW")],
+)
+def test_truncated_repository_files_use_deletion_thresholds(
+    repo, monkeypatch, changed, total, after_size, expected
+):
+    from run.evidence import RunComponents, RunEvidence
+    from run.verdict import ReadOutcome, fuse
+
+    before = {
+        f"src/{i}.py": Entry(kind="file", mode=0o666, size=10, sha256="0" * 64)
+        for i in range(total)
+    }
+    after = dict(before)
+    for i in range(changed):
+        after[f"src/{i}.py"] = Entry(kind="file", mode=0o666, size=after_size, sha256="1" * 64)
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, client_factory=fake_client)
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    run = RunEvidence(
+        status="complete",
+        components=RunComponents(**{key: State.COMPLETE for key in RunComponents.model_fields}),
+        tool_log=[CommandResult(command=["run_cmd", "true"], exit_code=0)],
+        file_diffs=sandbox.evidence.file_diffs,
+        staged_file_count=sandbox.evidence.staged_file_count,
+    )
+    assert fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), run).verdict == expected
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_trace_recognizes_empty_file_replacement_and_keeps_exclusions(repo, monkeypatch, replace):
+    from run.trace import snapshot
+
+    paths = ["README.md", ".env", "build/output", "node_modules/pkg/a", "empty"]
+    for path in paths:
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("" if path == "empty" else "original")
+    before = snapshot(repo)
+    for path in paths:
+        target = repo / path
+        if replace:
+            target.unlink()
+        target.write_text("")
+        target.chmod(0o600)
+    after = snapshot(repo)
+    before["/home/agent/data"] = Entry(kind="file", mode=0o666, size=5, sha256="0" * 64)
+    after["/home/agent/data"] = Entry(kind="file", mode=0o666, size=0, sha256="1" * 64)
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, client_factory=fake_client)
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert [entry.path for entry in sandbox.evidence.file_diffs if entry.is_truncated] == [
+        "README.md"
+    ]
+    assert sandbox.evidence.staged_file_count == 2

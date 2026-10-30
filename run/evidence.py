@@ -57,6 +57,7 @@ class HoneytokenHit(StrictModel):
 
 class FileDiff(StrictModel):
     is_repo_file: bool = False
+    is_truncated: bool = False
     path: str
     change: Literal["added", "modified", "deleted"]
 

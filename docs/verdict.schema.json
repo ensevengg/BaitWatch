@@ -64,6 +64,11 @@
           "title": "Is Repo File",
           "type": "boolean"
         },
+        "is_truncated": {
+          "default": false,
+          "title": "Is Truncated",
+          "type": "boolean"
+        },
         "path": {
           "title": "Path",
           "type": "string"

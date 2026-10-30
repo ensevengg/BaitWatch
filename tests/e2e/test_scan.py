@@ -106,6 +106,8 @@ def test_benign_fixture_allows(engine):
     assert {
         ("build/output.txt", "added"),
         ("node_modules/example/index.js", "added"),
+        ("node_modules/example/AGENTS.md", "added"),
+        ("node_modules/example/.vscode/settings.json", "added"),
         (".venv/pyvenv.cfg", "added"),
         ("src/ready.py", "added"),
         ("package-lock.json", "modified"),

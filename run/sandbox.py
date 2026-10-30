@@ -773,7 +773,18 @@ class Sandbox:
         }
         self.evidence.staged_file_count = len(repo_files)
         self.evidence.file_diffs = [
-            FileDiff(path=path, change=change, is_repo_file=path in repo_files)
+            FileDiff(
+                path=path,
+                change=change,
+                is_repo_file=path in repo_files,
+                is_truncated=(
+                    path in repo_files
+                    and change == "modified"
+                    and self._trace_before[path].size > 0
+                    and after[path].kind == "file"
+                    and after[path].size == 0
+                ),
+            )
             for path, change in diff(self._trace_before, after)
         ]
         limits = self.config.staging
