@@ -342,9 +342,7 @@ class Sandbox:
             # Only paths planting actually created are exempt from the write
             # limits; a path the repository already had stays charged.
             self._planted_paths = frozenset(
-                path
-                for path in planned - existing
-                if os.path.lexists(self.staged_path / path)
+                path for path in planned - existing if os.path.lexists(self.staged_path / path)
             )
             self._subnet = self._create_network()
             self._open = True
