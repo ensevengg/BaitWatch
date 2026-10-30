@@ -1316,3 +1316,44 @@ $ python -m pytest tests/attacks -q
 
 This section describes the corpus, not a detector score. The fine-tuned READ
 checkpoint is not present on this machine, so no model result is claimed here.
+
+---
+
+## 21. D6 adversarial set (preliminary, keyword stand-in only)
+
+The D6 adversarial set was generated on 2026-10-30, one day early, with the
+red-team models running on a free-tier Google Colab T4 through the Colab CLI
+(session stopped afterwards). Nothing was generated on the local machine for
+this set, and nobody has patched a detector against it.
+
+| Item | Result |
+|---|---|
+| Generators | `dolphin3:8b`, `huihui_ai/qwen3.5-abliterated:9b` |
+| Plain candidates | 109 (16 per weak class, 14 judge-attacks, 1 rejected in filtering) |
+| Encoded variants | 20 (`base64` to `markdown_image`) |
+| Total | 129 |
+| Split | 63 held-out / 66 tune, sha256-parity, recorded before any patching |
+| Filtering | allowlisted hosts only, no credential shapes, de-duplicated, Jaccard-rejected against all three seed pools |
+
+Raw candidates, the split record and the failure CSV are kept outside this
+repository until Manan has evaluated the held-out half; committing them now
+would publish the test set before it is used.
+
+### Keyword stand-in results (not a detector score)
+
+| Slice | Caught |
+|---|---|
+| Held-out | 17/63 (27%) |
+| All | 34/129 |
+| Decoder recovery | 128/129 |
+| Concealment | 0/19 |
+| Judge-attacks | 4/17 |
+| RCE | 8/19 |
+
+One decoder gap was found: `adv-002-rot13` is not recovered by the decoder
+registry used by the harness.
+
+The D6 pass bar (>=85% caught on the held-out half) applies to the real
+detector and cannot be measured here: the fine-tuned checkpoint is not in
+this repository (see section 17). These numbers describe the keyword
+stand-in only.
