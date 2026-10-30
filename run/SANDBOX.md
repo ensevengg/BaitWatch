@@ -15,6 +15,8 @@ Each scan follows these steps.
 
 ## Known limits
 
+- The plain registry DNS lookup exception accepts one EDNS0 COOKIE option with an 8-byte client cookie for dig compatibility. Those eight bytes are themselves a small data channel; such a lookup still FLAGs, but does not BLOCK on the cookie alone. Other option payloads mark capture incomplete and BLOCK. Extra-section evidence is a bounded, escaped preview, so honeytoken searches cannot see bytes beyond the preview.
+
 - Fusion ignores `file_diffs`: edits to agent configuration (`.claude/`, `AGENTS.md`, `.vscode/`, `.mcp.json`) do not affect the verdict. `HOME=/tmp` is outside the traced `/repo` tree, so HOME writes and dotfiles are not observed. A decoy can make these changes and still ALLOW when the remaining evidence is clean. File-change verdict rules and HOME tracing are planned work.
 
 - If Docker drops whole output frames at a frame boundary while reporting a clean exit, capture cannot detect the loss; this requires a Docker transport fault rather than cage control, and a per-stream end-of-output record is the planned fix.

@@ -1231,7 +1231,8 @@ def test_ambiguous_http_body_length_is_incomplete():
     "additional,counts,incomplete",
     [
         (bytes.fromhex("00002904d0000000000000"), "000000000001", False),
-        (bytes.fromhex("00002904d0000080000008000a000461626364"), "000000000001", False),
+        (bytes.fromhex("00002904d000008000000c000a00086162636465666768"), "000000000001", False),
+        (bytes.fromhex("00002904d0000080000008000a000461626364"), "000000000001", True),
         (bytes.fromhex("00002904d0000000000000") * 2, "000000000002", True),
         (bytes.fromhex("00002904d0000000000000"), "000100000001", True),
         (bytes.fromhex("00002904d0000000000001"), "000000000001", True),
@@ -1261,3 +1262,42 @@ def test_dns_accepts_only_one_well_formed_edns0_opt(additional, counts, incomple
     path = tmp_path / "dns.jsonl"
     path.write_text(output.getvalue())
     assert bool(read_sink_log(path).problems) is incomplete
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        b"\x00\x0c\x00\x09secret=42",
+        b"\x00\x0a\x00\x10client00secret42",
+        b"\x00\x0a\x00\x08client00\x00\x0c\x00\x09secret=42",
+        b"\x00\x0c\x00\x00",
+        b"\x00\x0a\x00\x08client00\x00\x0a\x00\x08secret42",
+        b"\x00\x0c\x01\x00" + b"secret\x00\n" * 32,
+    ],
+)
+def test_dns_edns_payload_blocks_registry_downgrade(options, tmp_path):
+    import io
+
+    from run.evidence import RunEvidence
+    from run.sink_logs import read_sink_log
+    from run.verdict import ReadOutcome, fuse
+
+    dns = load_sink_module("dns_sink.py")
+    opt = bytes.fromhex("00002904d000000000") + len(options).to_bytes(2, "big") + options
+    packet = (
+        bytes.fromhex("123401000001000000000001")
+        + build_dns_query(b"\x12\x34", "pypi.org")[12:]
+        + opt
+    )
+    output = io.StringIO()
+    dns.log_query(dns.JsonlLog(output), "192.0.2.20", packet, dns.parse_query(packet))
+    path = tmp_path / "dns.jsonl"
+    path.write_text(output.getvalue())
+    captured = read_sink_log(path)
+    assert fuse(ReadOutcome(), RunEvidence(dns_hits=captured.dns_hits)).verdict == "BLOCK"
+    record = json.loads(output.getvalue())
+    assert record["capture_incomplete"] is True
+    assert "secret" in record["raw"] or options == b"\x00\x0c\x00\x00"
+    assert "\\x00" in record["raw"]
+    assert len(record["raw"]) <= dns.RAW_LIMIT
+    assert captured.problems

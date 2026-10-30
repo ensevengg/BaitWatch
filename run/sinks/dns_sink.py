@@ -209,7 +209,7 @@ def label_text(label):
     )
 
 
-def log_question(log, source_ip, parsed, *, capture_incomplete=False):
+def log_question(log, source_ip, parsed, *, capture_incomplete=False, extra=b""):
     question, labels, qtype = parsed
     decoded = []
     for label in labels:
@@ -226,6 +226,8 @@ def log_question(log, source_ip, parsed, *, capture_incomplete=False):
     }
     if capture_incomplete:
         record["capture_incomplete"] = True
+    if extra:
+        record["raw"] = raw_preview(extra)
     log.write(record)
 
 
@@ -241,14 +243,8 @@ def valid_opt(packet, offset):
     offset += 11
     if length != len(packet) - offset:
         return False
-    while offset < len(packet):
-        if len(packet) - offset < 4:
-            return False
-        length = int.from_bytes(packet[offset + 2 : offset + 4], "big")
-        offset += 4 + length
-        if offset > len(packet):
-            return False
-    return True
+    # A client-only COOKIE is dig's default; all other options can carry payloads.
+    return length == 0 or (length == 12 and packet[offset : offset + 4] == b"\x00\x0a\x00\x08")
 
 
 def log_query(log, source_ip, packet, parsed, *, capture_incomplete=False):
@@ -270,7 +266,7 @@ def log_query(log, source_ip, packet, parsed, *, capture_incomplete=False):
         capture_incomplete or count != 1 or len(questions) != count or not sections_complete
     )
     for question in questions:
-        log_question(log, source_ip, question, capture_incomplete=incomplete)
+        log_question(log, source_ip, question, capture_incomplete=incomplete, extra=packet[offset:])
     if len(questions) != count:
         log_unparsed(log, source_ip, packet[offset:], capture_incomplete=True)
 

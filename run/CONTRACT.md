@@ -57,9 +57,15 @@ DNS labels escape every non-LDH byte as `\DDD` (decimal), including embedded
 dots. Names are bounded by DNS wire length and never cut in presentation.
 Up to 128 questions per packet are logged; multiple questions, malformed names,
 budget overflow or extra sections other than exactly one well-formed root-name
-EDNS0 OPT record mark capture incomplete. OPT option lengths are checked within
-the bounded packet; multiple OPT records, unsupported versions and malformed
-options stay incomplete. TLS SNI is escaped and retained within the bounded ClientHello capture, without a silent name cut.
+EDNS0 OPT record mark capture incomplete. Only empty OPT RDATA or exactly one
+COOKIE option (code 10) with an 8-byte client cookie counts as a plain lookup.
+Go's pure resolver sends an empty OPT; c-ares defaults tested here send a
+client-only COOKIE, which is also dig's default shape.
+All other options, longer or shorter cookies, and multiple options stay incomplete
+and BLOCK even for exact registry hosts. Extra-section bytes are retained in a
+bounded, escaped `raw` preview (200 characters) for evidence and honeytoken searches;
+bytes beyond that preview are not retained. Multiple OPT records, unsupported
+versions and malformed options stay incomplete. TLS SNI is escaped and retained within the bounded ClientHello capture, without a silent name cut.
 
 Evidence fields replace lone Unicode surrogates with literal backslash escapes
 before validation, so byte filenames, tool text and error paths cannot suppress
