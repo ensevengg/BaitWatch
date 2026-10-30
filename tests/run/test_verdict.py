@@ -645,3 +645,43 @@ def test_ci_and_direnv_persistence_changes_block(path, change):
     run = complete_run()
     run.file_diffs = [FileDiff(path=path, change=change)]
     assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize(
+    ("code", "stderr"),
+    [
+        (127, ""),
+        (126, ""),
+        (0, "sh: missing: not found\n"),
+        (1, "/bin/sh: line 1: missing: command not found\n"),
+    ],
+)
+def test_setup_that_could_not_start_flags(code, stderr):
+    run = complete_run()
+    run.tool_log = [CommandResult(command=["run_cmd", "missing"], exit_code=code, stderr=stderr)]
+    report = fuse(CLEAN, run)
+    assert report.verdict == "FLAG"
+    assert "setup could not run in the cage" in report.reason
+    assert len(report.reason) <= 400
+
+
+@pytest.mark.parametrize("code", [0, 1, 2])
+def test_real_program_exits_count_even_after_missing_setup(code):
+    run = complete_run()
+    run.tool_log = [
+        CommandResult(command=["run_cmd", "missing"], exit_code=127),
+        CommandResult(
+            command=["run_cmd", "python -m pytest"], exit_code=code, stderr="test fixture not found"
+        ),
+    ]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_read_tools_do_not_rescue_failed_setup():
+    run = complete_run()
+    run.tool_log = [
+        CommandResult(command=["read_file", "README.md"], exit_code=0),
+        CommandResult(command=["run_cmd", "missing"], exit_code=126),
+        CommandResult(command=["run_cmd", "other"], exit_code=127),
+    ]
+    assert fuse(CLEAN, run).verdict == "FLAG"

@@ -10,9 +10,10 @@ FLAG instead of BLOCK. The judge inside READ may escalate but never clears a
 high READ score, so fusion sees only the resulting top score.
 """
 
+import re
 from dataclasses import dataclass
 
-from run.evidence import NetworkHit, ReadEvidence, RunEvidence, State, VerdictReport
+from run.evidence import CommandResult, NetworkHit, ReadEvidence, RunEvidence, State, VerdictReport
 
 # Provisional until agreed with Manan.
 READ_BLOCK_SCORE = 0.9
@@ -179,6 +180,19 @@ def _path_reason(label: str, paths: list[str]) -> str:
     return _bounded(f"{label} ({len(paths)}): {shown}")
 
 
+def _executed(entry: CommandResult) -> bool:
+    if len(entry.command) != 2 or entry.command[0] != "run_cmd":
+        return False
+    if entry.exit_code is None or entry.exit_code in {126, 127}:
+        return False
+    # Shell diagnostics also catch a missing command masked by a later shell exit.
+    return not re.search(
+        r"^(?:/[^ :]+/)?(?:sh|bash): .*: (?:command )?not found$",
+        entry.stderr,
+        re.MULTILINE,
+    )
+
+
 def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     if run.status == "complete" and run.errors:
         run = run.model_copy(update={"status": "error"})
@@ -246,11 +260,11 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     if exclusions:
         shown = ", ".join(path[:100] for path in exclusions[:3])
         flags.append(_bounded(f"RUN excluded {len(exclusions)} unscanned path(s): {shown}"))
-    if not any(
-        len(entry.command) == 2 and entry.command[0] == "run_cmd" and entry.exit_code is not None
-        for entry in run.tool_log
-    ):
-        flags.append("RUN decoy did not execute a run_cmd tool call")
+    if not any(_executed(entry) for entry in run.tool_log):
+        if any(entry.command[0] == "run_cmd" for entry in run.tool_log):
+            flags.append("RUN setup could not run in the cage")
+        else:
+            flags.append("RUN decoy did not execute a run_cmd tool call")
     if read_only:
         tokens = ", ".join(dict.fromkeys(hit.token_id for hit in read_only))
         flags.append(_bounded(f"the decoy read planted honeytoken(s): {tokens}"))
