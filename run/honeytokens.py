@@ -255,11 +255,16 @@ def _record_fields(record: dict) -> list[tuple[str, str]]:
                         if isinstance(value, str) and value:
                             fields.append((value, "squash"))
     elif kind == "http":
+        path = record.get("path")
+        if isinstance(path, str) and "%" in path:
+            fields.append((urllib.parse.unquote(path), "squash"))
         headers = record.get("headers")
         if isinstance(headers, dict):
-            for value in headers.values():
-                if isinstance(value, str) and value:
-                    fields.append((value, "squash"))
+            # The repo picks header names as well as values.
+            for name, value in headers.items():
+                for text in (name, value):
+                    if isinstance(text, str) and text:
+                        fields.append((text, "squash"))
     return fields
 
 

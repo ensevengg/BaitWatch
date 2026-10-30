@@ -488,3 +488,17 @@ def test_a_bound_hit_during_collection_is_an_error_never_a_clean_scan(
     assert [error.code for error in sandbox.evidence.errors] == ["HONEYTOKEN_SCAN_INCOMPLETE"]
     assert sandbox.evidence.status == "error"
     assert sandbox.evidence.components.sandbox == State.NOT_RUN
+
+
+def test_a_token_in_an_http_header_name_or_escaped_path_is_detected():
+    # A registry-looking GET only BLOCKs through a honeytoken hit, so the
+    # repo-chosen header names and path must be searched too.
+    token = generate_tokens().tokens[0]
+    partly_escaped = "%" + token.value[0].encode().hex().upper() + token.value[1:]
+    records = [
+        http_record(method="GET", host="pypi.org", headers={token.value: "1"}),
+        http_record(method="GET", host="pypi.org", path=f"/simple/{partly_escaped}/"),
+    ]
+    for record in records:
+        scan = scan_records([record], (token,))
+        assert [(hit.token_id, hit.source) for hit in scan.hits] == [(token.token_id, "http")]
