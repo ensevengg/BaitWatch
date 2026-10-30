@@ -166,7 +166,9 @@ def _shifted_encodings(raw: bytes) -> list[str]:
     for offset in range(3):
         total = offset + len(raw)
         remainder = total % 3
-        stable = (total // 3) * 4 + (2 if remainder == 1 else 3 if remainder == 2 else 0)
+        # A trailing partial group fixes only its first remainder characters;
+        # the next one shares bits with whatever byte follows the value.
+        stable = (total // 3) * 4 + remainder
         lead = (0, 2, 3)[offset]
         for encode in (base64.b64encode, base64.urlsafe_b64encode):
             encoded = encode(b"\x00" * offset + raw).decode("ascii")

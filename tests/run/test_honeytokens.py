@@ -299,6 +299,27 @@ def test_whole_file_base64_base64url_and_base32_hit_every_token():
                 )
 
 
+def test_whole_file_encoding_hits_whatever_byte_follows_the_value():
+    # A quoted value (API_KEY="...") puts a non-newline byte right after it.
+    rng = random.Random(SEED + 200)
+    for seed in range(40):
+        tokens, _ = _seeded_planted_env(seed)
+        for token in tokens:
+            for prefix_length in range(3):
+                prefix = bytes(rng.randrange(256) for _ in range(prefix_length))
+                follow = bytes([rng.randrange(256)])
+                blob = prefix + token.value.encode() + follow + b"rest"
+                for encode in (base64.b64encode, base64.urlsafe_b64encode, base64.b32encode):
+                    body = encode(blob).decode()
+                    scan = scan_records([http_record(body=body)], (token,))
+                    assert [hit.token_id for hit in scan.hits] == [token.token_id], (
+                        seed,
+                        prefix_length,
+                        follow,
+                        encode.__name__,
+                    )
+
+
 def test_value_split_across_dns_labels_is_detected():
     rng = random.Random(SEED + 1)
     for _ in range(10):
