@@ -251,6 +251,46 @@ def test_every_encoding_of_a_random_token_is_detected():
             )
 
 
+def _seeded_planted_env(seed: int) -> tuple[tuple[Honeytoken, ...], str]:
+    rng = random.Random(seed)
+    alphabet = string.ascii_lowercase + "234567"
+    api = FAKE_PREFIX + "".join(rng.choice(alphabet) for _ in range(32))
+    canary = (
+        "https://bw-fake-"
+        + "".join(rng.choice(alphabet) for _ in range(10))
+        + CANARY_HOST_SUFFIX
+        + "/beacon"
+    )
+    tokens = (
+        Honeytoken("ht-1", api, ".env", "API_KEY"),
+        Honeytoken("ht-2", canary, ".env", "WEBHOOK_URL"),
+    )
+    return tokens, f"API_KEY={api}\nWEBHOOK_URL={canary}\n"
+
+
+def test_whole_file_base64_base64url_and_base32_hit_every_token():
+    encoders = {
+        "base64": lambda data: base64.b64encode(data).decode(),
+        "base64url": lambda data: base64.urlsafe_b64encode(data).decode(),
+        "base32": lambda data: base64.b32encode(data).decode(),
+    }
+    for seed in range(40):
+        rng = random.Random(SEED + 100 + seed)
+        tokens, content = _seeded_planted_env(seed)
+        for prefix_length in range(5):
+            prefix = bytes(rng.randrange(256) for _ in range(prefix_length))
+            blob = prefix + content.encode()
+            for name, encode in encoders.items():
+                scan = scan_records([http_record(body=f"data={encode(blob)};end")], tokens)
+                assert not scan.incomplete, (seed, prefix_length, name)
+                expected = {token.token_id for token in tokens}
+                assert {hit.token_id for hit in scan.hits} == expected, (
+                    seed,
+                    prefix_length,
+                    name,
+                )
+
+
 def test_value_split_across_dns_labels_is_detected():
     rng = random.Random(SEED + 1)
     for _ in range(10):

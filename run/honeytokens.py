@@ -158,6 +158,27 @@ class _Prepared:
     variants: tuple[str, ...]
 
 
+def _shifted_encodings(raw: bytes) -> list[str]:
+    """Encoded runs that stay contiguous when the token sits at any byte offset
+    inside a larger encoded blob: drop the end characters that mix with the
+    neighbouring bytes for each base64 (mod 3) and base32 (mod 5) alignment."""
+    forms: list[str] = []
+    for offset in range(3):
+        total = offset + len(raw)
+        remainder = total % 3
+        stable = (total // 3) * 4 + (2 if remainder == 1 else 3 if remainder == 2 else 0)
+        lead = (0, 2, 3)[offset]
+        for encode in (base64.b64encode, base64.urlsafe_b64encode):
+            encoded = encode(b"\x00" * offset + raw).decode("ascii")
+            forms.append(encoded[lead:stable])
+    for offset in range(5):
+        encoded = base64.b32encode(b"\x00" * offset + raw).decode("ascii")
+        lead = -(-offset * 8 // 5)
+        stable = ((offset + len(raw)) * 8) // 5
+        forms.append(encoded[lead:stable])
+    return forms
+
+
 def _variants(token: Honeytoken) -> tuple[str, ...]:
     """Every wire form the token could travel in, lowercased for the
     case-insensitive search that DNS name handling requires."""
@@ -176,6 +197,7 @@ def _variants(token: Honeytoken) -> tuple[str, ...]:
     ):
         candidates.append(encoded)
         candidates.append(encoded.rstrip("="))
+    candidates.extend(_shifted_encodings(raw))
     variants: list[str] = []
     for candidate in candidates:
         lowered = candidate.lower()
