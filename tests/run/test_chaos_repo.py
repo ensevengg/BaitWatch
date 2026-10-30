@@ -115,6 +115,8 @@ expected = set(json.loads(sys.argv[1]))
 planted = set(json.loads(sys.argv[2]))
 actual = set()
 for root, dirs, files in os.walk("/repo"):
+    if root == "/repo":
+        dirs.remove(".git")
     for name in dirs + files:
         actual.add(os.path.relpath(os.path.join(root, name), "/repo"))
 diff = sorted((actual - planted) ^ expected)
