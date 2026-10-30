@@ -27,7 +27,6 @@ FORBIDDEN_STEMS = ("akia", "aiza", "xox")
 # 160 bits -> 32 unpadded base32 characters in [a-z2-7].
 VALUE_BYTES = 20
 CANARY_LABEL_BYTES = 6
-PLANT_NOTICE = "# BaitWatch decoy: these values are fake and monitored.\n"
 
 _PLAN = (
     (".env", (("API_KEY", None), ("WEBHOOK_URL", "beacon"))),
@@ -77,7 +76,7 @@ def generate_tokens() -> HoneytokenSet:
     tokens: list[Honeytoken] = []
     files: list[PlantedFile] = []
     for path, entries in _PLAN:
-        lines = [PLANT_NOTICE.rstrip("\n")]
+        lines: list[str] = []
         planted: list[Honeytoken] = []
         for entry, canary_path in entries:
             value = _canary_url(canary_path) if canary_path else _fake_value()

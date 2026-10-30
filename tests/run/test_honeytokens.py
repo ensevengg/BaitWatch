@@ -59,6 +59,14 @@ def test_generated_values_are_obviously_fake_and_scan_unique():
             assert token.value.split("/")[2].endswith(".example")
 
 
+def test_planted_files_read_like_ordinary_config():
+    for file in generate_tokens().files:
+        assert "BaitWatch" not in file.content
+        assert "decoy" not in file.content.lower()
+        assert not any(line.lstrip().startswith("#") for line in file.content.splitlines())
+        assert file.content.splitlines()[0] == f"{file.tokens[0].entry}={file.tokens[0].value}"
+
+
 def test_planted_locations_and_entries_cover_the_expected_files():
     tokens = generate_tokens()
     assert {(token.location, token.entry) for token in tokens.tokens} == {
