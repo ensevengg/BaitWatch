@@ -262,7 +262,7 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         flags.append(_bounded(f"RUN excluded {len(exclusions)} unscanned path(s): {shown}"))
     if not any(_executed(entry) for entry in run.tool_log):
         if any(entry.command[0] == "run_cmd" for entry in run.tool_log):
-            flags.append("RUN setup could not run in the cage")
+            flags.append("RUN setup could not run in the cage (no executed run_cmd)")
         else:
             flags.append("RUN decoy did not execute a run_cmd tool call")
     if read_only:
