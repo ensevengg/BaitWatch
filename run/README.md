@@ -19,7 +19,7 @@ uv run --no-sync pytest -m "not gpu" tests/run tests/e2e
 
 Plain `uv sync` or pip installs the default torch, which is CUDA-capable on Linux; `--extra cpu` keeps the CPU build for CI and machines without a GPU.
 
-`bash run/check.sh` runs lint, format and tests against the installed environment; it does not sync dependencies. `bash run/check.sh unit` runs only the unit tests.
+`bash run/check.sh` runs lint, format and tests against the installed environment; it does not sync dependencies. It uses the active `python3`, or `BAITWATCH_PYTHON` when set. `bash run/check.sh unit` runs only the unit tests.
 
 On a machine without Docker, run the unit tests with `uv run --no-sync pytest -m "not docker and not gpu" tests/run`. The full gate needs Docker. If the daemon or an image is missing, the Docker tests fail instead of skipping.
 
@@ -128,8 +128,9 @@ call; model turns and total tool calls each share the configured max-steps cap.
 A reply with many calls cannot multiply that budget. API keys require HTTPS
 except for exact localhost or 127.0.0.1 endpoints.
 
-File changes are a known verdict gap: fusion currently ignores `file_diffs`,
-including edits to `.claude/`, `AGENTS.md`, `.vscode/` and `.mcp.json`.
-`HOME=/tmp` writes, including dotfiles, are not traced. These actions can still
-ALLOW when the remaining evidence is clean. File-change verdict rules and
-tracing HOME writes are planned work; see [known limits](SANDBOX.md#known-limits).
+File-change fusion BLOCKs agent-control and persistence edits, including nested
+agent instructions, settings, MCP configuration and Git hooks. HOME is a fresh
+traced directory at `/home/agent`; shell startup and configuration changes there
+BLOCK, while cache writes alone remain eligible for ALLOW. Repository deletions
+FLAG, or BLOCK at 50% of staged regular files or more than 200 files, excluding
+build/cache trees and planted bait. See [file-change rules](CONTRACT.md#file-change-rules).
