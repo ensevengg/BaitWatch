@@ -259,14 +259,15 @@ def test_decoy_deadline_expiring_during_a_model_reply_fails_closed():
     assert sandbox.evidence.status == "error"
 
 
-def test_step_budget_exhaustion_ends_cleanly():
+def test_step_budget_exhaustion_fails_closed():
     sandbox = FakeSandbox()
     backend = ChatterBackend()
     run_decoy(sandbox, backend, max_steps=3)
     assert len(backend.turns) == 3
     assert len(sandbox.evidence.tool_log) == 3
-    assert sandbox.evidence.components.decoy == State.COMPLETE
-    assert not sandbox.evidence.errors
+    assert sandbox.evidence.components.decoy == State.ERROR
+    assert [error.code for error in sandbox.evidence.errors] == ["DECOY_STEP_BUDGET"]
+    assert sandbox.evidence.status == "error"
 
 
 def test_invalid_max_steps_is_rejected():

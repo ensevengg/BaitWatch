@@ -89,6 +89,10 @@ def stage_repository(source: Path, destination: Path, limits: StagingLimits) -> 
                     entry.name.startswith(".env.") and entry.name != ".env.example"
                 )
                 if entry.name in limits.exclude_names or secret_env:
+                    if depth == 0 and entry.name == ".git":
+                        metadata = os.stat(entry.name, dir_fd=source_fd, follow_symlinks=False)
+                        if not stat.S_ISDIR(metadata.st_mode):
+                            raise StagingError("top-level .git exclusion is not a directory")
                     excluded.append((target / entry.name).relative_to(destination).as_posix())
                     continue
                 metadata = os.stat(entry.name, dir_fd=source_fd, follow_symlinks=False)

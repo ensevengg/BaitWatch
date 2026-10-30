@@ -51,6 +51,8 @@ def _bounded(text: str) -> str:
 
 
 def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
+    if run.status == "complete" and run.errors:
+        run = run.model_copy(update={"status": "error"})
     blockers: list[str] = []
     flags: list[str] = []
     hits = (*run.dns_hits, *run.http_hits, *run.tls_hits)
@@ -90,6 +92,15 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     ]
     if missing:
         flags.append(f"RUN components did not complete: {', '.join(missing)}")
+    exclusions = [path for path in run.staging_exclusions if path != ".git"]
+    if exclusions:
+        shown = ", ".join(path[:100] for path in exclusions[:3])
+        flags.append(_bounded(f"RUN excluded {len(exclusions)} unscanned path(s): {shown}"))
+    if not any(
+        len(entry.command) == 2 and entry.command[0] == "run_cmd" and entry.exit_code is not None
+        for entry in run.tool_log
+    ):
+        flags.append("RUN decoy did not execute a run_cmd tool call")
     if attempts:
         hosts = ", ".join(dict.fromkeys(_host_of(hit.destination) for hit in attempts))
         flags.append(f"{len(attempts)} package-registry lookup(s) treated as attempts: {hosts}")

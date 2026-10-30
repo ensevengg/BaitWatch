@@ -7,6 +7,7 @@ is an error outcome, which fusion never allows.
 """
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from run.evidence import RunError, RunEvidence, State, VerdictReport
@@ -18,11 +19,27 @@ ReadScanner = Callable[[Path], ReadOutcome]
 
 def _outcome_from(result) -> ReadOutcome:
     """Map a read.scan ScanResult onto what fusion consumes."""
-    gaps = len(result.stats.incomplete_reasons)
-    reasons = "; ".join(result.stats.incomplete_reasons)
+    reasons = list(result.stats.incomplete_reasons)
+    coverage_fields = (
+        "partial_files",
+        "files_truncated",
+        "truncated_scan",
+        "files_over_cap",
+        "chunks_dropped",
+        "views_dropped",
+        "views_skipped_chunk_budget",
+        "decoded_views_uncovered",
+    )
+    if any(getattr(result.stats, field) for field in coverage_fields):
+        reasons.append("partial or truncated READ coverage")
+    verdict = result.read_verdict
+    if reasons and verdict == "clean":
+        verdict = "incomplete"
+    gaps = len(reasons)
+    reasons = "; ".join(reasons)
     return ReadOutcome(
         status=State.COMPLETE,
-        verdict=result.read_verdict,
+        verdict=verdict,
         max_score=result.max_score,
         reason=f"{gaps} coverage gap(s): {reasons}" if reasons else "",
     )
@@ -37,7 +54,7 @@ def default_read_scanner(path: str | Path) -> ReadOutcome:
         from read.config import config_from_model_config
         from read.scan import scan
 
-        result = scan(target, config_from_model_config())
+        result = scan(target, replace(config_from_model_config(), strict_coverage=True))
     except Exception as exc:  # noqa: BLE001 - a broken READ must never fail the scan open
         return ReadOutcome(
             status=State.ERROR,

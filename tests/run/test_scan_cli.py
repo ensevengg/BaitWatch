@@ -3,7 +3,15 @@ import json
 import jsonschema
 from typer.testing import CliRunner
 
-from run.evidence import HoneytokenHit, NetworkHit, RunComponents, RunError, RunEvidence, State
+from run.evidence import (
+    CommandResult,
+    HoneytokenHit,
+    NetworkHit,
+    RunComponents,
+    RunError,
+    RunEvidence,
+    State,
+)
 from run.scan_cli import app
 from run.schemas import verdict_schema
 from run.verdict import ReadOutcome
@@ -15,6 +23,7 @@ CLEAN = ReadOutcome(status=State.COMPLETE, verdict="clean")
 def complete_run() -> RunEvidence:
     return RunEvidence(
         status="complete",
+        tool_log=[CommandResult(command=["run_cmd", "true"], exit_code=0)],
         components=RunComponents(**{key: State.COMPLETE for key in RunComponents.model_fields}),
     )
 

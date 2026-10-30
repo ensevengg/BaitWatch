@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from run.evidence import RunComponents, RunEvidence, State
+import pytest
+
+from run.evidence import CommandResult, RunComponents, RunEvidence, State
 from run.scan import _outcome_from, default_read_scanner, run_scan
 from run.verdict import READ_BLOCK_SCORE, ReadOutcome, fuse
 
@@ -8,6 +10,7 @@ from run.verdict import READ_BLOCK_SCORE, ReadOutcome, fuse
 def complete_run() -> RunEvidence:
     return RunEvidence(
         status="complete",
+        tool_log=[CommandResult(command=["run_cmd", "true"], exit_code=0)],
         components=RunComponents(**{key: State.COMPLETE for key in RunComponents.model_fields}),
     )
 
@@ -17,8 +20,10 @@ def clean_read() -> ReadOutcome:
 
 
 def fake_result(verdict: str, max_score: float, reasons: list[str] | None = None):
-    stats = type("Stats", (), {"files_scanned": 3, "incomplete_reasons": reasons or []})()
-    return type("Result", (), {"read_verdict": verdict, "max_score": max_score, "stats": stats})()
+    result = real_scan_result(reasons=reasons or [])
+    if verdict == "attack":
+        result.findings = [flagged(max_score)]
+    return result
 
 
 def test_run_scan_fuses_the_read_outcome_with_the_run_evidence(monkeypatch, tmp_path):
@@ -144,3 +149,45 @@ def test_run_scan_uses_the_default_read_scanner(monkeypatch, tmp_path: Path):
     report = run_scan(tmp_path, backend=object())
     assert report.verdict == "FLAG"
     assert "injected" in report.reason
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "partial_files",
+        "files_truncated",
+        "truncated_scan",
+        "files_over_cap",
+        "chunks_dropped",
+        "views_dropped",
+        "views_skipped_chunk_budget",
+        "decoded_views_uncovered",
+    ],
+)
+def test_real_partial_read_stats_never_allow(field):
+    result = real_scan_result()
+    setattr(result.stats, field, 1)
+    assert result.read_verdict == "clean"
+    outcome = _outcome_from(result)
+    assert outcome.verdict == "incomplete"
+    assert "coverage" in outcome.reason
+    assert fuse(outcome, complete_run()).verdict == "FLAG"
+
+
+def test_default_read_scanner_requests_strict_coverage(monkeypatch, tmp_path):
+    from read.config import ReadConfig
+
+    seen = []
+    monkeypatch.setattr("read.config.config_from_model_config", lambda: ReadConfig())
+
+    def scanner(path, config):
+        seen.append(config)
+        return real_scan_result()
+
+    import importlib
+
+    monkeypatch.setattr(importlib.import_module("read.scan"), "scan", scanner)
+    outcome = default_read_scanner(tmp_path)
+    assert outcome.verdict == "clean"
+    assert len(seen) == 1
+    assert seen[0].strict_coverage is True

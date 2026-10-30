@@ -212,15 +212,23 @@ def test_no_lingering_processes_after_an_exec(repo: Path, engine, command: str, 
     assert result.timed_out is timed_out
     if timed_out:
         assert result.exit_code == 137
-        assert [error.code for error in evidence.errors] == ["EXEC_TIMEOUT", "DECOY_FAILED"]
+        assert [error.code for error in evidence.errors] == [
+            "EXEC_LINGERING_KILLED",
+            "EXEC_TIMEOUT",
+            "DECOY_FAILED",
+        ]
         assert evidence.components.sandbox == State.ERROR
         assert evidence.components.decoy == State.ERROR
         assert evidence.status == "error"
     else:
-        assert not evidence.errors, [error.model_dump_json() for error in evidence.errors]
+        assert [error.code for error in evidence.errors] == [
+            "EXEC_LINGERING_KILLED",
+            "DECOY_FAILED",
+        ]
         assert result.exit_code == 0
         assert result.stdout == "started\n"
-        assert evidence.components.decoy == State.COMPLETE
+        assert evidence.components.decoy == State.ERROR
+        assert evidence.status == "error"
     assert "sleep 100" not in live
     assert "timeout" not in live
     assert_no_leftovers(engine, evidence)
@@ -267,7 +275,8 @@ def test_sweep_kills_a_process_whose_comm_looks_like_a_zombie(repo: Path, engine
     evidence = sandbox.evidence
     assert probe.exit_code == 0, probe.stderr
     assert probe.stdout.strip() in {"Z", "missing"}, probe.stdout
-    assert not evidence.errors, [error.model_dump_json() for error in evidence.errors]
+    assert [error.code for error in evidence.errors] == ["EXEC_LINGERING_KILLED"]
+    assert evidence.status == "error"
     assert_no_leftovers(engine, evidence)
 
 
@@ -303,4 +312,14 @@ def test_a_tool_exit_code_is_confirmed_by_dockers_own_record(repo: Path, engine)
     assert result.stdout == "out\n"
     assert result.stderr == "err\n"
     assert not result.timed_out
+    assert_no_leftovers(engine, sandbox.evidence)
+
+
+def test_clean_exec_does_not_flag_the_trusted_timeout_watchdog(repo: Path, engine):
+    sandbox = Sandbox(repo, SandboxConfig(image=PYTHON_IMAGE, decoy_seconds=90))
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["true"])
+    assert result.exit_code == 0
+    assert not sandbox.evidence.errors, [error.code for error in sandbox.evidence.errors]
     assert_no_leftovers(engine, sandbox.evidence)

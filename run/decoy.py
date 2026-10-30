@@ -165,8 +165,8 @@ def run_decoy(
 ) -> None:
     """Drive the model loop; runtime failures are recorded fail-closed.
 
-    COMPLETE means the loop ended without a model or cage error, whether the
-    model finished or spent its step budget. Invalid arguments raise ValueError
+    COMPLETE requires the model to finish within its step budget without a
+    model or cage error. Invalid arguments raise ValueError
     before anything runs. The decoy alone never makes a run ALLOW; it only
     fills the evidence.
     """
@@ -198,6 +198,8 @@ def run_decoy(
                     # continuing would let the loop end COMPLETE over it.
                     raise RuntimeError("the sandbox recorded an error during a tool call")
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": feedback})
+        else:
+            raise _DecoyFailure("DECOY_STEP_BUDGET", "the decoy exhausted its step budget")
         _check_cage(sandbox, deadline)
     except Exception as exc:
         evidence.components.decoy = State.ERROR

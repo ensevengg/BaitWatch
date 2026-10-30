@@ -114,3 +114,16 @@ def test_runtime_copy_excludes_host_state_but_keeps_agent_hooks(repo: Path, tmp_
     assert not (target / ".env").exists()
     assert not (target / ".venv").exists()
     assert (repo / ".env").read_text() == "HOST-ENV-FIXTURE"
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_top_level_git_exemption_requires_a_directory(tmp_path, symlink):
+    source = tmp_path / "source"
+    source.mkdir()
+    git = source / ".git"
+    if symlink:
+        git.symlink_to("missing")
+    else:
+        git.write_text("payload")
+    with pytest.raises(StagingError, match=".git"):
+        stage_repository(source, tmp_path / "staged", StagingLimits())

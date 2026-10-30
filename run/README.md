@@ -19,7 +19,7 @@ uv run --no-sync pytest -m "not gpu" tests/run tests/e2e
 
 Plain `uv sync` or pip installs the default torch, which is CUDA-capable on Linux; `--extra cpu` keeps the CPU build for CI and machines without a GPU.
 
-`bash run/check.sh` runs the same steps. `bash run/check.sh unit` runs only the unit tests.
+`bash run/check.sh` runs lint, format and tests against the installed environment; it does not sync dependencies. `bash run/check.sh unit` runs only the unit tests.
 
 On a machine without Docker, run the unit tests with `uv run --no-sync pytest -m "not docker and not gpu" tests/run`. The full gate needs Docker. If the daemon or an image is missing, the Docker tests fail instead of skipping.
 
@@ -69,7 +69,11 @@ found anything, not that the repository is safe.
 
 The fusion in `run/verdict.py` is provisional until the thresholds are agreed
 with the READ owner. Its fixed rules: any exception, timeout, truncated scan,
-missing component, incomplete READ, or RUN error is at least FLAG; any sink
+missing component, incomplete READ, or RUN error is at least FLAG;
+step-budget exhaustion and killed background work are errors; a decoy without
+an executed `run_cmd`, or staging exclusions beyond the top-level `.git`
+directory, also FLAG. READ runs with strict coverage, and its partial/truncated
+statistics prevent ALLOW; any sink
 contact or honeytoken hit outside the package registries is BLOCK; package-
 registry lookups (pypi.org, registry.npmjs.org) are counted as attempts, not
 exfiltration; honeytoken hits are always BLOCK (the generator arrives in a
@@ -99,3 +103,7 @@ assert evidence.status == "incomplete"
 - The schema rejects ALLOW when any evidence is incomplete.
 
 These tests cover the boundary built so far. They do not prove that a container cannot escape, they do not measure prompt-injection detection, and they do not run the whole product. Integration still has to pass on the team's demo machine. The interface stays a proposal until Manan and Aditya review it.
+
+Literal-IP connections and unlisted ports are a known observation gap: blocked
+network access does not necessarily create a sink hit, so otherwise clean
+scans can still ALLOW them. See [the uncovered channels](SANDBOX.md#known-limits).

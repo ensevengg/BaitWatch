@@ -40,17 +40,19 @@ SINK_POLL_SECONDS = 0.05
 # sits after the last ')' of comm, which may itself contain parens or a
 # newline, so the whole record is read at once; an unreadable or malformed
 # record yields no Z and is killed like a live process.
+# Busybox's timeout watchdog notices a finished parent on its next 1s tick.
 KILL_LINGERING = (
-    "round=0; "
+    "sleep 1; round=0; killed=0; "
     "while [ $round -lt 3 ]; do "
     "alive=0; "
     "for entry in /proc/[0-9]*; do pid=${entry#/proc/}; "
     'if [ "$pid" != "1" ] && [ "$pid" != "$$" ]; then '
     'stat=$(cat "$entry/stat" 2>/dev/null); '
     "state=${stat##*) }; state=${state%% *}; "
-    'if [ "$state" != "Z" ]; then alive=1; kill -KILL "$pid" 2>/dev/null; fi; fi; '
+    'if [ "$state" != "Z" ]; then alive=1; '
+    'if kill -KILL "$pid" 2>/dev/null; then killed=2; fi; fi; fi; '
     "done; "
-    'if [ "$alive" -eq 0 ]; then exit 0; fi; '
+    'if [ "$alive" -eq 0 ]; then exit "$killed"; fi; '
     "round=$((round + 1)); sleep 1; "
     "done; exit 1"
 )
@@ -694,8 +696,10 @@ class Sandbox:
         except Exception as exc:
             self._error("EXEC_KILL_FAILED", str(exc))
             return
-        if result.timed_out or result.output_truncated or result.exit_code != 0:
+        if result.timed_out or result.output_truncated or result.exit_code not in (0, 2):
             self._error("EXEC_KILL_FAILED", "could not kill lingering processes inside the cage")
+        elif result.exit_code == 2:
+            self._error("EXEC_LINGERING_KILLED", "tool call left live background processes to kill")
 
     def _confirm_exec(self, exec_id, result: CommandResult, reached: bool, failure) -> None:
         """Docker's own exec record is the only proof a stream end was the exit.

@@ -1,8 +1,9 @@
 import random
 
 import jsonschema
+import pytest
 
-from run.evidence import HoneytokenHit, NetworkHit, RunComponents, RunEvidence, State
+from run.evidence import CommandResult, HoneytokenHit, NetworkHit, RunComponents, RunEvidence, State
 from run.schemas import verdict_schema
 from run.verdict import READ_BLOCK_SCORE, ReadOutcome, fuse
 
@@ -10,6 +11,7 @@ from run.verdict import READ_BLOCK_SCORE, ReadOutcome, fuse
 def complete_run() -> RunEvidence:
     return RunEvidence(
         status="complete",
+        tool_log=[CommandResult(command=["run_cmd", "true"], exit_code=0)],
         components=RunComponents(**{key: State.COMPLETE for key in RunComponents.model_fields}),
     )
 
@@ -167,6 +169,7 @@ def random_run(rng: random.Random) -> RunEvidence:
         run.status = "complete"
         for name in RunComponents.model_fields:
             setattr(run.components, name, State.COMPLETE)
+        run.tool_log = [CommandResult(command=["run_cmd", "true"], exit_code=0)]
         return run
     for name in RunComponents.model_fields:
         setattr(run.components, name, rng.choice([State.NOT_RUN, State.ERROR, State.COMPLETE]))
@@ -202,6 +205,11 @@ def test_fuse_never_allows_a_dirty_input():
             or run.tls_hits
             or run.honeytoken_hits
             or run.errors
+            or not any(
+                entry.command[0] == "run_cmd" and entry.exit_code is not None
+                for entry in run.tool_log
+            )
+            or any(path != ".git" for path in run.staging_exclusions)
             or any(value != State.COMPLETE for value in run.components.model_dump().values())
         )
         report = fuse(read, run)
@@ -211,3 +219,55 @@ def test_fuse_never_allows_a_dirty_input():
             assert report.verdict != "ALLOW"
         else:
             jsonschema.validate(report.model_dump(mode="json"), verdict_schema())
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        [],
+        [CommandResult(command=["list_files", "."], exit_code=0)],
+        [CommandResult(command=["run_cmd"], stderr="invalid arguments")],
+    ],
+)
+def test_decoy_without_an_executed_command_flags(log):
+    run = complete_run()
+    run.tool_log = log
+    report = fuse(CLEAN, run)
+    assert report.verdict == "FLAG"
+    assert "run_cmd" in report.reason
+
+
+@pytest.mark.parametrize(
+    "excluded",
+    ["node_modules", "__pycache__", "nested/.git", ".env", ".venv", ".aws", ".git/child"],
+)
+def test_unscanned_staging_exclusions_flag(excluded):
+    run = complete_run()
+    run.staging_exclusions = [".git", excluded]
+    report = fuse(CLEAN, run)
+    assert report.verdict == "FLAG"
+    assert "excluded" in report.reason
+
+
+def test_top_level_git_metadata_does_not_prevent_allow():
+    run = complete_run()
+    run.staging_exclusions = [".git"]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_exclusion_reason_is_bounded():
+    run = complete_run()
+    run.staging_exclusions = ["x" * 1000 + str(i) for i in range(100)]
+    report = fuse(CLEAN, run)
+    assert report.verdict == "FLAG"
+    assert len(report.reason) <= 400
+
+
+def test_errors_prevent_allow_even_after_status_is_overwritten():
+    from run.evidence import RunError
+
+    run = complete_run()
+    run.errors.append(RunError(code="DECOY_STEP_BUDGET", message="budget exhausted"))
+    report = fuse(CLEAN, run)
+    assert report.verdict == "FLAG"
+    assert "DECOY_STEP_BUDGET" in report.reason
