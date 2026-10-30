@@ -113,6 +113,12 @@ def test_user_config_mode_ignores_inherited_security_env(
     monkeypatch.setenv("BAITWATCH_HOOK_JUDGE", "0")
     monkeypatch.setenv("BAITWATCH_JUDGE_BASE_URL", "https://checkout-controlled.example/v1")
     monkeypatch.setenv("BAITWATCH_FALLBACK_BASE_URL", "https://checkout-controlled.example/fb")
+    monkeypatch.setenv("BAITWATCH_HOOK_CACHE", str(tmp_path / "checkout-cache.json"))
+    monkeypatch.setenv("BAITWATCH_HOOK_APPROVALS", str(tmp_path / "checkout-approvals.json"))
+    monkeypatch.setenv("BAITWATCH_HOOK_TTL", "999999")
+    monkeypatch.setenv("BAITWATCH_APPROVAL_TTL", "999999")
+    monkeypatch.setenv("BAITWATCH_MODEL_PATH", str(tmp_path / "checkout-model"))
+    monkeypatch.setenv("BAITWATCH_HOOK_DEADLINE", "999")
 
     assert hook_cli._hook_disabled() is True
     assert hook_cli._hook_disabled(user_config=True) is False
@@ -133,8 +139,18 @@ def test_user_config_mode_ignores_inherited_security_env(
     assert seen["BAITWATCH_HOOK_JUDGE"] == "1"
     assert seen["BAITWATCH_JUDGE_BASE_URL"] == "https://judge.example/v1"
     assert seen["BAITWATCH_FALLBACK_BASE_URL"] == "http://127.0.0.1:8080/v1"
+    for key in (
+        "BAITWATCH_HOOK_CACHE",
+        "BAITWATCH_HOOK_APPROVALS",
+        "BAITWATCH_HOOK_TTL",
+        "BAITWATCH_APPROVAL_TTL",
+        "BAITWATCH_MODEL_PATH",
+        "BAITWATCH_HOOK_DEADLINE",
+    ):
+        assert seen[key] is None, key
     assert os.environ["BAITWATCH_REPO"] == str(tmp_path / "checkout-controlled")
     assert os.environ["BAITWATCH_JUDGE_BASE_URL"] == "https://checkout-controlled.example/v1"
+    assert os.environ["BAITWATCH_HOOK_DEADLINE"] == "999"
 
 
 def test_python_i_keeps_the_working_directory_off_sys_path(tmp_path: Path) -> None:

@@ -80,10 +80,12 @@ The generated hook entries look like this:
 `-I` matters: without it Python puts the current directory first on
 `sys.path`, so the scanned checkout could ship its own `hooks/` (or `json.py`)
 and replace the guard with attacker code. `--user-config` applies the same
-boundary to seven security-sensitive settings (`BAITWATCH_HOOK`,
+boundary to thirteen security-sensitive settings (`BAITWATCH_HOOK`,
 `BAITWATCH_HOOK_SCANNER`, `BAITWATCH_ON_ERROR`, `BAITWATCH_REPO`,
-`BAITWATCH_HOOK_JUDGE`, `BAITWATCH_JUDGE_BASE_URL`, and
-`BAITWATCH_FALLBACK_BASE_URL`): in
+`BAITWATCH_HOOK_JUDGE`, `BAITWATCH_JUDGE_BASE_URL`,
+`BAITWATCH_FALLBACK_BASE_URL`, `BAITWATCH_HOOK_CACHE`,
+`BAITWATCH_HOOK_APPROVALS`, `BAITWATCH_HOOK_TTL`, `BAITWATCH_APPROVAL_TTL`,
+`BAITWATCH_MODEL_PATH`, and `BAITWATCH_HOOK_DEADLINE`): in
 that mode, inherited process values are discarded and only string values from
 the `env` object in the user's own `~/.claude/settings.json` are used.
 `onFailure: "block"` covers the case the process never runs.
@@ -250,12 +252,14 @@ first call in a fresh process (imports plus the first walk) must stay under
 ## Environment variables
 
 For `BAITWATCH_HOOK`, `BAITWATCH_HOOK_SCANNER`, `BAITWATCH_ON_ERROR`,
-`BAITWATCH_REPO`, `BAITWATCH_HOOK_JUDGE`, `BAITWATCH_JUDGE_BASE_URL`, and
-`BAITWATCH_FALLBACK_BASE_URL`, installer-generated gates run with
-`--user-config` and read values only from the user's Claude settings as
-described above; inherited checkout-controlled values are ignored. Direct,
-non-installed hook invocations retain the process-environment behavior used
-by CI and the demo.
+`BAITWATCH_REPO`, `BAITWATCH_HOOK_JUDGE`, `BAITWATCH_JUDGE_BASE_URL`,
+`BAITWATCH_FALLBACK_BASE_URL`, `BAITWATCH_HOOK_CACHE`,
+`BAITWATCH_HOOK_APPROVALS`, `BAITWATCH_HOOK_TTL`, `BAITWATCH_APPROVAL_TTL`,
+`BAITWATCH_MODEL_PATH`, and `BAITWATCH_HOOK_DEADLINE`, installer-generated
+gates run with `--user-config` and read values only from the user's Claude
+settings as described above; inherited checkout-controlled values are
+ignored. Direct, non-installed hook invocations retain the
+process-environment behavior used by CI and the demo.
 
 | Variable | Meaning |
 |---|---|
