@@ -7,12 +7,10 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from uuid import uuid4
 
 import docker
 import pytest
 from docker.errors import NotFound
-from docker.types import IPAMConfig, IPAMPool
 
 from run.evidence import State
 from run.sandbox import SCAN_LABEL, Sandbox, SandboxConfig, SandboxError, detonate
@@ -242,29 +240,27 @@ def test_missing_image_fails_closed_without_implicit_pull(repo: Path, engine):
     assert not engine.networks.list(filters={"label": f"{SCAN_LABEL}={evidence.scan_id}"})
 
 
-def test_subnet_collision_does_not_remove_someone_elses_network(repo: Path, engine):
-    unrelated = engine.networks.create(
-        f"bw-test-unrelated-{uuid4().hex}",
-        internal=True,
-        ipam=IPAMConfig(pool_configs=[IPAMPool(subnet="10.13.37.0/24")]),
-    )
-    try:
+def test_subnet_collision_does_not_remove_someone_elses_network(repo: Path, engine, monkeypatch):
+    owner = Sandbox(repo)
+    with owner:
+        occupied = owner.subnet
+        unrelated = engine.networks.get(owner.network_id)
+        monkeypatch.setattr("run.sandbox.DEFAULT_SUBNET", occupied)
         with Sandbox(repo) as sandbox:
             chosen = ipaddress.IPv4Network(sandbox.subnet)
             assert chosen.subnet_of(ipaddress.IPv4Network("10.13.0.0/16"))
-            assert chosen != ipaddress.IPv4Network("10.13.37.0/24")
+            assert chosen != ipaddress.IPv4Network(occupied)
             result = sandbox.run_command(["true"])
             assert result.exit_code == 0
             assert not sandbox.evidence.errors
         assert engine.networks.get(unrelated.id).id == unrelated.id
-        explicit = Sandbox(repo, SandboxConfig(subnet="10.13.37.0/24"))
+        explicit = Sandbox(repo, SandboxConfig(subnet=occupied))
         with pytest.raises(SandboxError, match="overlaps"), explicit:
             pytest.fail("an explicitly configured overlap must fail closed")
         assert engine.networks.get(unrelated.id).id == unrelated.id
         assert explicit.evidence.status == "error"
         assert not explicit.staged_path.parent.exists()
-    finally:
-        unrelated.remove()
+    assert_resources_removed(engine, owner)
 
 
 def test_two_sandboxes_run_side_by_side(repo: Path, tmp_path: Path, engine):
