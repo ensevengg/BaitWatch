@@ -1225,3 +1225,39 @@ def test_ambiguous_http_body_length_is_incomplete():
         b"",
     )
     assert json.loads(output.getvalue())["body_truncated"] is True
+
+
+@pytest.mark.parametrize(
+    "additional,counts,incomplete",
+    [
+        (bytes.fromhex("00002904d0000000000000"), "000000000001", False),
+        (bytes.fromhex("00002904d0000080000008000a000461626364"), "000000000001", False),
+        (bytes.fromhex("00002904d0000000000000") * 2, "000000000002", True),
+        (bytes.fromhex("00002904d0000000000000"), "000100000001", True),
+        (bytes.fromhex("00002904d0000000000001"), "000000000001", True),
+        (bytes.fromhex("00002904d000000000000100"), "000000000001", True),
+        (bytes.fromhex("00002904d0000000000004000a0001"), "000000000001", True),
+        (bytes.fromhex("016100002904d0000000000000"), "000000000001", True),
+        (bytes.fromhex("00000104d0000000000000"), "000000000001", True),
+        (bytes.fromhex("00002904d0000100000000"), "000000000001", True),
+        (bytes.fromhex("00002904d000000000000000"), "000000000001", True),
+    ],
+)
+def test_dns_accepts_only_one_well_formed_edns0_opt(additional, counts, incomplete, tmp_path):
+    import io
+
+    from run.sink_logs import read_sink_log
+
+    dns = load_sink_module("dns_sink.py")
+    packet = (
+        bytes.fromhex("123401000001" + counts)
+        + build_dns_query(b"\x12\x34", "pypi.org")[12:]
+        + additional
+    )
+    output = io.StringIO()
+    dns.log_query(dns.JsonlLog(output), "192.0.2.20", packet, dns.parse_query(packet))
+    record = json.loads(output.getvalue())
+    assert bool(record.get("capture_incomplete")) is incomplete
+    path = tmp_path / "dns.jsonl"
+    path.write_text(output.getvalue())
+    assert bool(read_sink_log(path).problems) is incomplete

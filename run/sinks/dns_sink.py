@@ -229,6 +229,28 @@ def log_question(log, source_ip, parsed, *, capture_incomplete=False):
     log.write(record)
 
 
+def valid_opt(packet, offset):
+    if len(packet) - offset < 11 or packet[offset : offset + 3] != b"\x00\x00\x29":
+        return False
+    # Only EDNS version 0, no extended response code or reserved flag bits.
+    if packet[offset + 5 : offset + 7] != b"\x00\x00" or (
+        int.from_bytes(packet[offset + 7 : offset + 9], "big") & ~0x8000
+    ):
+        return False
+    length = int.from_bytes(packet[offset + 9 : offset + 11], "big")
+    offset += 11
+    if length != len(packet) - offset:
+        return False
+    while offset < len(packet):
+        if len(packet) - offset < 4:
+            return False
+        length = int.from_bytes(packet[offset + 2 : offset + 4], "big")
+        offset += 4 + length
+        if offset > len(packet):
+            return False
+    return True
+
+
 def log_query(log, source_ip, packet, parsed, *, capture_incomplete=False):
     count = int.from_bytes(packet[4:6], "big")
     offset = 12
@@ -239,12 +261,13 @@ def log_query(log, source_ip, packet, parsed, *, capture_incomplete=False):
             break
         questions.append(question)
         offset += len(question[0])
+    additional = int.from_bytes(packet[10:12], "big")
+    sections_complete = not any(packet[6:10]) and (
+        (additional == 0 and offset == len(packet))
+        or (additional == 1 and valid_opt(packet, offset))
+    )
     incomplete = (
-        capture_incomplete
-        or count != 1
-        or len(questions) != count
-        or offset != len(packet)
-        or any(packet[6:12])
+        capture_incomplete or count != 1 or len(questions) != count or not sections_complete
     )
     for question in questions:
         log_question(log, source_ip, question, capture_incomplete=incomplete)

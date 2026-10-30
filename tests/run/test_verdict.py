@@ -185,9 +185,12 @@ def random_run(rng: random.Random) -> RunEvidence:
     else:
         for _ in range(rng.randrange(3)):
             run.errors.append(RunError(code="FIXTURE", message="seeded"))
-    for bucket in (run.dns_hits, run.http_hits, run.tls_hits):
+    for kind in ("dns", "http", "tls"):
         for _ in range(rng.randrange(3)):
-            bucket.append(hit(rng.choice(DESTINATIONS)))
+            contact = hit(rng.choice(DESTINATIONS))
+            if kind == "http":
+                contact.detail = rng.choice(["GET", "HEAD", "POST", "PUT", "GET body=secret"])
+            getattr(run, f"{kind}_hits").append(contact)
     for _ in range(rng.randrange(3)):
         run.honeytoken_hits.append(HoneytokenHit(token_id="t", source="dns"))
     return run
@@ -198,6 +201,7 @@ def test_fuse_never_allows_a_dirty_input():
     # errored, unknown, or carrying evidence is never ALLOW. Seeded random
     # stands in for hypothesis, which is not installed.
     rng = random.Random(20261030)
+    clean_cases = non_get_cases = 0
     for _ in range(2000):
         read, run = random_read(rng), random_run(rng)
         dirty = (
@@ -216,13 +220,18 @@ def test_fuse_never_allows_a_dirty_input():
             or any(path != ".git" for path in run.staging_exclusions)
             or any(value != State.COMPLETE for value in run.components.model_dump().values())
         )
+        non_get_cases += any(hit.detail in {"POST", "PUT"} for hit in run.http_hits)
         report = fuse(read, run)
         assert report.verdict in ("ALLOW", "FLAG", "BLOCK")
         assert report.reason
         if dirty:
             assert report.verdict != "ALLOW"
         else:
+            clean_cases += 1
+            assert report.verdict == "ALLOW"
             jsonschema.validate(report.model_dump(mode="json"), verdict_schema())
+    assert clean_cases > 0
+    assert non_get_cases > 0
 
 
 @pytest.mark.parametrize(
@@ -299,3 +308,41 @@ def test_only_plain_exact_registry_lookups_are_downgraded(kind, destination, det
         NetworkHit(source_ip="10.13.37.20", destination=destination, detail=detail)
     )
     assert fuse(CLEAN, run).verdict == verdict
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "proxy.golang.org",
+        "sum.golang.org",
+        "index.crates.io",
+        "static.crates.io",
+        "rubygems.org",
+        "index.rubygems.org",
+    ],
+)
+@pytest.mark.parametrize(
+    "kind,detail,suffix,expected",
+    [
+        ("dns", "", "", "FLAG"),
+        ("tls", "", "", "FLAG"),
+        ("http", "GET", "/pkg", "FLAG"),
+        ("http", "POST", "/pkg", "BLOCK"),
+        ("http", "GET", "/pkg?q=secret", "BLOCK"),
+        ("dns", "", ".evil.example", "BLOCK"),
+    ],
+)
+def test_ecosystem_registries_only_downgrade_plain_exact_lookups(
+    host, kind, detail, suffix, expected
+):
+    run = complete_run()
+    getattr(run, f"{kind}_hits").append(
+        NetworkHit(source_ip="192.0.2.20", destination=host + suffix, detail=detail)
+    )
+    assert fuse(CLEAN, run).verdict == expected
+
+
+def test_general_source_host_is_not_a_registry():
+    run = complete_run()
+    run.dns_hits.append(hit("github.com"))
+    assert fuse(CLEAN, run).verdict == "BLOCK"

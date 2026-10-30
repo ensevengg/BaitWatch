@@ -4,7 +4,7 @@ The thresholds here are provisional until agreed with Manan; the fixed rules
 are already binding: any exception, timeout, truncated scan, missing component,
 READ incomplete/unavailable or RUN error is at least FLAG, never ALLOW, and any
 non-registry sink contact or honeytoken hit is BLOCK. Package-registry lookups
-(pypi.org, registry.npmjs.org) are network attempts, not exfiltration: they
+to the exact hosts in REGISTRY_HOSTS are network attempts, not exfiltration: they
 FLAG instead of BLOCK. The judge inside READ may escalate but never clears a
 high READ score, so fusion sees only the resulting top score.
 """
@@ -20,6 +20,12 @@ REGISTRY_HOSTS = (
     "registry.npmjs.org",
     "files.pythonhosted.org",
     "registry.yarnpkg.com",
+    "proxy.golang.org",
+    "sum.golang.org",
+    "index.crates.io",
+    "static.crates.io",
+    "rubygems.org",
+    "index.rubygems.org",
 )
 _REASON_PART_CHARS = 400
 
