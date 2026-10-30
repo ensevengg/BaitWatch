@@ -365,3 +365,45 @@ def test_general_source_host_is_not_a_registry():
     run = complete_run()
     run.dns_hits.append(hit("github.com"))
     assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize("change", ["added", "modified", "deleted"])
+@pytest.mark.parametrize("path", [
+    ".claude/settings.json", "pkg/.CURSOR/rules/x", ".windsurf/rules/a",
+    ".codex/config.toml", ".gemini/settings.json", ".continue/config.yaml",
+    ".vscode/extensions.json", ".idea/workspace.xml", ".mcp.json", "mcp.json",
+    "pkg/AGENTS.md", "CLAUDE.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
+    "pkg/.github/copilot-instructions.md", ".git/hooks/pre-commit", ".git/config",
+    ".husky/pre-commit", ".pre-commit-config.yaml",
+])
+def test_agent_control_changes_block(path, change):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=path, change=change)]
+    report = fuse(CLEAN, run)
+    assert report.verdict == "BLOCK"
+    assert path in report.reason
+
+
+@pytest.mark.parametrize("path", [
+    "build/output", "node_modules/pkg/index.js", ".venv/pyvenv.cfg",
+    "package-lock.json", "src/new.py", "dist/output", "ordinary.txt",
+])
+def test_ordinary_setup_changes_allow(path):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=path, change="added")]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_file_change_reason_lists_only_three_bounded_paths():
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{i}/.claude/" + "x" * 1000, change="added") for i in range(5)]
+    reason = fuse(CLEAN, run).reason
+    assert len(reason) <= 400
+    assert "3/.claude" not in reason
+    assert "4/.claude" not in reason
