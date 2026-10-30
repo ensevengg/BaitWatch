@@ -1220,3 +1220,12 @@ def test_detonate_collects_evidence_after_a_late_exception(repo: Path, monkeypat
     assert evidence.status == "error"
     assert evidence.dns_hits[0].destination == "evil.example"
     assert evidence.components.trace == State.COMPLETE
+
+
+def test_byte_filename_exclusions_serialize_after_staging(repo: Path):
+    (repo / "bad\udcff").mkdir()
+    (repo / "bad\udcff" / ".env").write_text("fixture")
+    sandbox = Sandbox(repo, client_factory=fake_client)
+    with sandbox:
+        payload = sandbox.evidence.model_dump_json()
+        assert ".env" in payload

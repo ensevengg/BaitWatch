@@ -1201,3 +1201,27 @@ def test_dns_expanded_name_and_long_sni_are_not_silently_cut():
     http = load_sink_module("http_sink.py")
     name = "a" * 246 + ".pypi.org.evil.com"
     assert http.parse_sni(tls_records(build_client_hello(name, 400), 500)) == name
+
+
+def test_ambiguous_http_body_length_is_incomplete():
+    import io
+
+    module = load_sink_module("http_sink.py")
+    output = io.StringIO()
+
+    class Connection:
+        def recv(self, count):
+            return b""
+
+        def sendall(self, data):
+            pass
+
+    module._log_request(
+        Connection(),
+        ("192.0.2.20", 80),
+        module.JsonlLog(output),
+        [b"GET /pkg HTTP/1.1", b"Host: pypi.org", b"Content-Length: 6", b"Content-Length: 6"],
+        [b"GET", b"/pkg", b"HTTP/1.1"],
+        b"",
+    )
+    assert json.loads(output.getvalue())["body_truncated"] is True

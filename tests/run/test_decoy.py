@@ -474,3 +474,10 @@ def test_deadline_is_checked_between_calls_in_one_reply(monkeypatch):
     run_decoy(sandbox, FakeBackend(LLMReply(tool_calls=calls)))
     assert len(sandbox.argv) == 1
     assert sandbox.evidence.errors[-1].code == "DECOY_DEADLINE"
+
+
+def test_surrogate_tool_arguments_remain_serializable():
+    sandbox = FakeSandbox()
+    call = ToolCall(id="bad", name="read_file", arguments={"path": "bad\udcff"})
+    run_decoy(sandbox, FakeBackend(LLMReply(tool_calls=[call]), LLMReply()))
+    assert "bad" in sandbox.evidence.model_dump_json()

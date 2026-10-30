@@ -8,9 +8,13 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+def safe_text(value: str) -> str:
+    return value.encode("utf-8", errors="backslashreplace").decode("utf-8")
+
+
 def _serializable_text(value):
     if isinstance(value, str):
-        return value.encode("utf-8", errors="backslashreplace").decode("utf-8")
+        return safe_text(value)
     if isinstance(value, list):
         return [_serializable_text(item) for item in value]
     if isinstance(value, dict):

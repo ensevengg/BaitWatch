@@ -16,7 +16,7 @@ from docker.errors import APIError, DockerException, NotFound
 from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount, Ulimit
 
 from run.capture import capture_attached, capture_exec
-from run.evidence import CommandResult, FileDiff, RunError, RunEvidence, State
+from run.evidence import CommandResult, FileDiff, RunError, RunEvidence, State, safe_text
 from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
@@ -295,9 +295,10 @@ class Sandbox:
                 raise SandboxError("Linux containers are required")
             self._client.images.get(self.config.image)
             self._temporary = Path(tempfile.mkdtemp(prefix="bw-stage-"))
-            self.evidence.staging_exclusions = stage_repository(
-                self.path, self.staged_path, self.config.staging
-            )
+            self.evidence.staging_exclusions = [
+                safe_text(path)
+                for path in stage_repository(self.path, self.staged_path, self.config.staging)
+            ]
             self._subnet = self._create_network()
             self._open = True
             return self

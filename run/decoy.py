@@ -138,7 +138,9 @@ def _run_tool(sandbox: Sandbox, call: ToolCall) -> tuple[CommandResult, str]:
         return _failed_call(name, f"{name} argument must not contain NUL")
     result = sandbox.exec(_argv(name, value))
     # tool_log records what the decoy asked for; the exec kept the cage-side argv.
-    return result.model_copy(update={"command": [name, value]}), _feedback(result)
+    return CommandResult.model_validate(
+        {**result.model_dump(), "command": [name, value]}
+    ), _feedback(result)
 
 
 def _assistant_message(reply: LLMReply) -> dict[str, Any]:
