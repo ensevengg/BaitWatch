@@ -100,10 +100,12 @@ Any added, modified or deleted path at or below `.claude`, `.cursor`, `.windsurf
 `.codex`, `.gemini`, `.continue`, `.vscode`, `.idea` or `.husky` BLOCKs. Whole editor
 directories are covered because extensions and workspace settings can execute
 commands. The named files `.mcp.json`, `mcp.json`, `AGENTS.md`, `CLAUDE.md`,
-`GEMINI.md`, `.cursorrules`, `.windsurfrules`, `.pre-commit-config.yaml`,
-`.github/copilot-instructions.md`, `.git/config` and `.git/hooks` also BLOCK,
-including descendants of these names. Matching uses casefold conservatively on
-all platforms and applies at any component depth within the bounded snapshot
+`GEMINI.md`, `.claude.json`, `.claude.json.backup`, `.clinerules`,
+`.aider.conf.yml`, `.cursorrules`, `.windsurfrules`, `.pre-commit-config.yaml`,
+`.github/copilot-instructions.md`, `.github/workflows`, `.envrc`, `.git/config`
+and `.git/hooks` also BLOCK, including descendants of these names. Workflow changes can persist code into CI;
+`.envrc` can execute through direnv on directory entry. Matching uses casefold
+conservatively on all platforms and applies at any component depth within the bounded snapshot
 (default 64 levels, 10,000 entries). Creating new Git metadata counts even though
 original Git metadata was excluded during staging. Reasons show at most three
 paths, at most 100 characters each, within a 400-character rule reason.
@@ -114,24 +116,32 @@ limits, with combined post-run entry/byte checks. Shell startup files (`.bashrc`
 `.profile`, `.bash_profile`, `.bash_login`, `.bash_logout`, `.zshrc`, `.zshenv`,
 `.zprofile`, `.zlogin`, `.zlogout`, `.kshrc`, `.cshrc`, `.tcshrc`, `.login`),
 `.config`, `.ssh`, `.gitconfig`, `.npmrc`, `.pypirc`, `.crontab`, `crontab`, `cron`
-and `cron.*`, plus the agent-control names above, BLOCK at any HOME depth.
-Other HOME writes, including `.cache`, `.npm` and `.local`, remain recorded and
+and `cron.*`, plus the agent-control names above (including the single-file
+agent configs at HOME root), BLOCK at any HOME depth outside dependency/cache
+trees. Other HOME writes, including `.cache`, `.npm` and `.local`, remain recorded and
 alone do not prevent ALLOW. No real credentials or host HOME are copied.
 
-Deleting any counted staged repository file FLAGs. Deleting at least 50% of
-counted files or more than 200 files BLOCKs: the ratio catches small-tree wipes,
+Deleting or truncating a counted staged repository file from nonempty to zero
+bytes FLAGs, including delete-and-recreate as an empty regular file. Destroying
+at least 50% of counted files or more than 200 files BLOCKs: the ratio catches small-tree wipes,
 while the absolute cap catches substantial destruction in large trees. Both the
-denominator and deleted-file count exclude planted honeytoken files, directories,
+denominator and destroyed-file count exclude planted honeytoken files, directories,
 symlinks, HOME and files under any `build`, `dist`, `target`, `node_modules`,
-`__pycache__`, `.pytest_cache` or `.cache` component. A pre-existing repository
+`__pycache__`, `.pytest_cache`, `.cache`, `.venv`, `venv`, `site-packages`,
+`vendor`, `.npm`, `.yarn` or `.pnpm-store` component. A pre-existing repository
 `config/credentials` still counts if no bait was planted there. Sensitive-path
-rules take precedence even within a build/cache tree. Ordinary setup writes
-(build output, dependencies, environments, lockfiles and source files) alone
+matching skips those dependency/cache trees, so installing packages containing
+agent files does not BLOCK. `.git/config` and `.git/hooks` remain protected
+even inside those trees. Ordinary setup writes (build output, dependencies, environments, lockfiles and source files) alone
 remain eligible for ALLOW with clean READ and a complete executed decoy.
 
+`FileDiff.is_truncated` defaults to false and is set by the runner from the
+trusted before/after manifests for counted repository files; it does not change
+the `modified` change type. The JSON schema includes this evidence field.
+
 These rules compare final snapshots, not a write journal: restored writes,
-transient files and `/tmp` writes remain unobserved. Truncating ordinary files
-without deleting them does not yet trigger destructive-deletion rules. Alternate
+transient files and `/tmp` writes remain unobserved. Partial content loss that
+leaves a nonempty regular file does not trigger destruction rules. Alternate
 agent configuration names and environment overrides remain outside the path
 catalog. Matching is lexical: writes through pre-existing symlink or hardlink
 aliases can change an ordinary target without changing its sensitive alias.

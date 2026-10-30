@@ -19,7 +19,7 @@ uv run --no-sync pytest -m "not gpu" tests/run tests/e2e
 
 Plain `uv sync` or pip installs the default torch, which is CUDA-capable on Linux; `--extra cpu` keeps the CPU build for CI and machines without a GPU.
 
-`bash run/check.sh` runs lint, format and tests against the installed environment; it does not sync dependencies. It uses the active `python3`, or `BAITWATCH_PYTHON` when set. `bash run/check.sh unit` runs only the unit tests.
+`bash run/check.sh` runs `uv sync --frozen --extra dev --extra cpu`, then lint, format and tests with `uv run --no-sync`. `bash run/check.sh unit` runs only the unit tests.
 
 On a machine without Docker, run the unit tests with `uv run --no-sync pytest -m "not docker and not gpu" tests/run`. The full gate needs Docker. If the daemon or an image is missing, the Docker tests fail instead of skipping.
 
