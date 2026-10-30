@@ -725,6 +725,48 @@ def test_trace_incomplete_names_a_bounded_set_of_paths(repo: Path, monkeypatch):
     assert len(message) <= 1000
 
 
+def _planted_manifest() -> dict:
+    return {
+        ".env": Entry(kind="file", mode=0o666, size=64, sha256="1" * 64),
+        ".env.local": Entry(kind="file", mode=0o666, size=64, sha256="2" * 64),
+        "config": Entry(kind="dir", mode=0o777),
+        "config/credentials": Entry(kind="file", mode=0o666, size=64, sha256="3" * 64),
+    }
+
+
+def test_trace_after_does_not_charge_planted_files_to_the_write_limit(repo: Path, monkeypatch):
+    manifests = iter([_planted_manifest(), _planted_manifest()])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(
+        repo,
+        SandboxConfig(staging=StagingLimits(max_entries=1)),
+        client_factory=lambda: fake_client(),
+    )
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert not sandbox.evidence.errors
+    assert sandbox.evidence.components.trace == State.COMPLETE
+
+
+def test_trace_after_still_charges_cage_entries_past_the_write_limit(repo: Path, monkeypatch):
+    before = _planted_manifest()
+    before["README.md"] = Entry(kind="file", mode=0o644, size=64, sha256="0" * 64)
+    after = dict(before)
+    after["flood"] = Entry(kind="file", mode=0o666, size=64, sha256="4" * 64)
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(
+        repo,
+        SandboxConfig(staging=StagingLimits(max_entries=1)),
+        client_factory=lambda: fake_client(),
+    )
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
+
+
 def test_trace_after_is_complete_when_no_marker_exists(repo: Path, monkeypatch):
     after = {
         "README.md": Entry(kind="file", mode=0o644, sha256="0" * 64),

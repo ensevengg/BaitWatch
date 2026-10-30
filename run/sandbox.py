@@ -221,6 +221,7 @@ class Sandbox:
         self._sink_logs: dict[str, Path] = {}
         self._sinks_collected: set[str] = set()
         self._honeytokens: tuple[Honeytoken, ...] = ()
+        self._planted_paths: frozenset[str] = frozenset()
         self._honeytoken_scanned = False
         self._trace_before: dict | None = None
 
@@ -333,7 +334,18 @@ class Sandbox:
             ]
             # Planted before the first trace snapshot, so the bait never shows
             # up as one of the repository's own file diffs.
-            self._honeytokens = plant_tokens(self.staged_path, generate_tokens())
+            token_set = generate_tokens()
+            planned = {file.path for file in token_set.files}
+            planned.update(path.rpartition("/")[0] for path in tuple(planned) if "/" in path)
+            existing = {path for path in planned if os.path.lexists(self.staged_path / path)}
+            self._honeytokens = plant_tokens(self.staged_path, token_set)
+            # Only paths planting actually created are exempt from the write
+            # limits; a path the repository already had stays charged.
+            self._planted_paths = frozenset(
+                path
+                for path in planned - existing
+                if os.path.lexists(self.staged_path / path)
+            )
             self._subnet = self._create_network()
             self._open = True
             return self
@@ -693,9 +705,14 @@ class Sandbox:
             FileDiff(path=path, change=change) for path, change in diff(self._trace_before, after)
         ]
         limits = self.config.staging
+        planted = self._planted_paths
         if (
-            len(after) > limits.max_entries
-            or sum(entry.size for entry in after.values() if entry.kind == "file")
+            sum(1 for path in after if path not in planted) > limits.max_entries
+            or sum(
+                entry.size
+                for path, entry in after.items()
+                if entry.kind == "file" and path not in planted
+            )
             > limits.max_bytes
             or any(
                 entry.kind == "file"
