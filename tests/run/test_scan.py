@@ -276,3 +276,18 @@ def test_read_directory_coverage_bounds_fail_closed(monkeypatch, tmp_path, limit
     outcome = default_read_scanner(tmp_path, staging_limits=StagingLimits(**{limit: 0}))
     assert outcome.status == State.ERROR
     assert fuse(outcome, complete_run()).verdict == "FLAG"
+
+
+def test_directory_coverage_failure_preserves_a_real_read_attack(monkeypatch, tmp_path):
+    import importlib
+
+    from run.staging import StagingLimits
+
+    (tmp_path / ".git").mkdir()
+    result = real_scan_result(findings=[flagged(0.97)])
+    result.stats.dirs_skipped = 1
+    monkeypatch.setattr(importlib.import_module("read.scan"), "scan", lambda *a: result)
+    outcome = default_read_scanner(tmp_path, staging_limits=StagingLimits(max_entries=0))
+    assert outcome.status == State.ERROR
+    assert outcome.max_score == 0.97
+    assert fuse(outcome, complete_run()).verdict == "BLOCK"

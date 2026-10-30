@@ -115,13 +115,21 @@ def default_read_scanner(
 
         config = replace(config_from_model_config(), strict_coverage=True)
         result = scan(target, config)
-        covered = not result.stats.dirs_skipped or not _has_unscanned_directory(
-            target, config.walker.excluded_dirs, staging_limits or StagingLimits()
-        )
     except Exception as exc:  # noqa: BLE001 - a broken READ must never fail the scan open
         return ReadOutcome(
             status=State.ERROR,
             reason=f"READ could not run: {str(exc)[:300] or type(exc).__name__}",
+        )
+    try:
+        covered = not result.stats.dirs_skipped or not _has_unscanned_directory(
+            target, config.walker.excluded_dirs, staging_limits or StagingLimits()
+        )
+    except Exception as exc:  # noqa: BLE001 - coverage errors must retain known attack scores
+        outcome = _outcome_from(result)
+        return replace(
+            outcome,
+            status=State.ERROR,
+            reason=f"{outcome.reason}; READ directory coverage check failed: {str(exc)[:300]}",
         )
     return _outcome_from(result, skipped_dirs_covered=covered)
 
