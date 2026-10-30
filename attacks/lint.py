@@ -1,15 +1,25 @@
 """Safety lint for payload-bearing artifacts.
 
-Attack code is only safe when it can never reach a real host. This lint reads
-every generated repo, every hand-written example and the demo script, and
-rejects:
+Attack code is only dangerous when it can reach a real host *by accident*.
+This lint reads every generated repo, every hand-written example and the demo
+script, and rejects:
 
-- any URL whose host is not ``*.example`` (``evil.example`` included);
-- any bare domain under a real TLD;
-- any IPv4 address outside ``10.13.37.0/24``;
+- any URL whose host is outside the sandbox hosts and the corpus allowlist;
+- any bare domain under a real TLD that is not on that allowlist;
+- any IPv4 address outside the sandbox network or RFC 1918 space;
 - anything shaped like a live credential (AWS, GitHub, OpenAI, Slack, Google,
   JWT, PEM private key);
 - a committed ``.env`` (only ``.env.example`` is permitted).
+
+Two host policies apply. The sandbox policy (``*.example`` and
+``10.13.37.0/24``) is the default for tooling and fixtures. The corpus policy
+adds a short, named allowlist of realistic services, because the training split
+must look like a real repository: attacks there target
+``raw.githubusercontent.com``, ``webhook.site``, ``*.vercel.app``,
+``*.ngrok-free.app`` and private addresses instead of ``evil.example``. The
+allowlist is finite, so a typo or a random pasted domain still fails. Nothing
+in this repository contacts an allowlisted host: fixtures stub their sockets and
+the RUN cage has no route out.
 
 It deliberately does not scan documentation, so the project can credit prior
 work by URL in ``docs/`` without needing an exemption here.
@@ -25,10 +35,46 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-__all__ = ["SINK_NETWORK", "Violation", "default_paths", "lint_paths", "main"]
+__all__ = [
+    "CORPUS_HOSTS",
+    "CORPUS_HOST_SUFFIXES",
+    "SINK_NETWORK",
+    "Violation",
+    "allowed_host",
+    "default_paths",
+    "lint_paths",
+    "main",
+]
 
 SINK_NETWORK = ipaddress.ip_network("10.13.37.0/24")
 PACKAGE_DIR = Path(__file__).resolve().parent
+
+# Realistic corpus hosts. Named, not wildcarded, so the exemption stays finite
+# and reviewable; suffixes are the two delegated DNS shapes the plan asks for.
+CORPUS_HOSTS = frozenset(
+    {
+        "raw.githubusercontent.com",
+        "gist.githubusercontent.com",
+        "codeload.github.com",
+        "objects.githubusercontent.com",
+        "webhook.site",
+        "requestbin.net",
+    }
+)
+CORPUS_HOST_SUFFIXES = (
+    ".ngrok.io",
+    ".ngrok-free.app",
+    ".vercel.app",
+    ".trycloudflare.com",
+)
+CORPUS_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+# Realistic corpus addresses may use private space, but not the block reserved
+# for the sandbox sink: 10.13.38.9 must stay an error, not a plausible host.
+SANDBOX_RESERVED = ipaddress.ip_network("10.13.0.0/16")
 
 _URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>)\]]+")
 _DOMAIN_RE = re.compile(
@@ -74,10 +120,21 @@ def _fixed_host(host: str) -> bool:
         return False
     if host == "evil.example" or host == "example" or host.endswith(".example"):
         return True
+    if host in CORPUS_HOSTS or host.endswith(CORPUS_HOST_SUFFIXES):
+        return True
     try:
-        return ipaddress.ip_address(host) in SINK_NETWORK
+        address = ipaddress.ip_address(host)
     except ValueError:
         return False
+    return _allowed_address(address)
+
+
+def _allowed_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if address in SINK_NETWORK:
+        return True
+    if address in SANDBOX_RESERVED:
+        return False
+    return any(address in network for network in CORPUS_NETWORKS)
 
 
 def _allowed_host(host: str) -> bool:
@@ -95,6 +152,11 @@ def _allowed_host(host: str) -> bool:
     return _fixed_host(host)
 
 
+def allowed_host(host: str) -> bool:
+    """The lint's host policy, exposed so tests assert the same rule."""
+    return _allowed_host(host)
+
+
 def _allowed_domain(domain: str) -> bool:
     if _allowed_host(domain):
         return True
@@ -110,7 +172,7 @@ def _allowed_ip(text: str) -> bool:
         address = ipaddress.ip_address(text)
     except ValueError:
         return True
-    return address in SINK_NETWORK
+    return _allowed_address(address)
 
 
 def _env_name_allowed(name: str) -> bool:
@@ -191,6 +253,7 @@ def default_paths() -> list[Path]:
         PACKAGE_DIR / "examples",
         PACKAGE_DIR / "synth" / "seeds.py",
         PACKAGE_DIR / "synth" / "generate.py",
+        PACKAGE_DIR / "synth" / "training.py",
         PACKAGE_DIR.parent / "demo",
     ]
 

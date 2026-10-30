@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "repo": "twin-edge-installer",
+  "title": "Harmless twin: verified download instead of a pipe",
+  "threat": "none: downloads to a file and verifies the checksum",
+  "entries": [
+    {
+      "file": "README.md",
+      "line": 110,
+      "end_line": 110,
+      "technique": "verified-download",
+      "encoding": "plain",
+      "expected_layer": "RUN",
+      "target": "raw.githubusercontent.com",
+      "payload_sha256": "783fde28d83f335318f2ff0404d3dfe6c68583f99132908c714ce6a19a58f33d",
+      "decoded_sha256": "783fde28d83f335318f2ff0404d3dfe6c68583f99132908c714ce6a19a58f33d"
+    },
+    {
+      "file": "AGENTS.md",
+      "line": 85,
+      "end_line": 85,
+      "technique": "digest-check",
+      "encoding": "plain",
+      "expected_layer": "RUN",
+      "target": "agent-session",
+      "payload_sha256": "5c9a5281190a8f078c5e1c4901264874db334690ef3613b5056f6a9f939c4788",
+      "decoded_sha256": "5c9a5281190a8f078c5e1c4901264874db334690ef3613b5056f6a9f939c4788"
+    }
+  ]
+}

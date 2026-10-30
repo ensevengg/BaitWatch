@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "digest"
+version = "2.4.1"
+description = "Turn a commit range into a readable changelog."
+requires-python = ">=3.11"
+dependencies = [
+  "click>=8.1",
+  "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "snapshot"]
+
+[project.scripts]
+digest = "digest.cli:main"

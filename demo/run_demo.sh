@@ -91,9 +91,10 @@ printf '\nInstaller merge for the minimum supported host (dry run, writes nothin
 beat "2:30" "close: safety rails and the leakage gate"
 "$PY" -m attacks lint
 "$PY" -m attacks leakage --data-dir "${TMPDIR:-/tmp}/baitwatch-demo-no-corpus"
-printf '\nRESULT: 5 attack repos, 20 manifest entries, 9 channels, '
+printf '\nRESULT: 22 attack repos, 68 manifest entries, 9 channels, '
 "$PY" - <<'PY'
 from attacks.synth.generate import build_repos
 print(sum(len(repo.entries) for repo in build_repos().values()), "payloads;",
-      "Gate A/B fail closed; payload text never leaves *.example or 10.13.37.0/24.")
+      "Gate A/B fail closed; payload text stays inside the sandbox and the "
+      "finite corpus allowlist.")
 PY

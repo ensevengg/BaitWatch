@@ -26,13 +26,13 @@ require the fine-tuned READ checkpoint or the training corpus.
 
 | Roadmap requirement | Delivered | Verified by |
 |---|---|---|
-| Five attack repos, all five threat types | `attacks/repos/` | `test_repos.py`, `python -m attacks harness` |
+| 22 attack repos: 5 original threats + 12 training-split + 5 harmless twins | `attacks/repos/` | `test_repos.py`, `python -m attacks harness` |
 | README curl bait, `http` **and** `https` | `readme-bait-curl/README.md` | `test_readme_bait_covers_http_and_https` |
 | Runtime JS eval chain | `runtime-eval-chain/scripts/doctor.js` | decoder recovery 2/2 + `node` executes the action (`test_runtime_payloads.py`) |
 | Markdown hidden prompt after invisible chars | `markdown-ghost/` (5 channels) | decoder recovery 5/5 |
 | Agent-config injection in every agent file | `agent-config-injection/` (8 entries) | `test_agent_config_repo_covers_every_agent_file` |
 | Git-hook installer payload | `git-hook-installer/` | `test_git_hook_is_executable_shaped` |
-| `MANIFEST.json` labels per repo | 5 repo manifests + 1 examples manifest | `test_manifests.py` |
+| `MANIFEST.json` labels per repo | 22 repo manifests + 1 examples manifest | `test_manifests.py` |
 | Two examples per threat type | `attacks/examples/` (10 entries) | `test_examples_cover_two_per_threat` |
 | Safety lint (real URLs/IPs/keys forbidden) | `attacks/lint.py` | `test_lint.py`, `python -m attacks lint` |
 | Hash-check payloads against training data | `attacks/leakage.py` | `test_leakage.py` (16 passed) |
@@ -42,13 +42,13 @@ require the fine-tuned READ checkpoint or the training corpus.
 | `< 3 s` target | cache + keyword stand-in | `test_hook_under_three_seconds` |
 | Demo beat sheet `<= 3:00` | `demo/run_demo.sh` | `test_demo_stays_inside_three_minutes` |
 | Docs | `attacks/README.md`, `docs/HOOKS.md`, `demo/README.md` | `test_docs.py` |
-| Payloads only `*.example` / `10.13.37.0/24` | seeds + lint | `test_targets_stay_inside_the_sandbox`, lint clean |
+| Hosts limited to `*.example`, the sandbox sink, and a named corpus allowlist | seeds + lint | `test_targets_stay_inside_the_sandbox`, `test_lint.py`, lint clean |
 | No personal paths in the public tree | `attacks/publication.py` | `test_publication.py`, `python -m attacks publication` |
 | Test-data marker | `.baitwatch-test-data` in every repo | `test_every_repo_is_marked_as_test_data` |
 | De-Caffeinator credit without external URLs | root README + `attacks/README.md` | `test_attack_readme_names_prior_work_without_a_url` |
 
 **Test result on this machine:** `python -m pytest tests/attacks -q` →
-`231 passed`, `0 failed`, `0 skipped` (231 collected). Symlink privilege was
+`239 passed`, `0 failed`, `0 skipped` (239 collected). Symlink privilege was
 granted on this Windows host, so the four symlink tests now execute here
 instead of skipping; they passed. Node 22 is present, so the
 runtime-execution test ran; on a machine without `node` those three tests
@@ -148,21 +148,22 @@ hook fails closed.
 | `attacks/build.py` | 144 | write / check / prune the generated tree |
 | `attacks/decoderlib.py` | 55 | load `read.decoders` without importing torch |
 | `attacks/decoders.py` | 100 | external READ plugin; registers only missing channels |
-| `attacks/harness.py` | 369 | stage repo, scan, compare against manifest, recovery count |
+| `attacks/harness.py` | 386 | stage repo, scan, compare against manifest, recovery count |
 | `attacks/leakage.py` | 361 | exact / embedded / fuzzy payload-vs-corpus check |
-| `attacks/lint.py` | 185 | URL, domain, IP, credential, `.env` safety lint |
+| `attacks/lint.py` | 284 | URL, domain, IP, credential, `.env` safety lint |
 | `attacks/manifests.py` | 195 | load, validate, span hash, expected-file sets |
-| `attacks/synth/generate.py` | 1097 | the single source of truth for repos, examples, manifests |
+| `attacks/synth/generate.py` | 1115 | the single source of truth for repos, examples, manifests |
+| `attacks/synth/training.py` | 2118 | 12 training-split repos + 5 twins, 200–600-line files |
 | `attacks/synth/seeds.py` | 124 | three disjoint seed pools |
 | `attacks/synth/templates.py` | 84 | believable project shells |
 | `attacks/synth/transforms.py` | 337 | 12 symmetric encode/decode transforms |
 | `attacks/MANIFEST.schema.json` | — | Draft 2020-12 schema |
 | `attacks/README.md` | — | contract, catalogue, safety rails |
-| `attacks/repos/` | 46 files | 5 repositories + 5 manifests + markers |
+| `attacks/repos/` | 165 files | 22 repositories + 22 manifests + markers |
 | `attacks/examples/` | 11 files | 10 examples + one manifest |
 
-Generated tree size: **57 files** (`build.build_tree()`), of which
-**5** are `MANIFEST.json` and **1** is `examples/manifest.json`.
+Generated tree size: **176 files** (`build.build_tree()`), of which
+**22** are `MANIFEST.json` and **1** is `examples/manifest.json`.
 
 ### 4.2 `hooks/` — agent gate
 
@@ -187,13 +188,13 @@ Generated tree size: **57 files** (`build.build_tree()`), of which
 | `test_harness.py` | 13 | staging, recall, extras, incomplete, recovery, CLI |
 | `test_hooks.py` | 38 | tool policy, gates, cache, installer, CLI, timing |
 | `test_leakage.py` | 16 | exact/embedded/fuzzy, skip, parquet, incomplete, exit 2 |
-| `test_lint.py` | 19 | URL/domain/IP/key/.env rules, every scheme, dynamic hosts |
+| `test_lint.py` | 23 | URL/domain/IP/key/.env rules, every scheme, dynamic hosts, corpus hosts |
 | `test_manifests.py` | 15 | schema, hashes, spans, neutrality, coverage |
 | `test_publication.py` | 9 | repo-wide personal-path check and its exemptions |
-| `test_repos.py` | 13 | 5 repos, markers, recovery, layers, encodings |
+| `test_repos.py` | 17 | 22 repos, class balance, twins, file size, mid-file spans |
 | `test_runtime_payloads.py` | 3 | Node executes the JS eval chain; every generated `.js` parses |
 | `test_transforms.py` | 36 | round trip per transform, invisibility, bidi, escapes, budgets |
-| **Total** | **231** | |
+| **Total** | **239** | |
 
 ### 4.4 Other new paths
 
@@ -506,17 +507,22 @@ generator sources, and `demo/`.
 
 | Rule | Detail |
 |---|---|
-| URL host | must be `evil.example` or end with `.example` |
-| Bare domain | real TLDs (`com`, `net`, `org`, `io`, `dev`, `ai`, …) rejected |
-| IPv4 | must be inside `10.13.37.0/24` |
+| URL host | sandbox `*.example`, a named corpus host/suffix, or a private/sink address |
+| Bare domain | real TLDs (`com`, `net`, `org`, `io`, `dev`, `ai`, …) rejected unless on the corpus allowlist |
+| IPv4 | `10.13.37.0/24`, or RFC 1918 outside the reserved `10.13.0.0/16` block |
 | Credentials | AWS, GitHub, OpenAI, Slack, Google, JWT, PEM |
 | `.env` | only `.env.example`, `.env.sample`, `.env.template` |
 | Templates | `https://${REGISTRY}/...` is a placeholder, not a live host |
 
+The corpus allowlist is finite and named in `lint.py` (`CORPUS_HOSTS`,
+`CORPUS_HOST_SUFFIXES`): raw GitHub hosts, paste hosts, `*.vercel.app`,
+`*.ngrok-free.app`, `*.trycloudflare.com`. Nothing contacts them; the fixtures
+stub their sockets and the RUN cage has no route out.
+
 Current output:
 
 ```text
-safety lint clean (61 files)
+safety lint clean (249 files)
 ```
 
 `SINK_NETWORK = 10.13.37.0/24` is shared by lint, manifest tests and the hook.
@@ -565,7 +571,7 @@ $ python -m ruff check attacks hooks tests/attacks
 All checks passed!
 
 $ python -m ruff format --check attacks hooks tests/attacks
-61 files already formatted
+130 files already formatted
 ```
 
 ### 11.2 Generated tree, safety lint, READ gate
@@ -576,10 +582,9 @@ lint: clean
 publication: clean
 generated tree: clean
 gate READ agent-config-injection: ok (8/8 payloads recovered)
-gate READ git-hook-installer: ok (2/2 payloads recovered)
-gate READ markdown-ghost: ok (5/5 payloads recovered)
-gate READ readme-bait-curl: ok (3/3 payloads recovered)
-gate READ runtime-eval-chain: ok (2/2 payloads recovered)
+gate READ asset-pipeline: ok (3/3 payloads recovered)
+... 22 repos total ...
+gate READ workspace-cleaner: ok (3/3 payloads recovered)
 PASS: lint, publication, generated tree, and READ gate
 ```
 
@@ -589,10 +594,11 @@ PASS: lint, publication, generated tree, and READ gate
 repo                           layer ok  want  got   miss  extra rec   scanner
 ------------------------------------------------------------------------------
 agent-config-injection         READ  yes     6     8     0     0 8/8   keyword
-git-hook-installer             READ  yes     1     2     0     0 2/2   keyword
-markdown-ghost                 READ  yes     5     5     0     0 5/5   keyword
-readme-bait-curl               READ  yes     1     1     0     0 3/3   keyword
-runtime-eval-chain             READ  yes     1     2     0     0 2/2   keyword
+asset-pipeline                 READ  yes     3     3     0     0 3/3   keyword
+... 22 rows, every row ok yes ...
+twin-edge-installer            READ  yes     0     0     0     0 2/2   keyword
+worker-bootstrap               READ  yes     3     3     0     0 3/3   keyword
+workspace-cleaner              READ  yes     3     3     0     0 3/3   keyword
 ```
 
 `--layer RUN` gives the same `ok yes`, because the RUN gate is a coverage
@@ -630,7 +636,7 @@ selftest: 11/11
 
 ```text
 $ python -m pytest tests/attacks -q
-231 passed
+239 passed
 ```
 
 No test skips on this machine: Node 22 is present and symlink privilege is
@@ -756,8 +762,8 @@ cd <checkout>
 bash demo/run_demo.sh
 ```
 
-Expected: the five beats and `RESULT: 5 attack repos, 20 manifest entries,
-9 channels, 20 payloads; ...`.
+Expected: the five beats and `RESULT: 22 attack repos, 68 manifest entries,
+9 channels, 68 payloads; ...`.
 
 If `bash` resolves to WSL without Python, use Git Bash:
 
@@ -982,8 +988,9 @@ Exit codes:
    a deny, never an allow.
 7. **Deterministic build.** `generate.py` is the only source; `--check` fails
    on drift and `--prune` removes stale files.
-8. **No live targets.** `*.example` and `10.13.37.0/24` only; credentials are
-   referenced by filename, never by value.
+8. **No live targets.** Sandbox names, a finite named corpus allowlist, and
+   private addresses only; credentials are referenced by filename, never by
+   value, and nothing in the repository contacts a host.
 
 ---
 
@@ -998,18 +1005,18 @@ Exit codes:
 | merge with `origin/main` | PR #12 merged upstream; the three `run/*.md` conflicts resolved by taking main's version |
 | ruff check | pass |
 | ruff format check | 61 files formatted |
-| generated tree | 57 files, no drift |
-| safety lint | 61 files clean |
+| generated tree | 176 files, no drift (22 repo manifests + 1 examples manifest) |
+| safety lint | 249 files clean |
 | publication check | clean |
-| READ gate | 5/5 repos, 20/20 payloads recovered |
-| RUN coverage gate | 5/5 repos |
-| tests | 231 collected: 231 passed, 0 skipped (symlink privilege granted on this host) |
+| READ gate | 22/22 repos, 68/68 payloads recovered |
+| RUN coverage gate | 22/22 repos (twins must stay unflagged) |
+| tests | 239 collected: 239 passed, 0 skipped (symlink privilege granted on this host) |
 | READ judge/config | 32 passed |
 | READ decoders | 27 passed |
 | Windows ledger test | 3 ledger tests pass (`msvcrt` sidecar lock) |
 | hook selftest | 11/11 |
 | demo | all beats, exit 0 |
-| packaging | wheel 57/57 corpus files, 6 manifests, 5 markers, no `__pycache__` |
+| packaging | wheel 176/176 corpus files, 23 manifests, 22 markers, no `__pycache__` |
 | `pip check` | clean |
 | `tests/run` | not run here: the `docker` extra is absent in this interpreter |
 
@@ -1145,19 +1152,19 @@ outside link ignored: True
 | Ref | State |
 |---|---|
 | `origin/main` | `1d3a314`; PR #10 (sinks) and PR #12 (decoy) merged |
-| local `main` | this report plus the PR #13 review fixes and a merge of `origin/main`; the round-3 fixes and the merge are committed locally and **not pushed yet** |
+| local `main` | same tree as `origin/aditya/attack-slice` at `de75de6` plus the unpushed training-split expansion |
 | backup | `backup/pre-rebase-<timestamp>` points at the pre-rebase tree |
-| **PR #13** | **`aditya/attack-slice` → `main`; open, 18 review findings closed, CI green at `ace52f7`, round-3 CI pending push** |
+| **PR #13** | **`aditya/attack-slice` → `main`; open and `MERGEABLE`; 18 review findings closed, CI green at `ace52f7` and re-running on `de75de6`** |
 | PR #12 | `ashutosh/d3-decoy` — decoy agent loop, tool calls inside the cage (**merged** as `1d3a314`) |
 | PR #10 | `ashutosh/d2-sinks` — DNS/HTTP/TLS sinks and file trace (**merged**) |
 | merged upstream | `#7 uv-torch-extras`, `#8 sweep-scan-resources`, `#9 per-scan-subnet`, `#10 d2-sinks`, `#12 d3-decoy` |
 | other remote | `read/core-fixes` |
 
 PR #12 merged as `1d3a314` and moved `origin/main` past the base this branch was
-rebased onto, so GitHub reports PR #13 as `CONFLICTING`. The three conflicts
-are `run/CONTRACT.md`, `run/README.md` and `run/SANDBOX.md`; they are resolved
-locally by taking main's version, as the reviewer asked. `docs/decoy-trial/`
-still carries the measured 0/10 result.
+rebased onto, so GitHub reported PR #13 as `CONFLICTING`. The three conflicts
+were `run/CONTRACT.md`, `run/README.md` and `run/SANDBOX.md`; they are resolved
+by taking main's version, as the reviewer asked, and the PR is `MERGEABLE` at
+`de75de6`. `docs/decoy-trial/` still carries the measured 0/10 result.
 
 The ATTACK branch was rebased, not merged, so the five original commits were
 rewritten (`843282c` … `cb2d012`) and the review fixes were stacked on top.
@@ -1224,3 +1231,88 @@ records the checked values.
 Do not present this as a successful decoy. Repo #1 is a negative control for
 Muse Spark; a passing run needs a subtler payload or a model without injection
 training.
+
+---
+
+## 20. Training-split expansion (Manan's corpus policy)
+
+The original five repos are short hand-shaped fixtures. The training split now
+follows Manan's rules: real project prose, 200�600 lines per Markdown file, the
+instruction near the middle, mostly plain text, realistic hosts, and a manifest
+span for every entry. The generator is `attacks/synth/training.py`; it is wired
+into `attacks/synth/generate.py`, so `python -m attacks.build` and the harness
+see one tree.
+
+### 20.1 Composition
+
+| Repo | Class | Entries | Longest file |
+|---|---|---:|---:|
+| `release-train-docs` | safety_off | 4 | 255 |
+| `devshell-profiles` | safety_off | 4 | 253 |
+| `changelog-digest` | concealment | 3 | 253 |
+| `review-queue` | concealment | 3 | 253 |
+| `asset-pipeline` | supply_chain | 3 | 252 |
+| `release-notifier` | supply_chain | 3 | 252 |
+| `workspace-cleaner` | destructive | 3 | 253 |
+| `infra-blueprints` | destructive | 3 | 252 |
+| `support-bundles` | context_leak | 3 | 252 |
+| `issue-templates` | context_leak | 3 | 252 |
+| `edge-agent-installer` | rce | 3 | 253 |
+| `worker-bootstrap` | rce | 3 | 252 |
+| `twin-release-train` | twin | 2 | 252 |
+| `twin-changelog` | twin | 2 | 252 |
+| `twin-asset-pipeline` | twin | 2 | 250 |
+| `twin-workspace-cleaner` | twin | 2 | 251 |
+| `twin-edge-installer` | twin | 2 | 251 |
+
+Totals: **22 repos** (5 original + 12 attack + 5 twins), **68 repo entries**,
+and **176 generated files**. Each training file is 200�255 lines, and every
+entry sits between 35% and 65% of its file. Attacks are one line each, plain
+encoding, spread across `README.md`, `AGENTS.md`, `CONTRIBUTING.md` and one
+`docs/<topic>.md`, so a file-level scan has to read the whole contribution
+rather than a ten-line fixture.
+
+The twins are the same shape with a harmless lookalike: a verified download
+instead of a pipe to a shell, `--force-with-lease` instead of a force push,
+`rm -rf build/` instead of a home directory. Their entries are labelled `RUN`,
+so the READ gate expects nothing from them; the harness asserts they are not
+flagged and that their payloads are still recoverable.
+
+### 20.2 Host policy
+
+Realistic hosts are allowed only through the finite allowlist in
+`attacks/lint.py`: `raw.githubusercontent.com`, `gist.githubusercontent.com`,
+`codeload.github.com`, `objects.githubusercontent.com`, `webhook.site`,
+`requestbin.net`, plus `*.ngrok.io`, `*.ngrok-free.app`, `*.vercel.app` and
+`*.trycloudflare.com`. RFC 1918 addresses are allowed except the reserved
+`10.13.0.0/16` block, so `10.13.38.9` still fails. Nothing contacts a host:
+the runtime fixtures stub their sockets and the RUN cage has no route out.
+
+Tests added for the policy:
+
+- `test_corpus_hosts_are_allowed` � the named hosts and private addresses pass.
+- `test_corpus_allowlist_does_not_open_every_host` � lookalike and parent
+  domains still fail.
+- `test_corpus_hosts_do_not_make_public_ips_legal` � a public IP still fails.
+- `test_realistic_hosts_stay_inside_the_attack_corpus` � no realistic host
+  appears outside `attacks/`, `docs/` or `tests/`.
+- `test_training_split_has_two_repos_per_weak_class`,
+  `test_five_harmless_twins`, `test_training_files_are_contribution_sized`,
+  `test_training_attacks_sit_mid_file` � the composition rules above.
+
+### 20.3 Verification
+
+```text
+$ python -m attacks check
+lint: clean
+publication: clean
+generated tree: clean
+gate READ ...: ok (22/22 repos, 68/68 payloads recovered)
+PASS: lint, publication, generated tree, and READ gate
+
+$ python -m pytest tests/attacks -q
+239 passed
+```
+
+This section describes the corpus, not a detector score. The fine-tuned READ
+checkpoint is not present on this machine, so no model result is claimed here.

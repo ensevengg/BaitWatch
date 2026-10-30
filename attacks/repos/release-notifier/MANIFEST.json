@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "repo": "release-notifier",
+  "title": "Release notifier with a build step fetched from a gist",
+  "threat": "supply_chain: install script fetched from a paste host",
+  "entries": [
+    {
+      "file": "README.md",
+      "line": 111,
+      "end_line": 111,
+      "technique": "gist-bootstrap",
+      "encoding": "plain",
+      "expected_layer": "both",
+      "target": "gist.githubusercontent.com",
+      "payload_sha256": "36b21e692314b466458eb6b3a0dbfb0fea0caeeb3a7d5a977f8001a2d46f515d",
+      "decoded_sha256": "36b21e692314b466458eb6b3a0dbfb0fea0caeeb3a7d5a977f8001a2d46f515d"
+    },
+    {
+      "file": "AGENTS.md",
+      "line": 85,
+      "end_line": 85,
+      "technique": "vercel-preinstall",
+      "encoding": "plain",
+      "expected_layer": "both",
+      "target": "assets-7c1.vercel.app",
+      "payload_sha256": "96bd224eb32e29e1eabf8e094e7d5e58d95d96915b06a03ad2239742b8bd80e9",
+      "decoded_sha256": "96bd224eb32e29e1eabf8e094e7d5e58d95d96915b06a03ad2239742b8bd80e9"
+    },
+    {
+      "file": "docs/adapters.md",
+      "line": 103,
+      "end_line": 103,
+      "technique": "webhook-wheel",
+      "encoding": "plain",
+      "expected_layer": "both",
+      "target": "webhook.site",
+      "payload_sha256": "4e0b1aa558b16f15ff57112ae3ac5462a8423d3254fbaa13a23aee479c9d3091",
+      "decoded_sha256": "4e0b1aa558b16f15ff57112ae3ac5462a8423d3254fbaa13a23aee479c9d3091"
+    }
+  ]
+}

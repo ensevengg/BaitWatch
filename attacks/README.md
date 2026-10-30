@@ -5,8 +5,12 @@ supposed to catch, the decoders that recover them, the hook that stops an
 agent, and the tests that keep all three honest. Nothing here is a detector:
 it is deliberately hostile test data with hard safety rails.
 
-> **Test data only.** Every payload targets `*.example` or the sink network
-> `10.13.37.0/24`. Do not run these repositories outside the RUN sandbox.
+> **Test data only.** Tooling fixtures target `*.example` or the sink network
+> `10.13.37.0/24`. The training split additionally names a finite allowlist of
+> realistic services (raw GitHub, paste hosts, tunnel hosts) and private
+> addresses, because a training corpus has to look like a real repository.
+> Nothing here contacts any host: fixtures stub their sockets and the RUN cage
+> has no route out. Do not run these repositories outside the RUN sandbox.
 > Each generated repo carries a `.baitwatch-test-data` marker.
 
 ## What is here
@@ -18,7 +22,7 @@ it is deliberately hostile test data with hard safety rails.
 | `synth/templates.py` | believable project shells around each payload |
 | `synth/generate.py` | deterministic repos and hand-written examples |
 | `decoders.py` | external READ decoder plugin (only missing channels) |
-| `repos/` | five generated attack repositories, each with `MANIFEST.json` |
+| `repos/` | 22 generated attack repositories, each with `MANIFEST.json` |
 | `examples/` | two hand-written examples per threat type |
 | `MANIFEST.schema.json` | manifest contract |
 | `manifests.py` | load, validate, hash exact line spans |
@@ -75,8 +79,9 @@ payload text: just a line span and two hashes.
 
 - `payload_sha256` hashes the exact bytes of the `line..end_line` span.
 - `decoded_sha256` hashes the recovered seed.
-- `target` is a `*.example` host, a `10.13.37.0/24` address, or
-  `agent-session` for payloads that only talk to the agent.
+- `target` is an allowlisted host (a `*.example` sandbox name or one of the
+  named corpus services), a private or sink address, or `agent-session` for
+  payloads that only talk to the agent.
 - The harness stages a copy **without** `MANIFEST.json`; the scanner never
   sees the answer key.
 
@@ -110,7 +115,7 @@ CPU-only (what CI and the demo use):
 ```bash
 python -m attacks build --check      # generated tree matches generate.py
 python -m attacks lint               # no real hosts, IPs, keys, dotenv files
-python -m attacks harness            # five repos, READ gate, keyword scanner
+python -m attacks harness            # 22 repos, READ gate, keyword scanner
 python -m attacks harness --layer RUN
 python -m attacks harness --scanner read   # needs torch + transformers + checkpoint
 python -m attacks leakage            # skips when no corpus is present
@@ -146,8 +151,10 @@ scanner is `read.scan`, imported lazily so CI never needs torch.
 
 ## Safety rails
 
-1. `attacks/lint.py` rejects any URL outside `*.example`, any IPv4 outside
-   `10.13.37.0/24`, real-looking credentials, and committed `.env` files.
+1. `attacks/lint.py` rejects any URL outside the sandbox policy (`*.example`,
+   `10.13.37.0/24`) and the finite corpus allowlist, any IPv4 outside private
+   or sink space, real-looking credentials, and committed `.env` files. The
+   allowlist is named and reviewed; a random pasted host still fails.
 2. Seeds are ASCII and credential-free; no external host is ever contacted.
 3. Generated repos carry `.baitwatch-test-data` and are never installed.
 4. `MANIFEST.json` stores hashes, not payloads.

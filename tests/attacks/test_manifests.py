@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
-from attacks.lint import SINK_NETWORK
+from attacks.lint import allowed_host
 from attacks.manifests import (
     MANIFEST_NAME,
     ManifestError,
@@ -43,17 +42,10 @@ def _generated_payloads() -> dict[tuple[str, str, int], str]:
     return payloads
 
 
-def test_all_six_manifests_are_present() -> None:
-    assert len(MANIFESTS) == 6
+def test_all_manifests_are_present() -> None:
+    assert len(MANIFESTS) == len(build_repos()) + 1
     names = {manifest["repo"] for _path, manifest in MANIFESTS}
-    assert names == {
-        "readme-bait-curl",
-        "runtime-eval-chain",
-        "markdown-ghost",
-        "agent-config-injection",
-        "git-hook-installer",
-        "examples",
-    }
+    assert names == set(build_repos()) | {"examples"}
 
 
 def test_schema_and_span_hashes() -> None:
@@ -79,9 +71,7 @@ def test_targets_stay_inside_the_sandbox() -> None:
             target = entry["target"]
             if target in allowed_special:
                 continue
-            if target.endswith(".example"):
-                continue
-            assert ipaddress.ip_address(target) in SINK_NETWORK, target
+            assert allowed_host(target), target
 
 
 def test_encoding_is_a_known_transform() -> None:

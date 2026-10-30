@@ -10,14 +10,16 @@ import pytest
 from attacks import harness
 from attacks.manifests import load_manifest
 from attacks.synth.generate import build_repos
+from attacks.synth.training import build_training_repos
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPOS = REPO_ROOT / "attacks" / "repos"
+TWINS = {repo.name for repo in build_training_repos() if repo.threat.startswith("none:")}
 
 
 def test_every_repo_passes_the_read_gate() -> None:
     reports = harness.run_all(scanner=harness.keyword_scanner, layer="READ")
-    assert len(reports) == 5
+    assert len(reports) == len(build_repos())
     for report in reports:
         assert report.ok, (report.repo, report.missed, report.extra)
         assert report.recovered == report.recoverable
@@ -26,6 +28,12 @@ def test_every_repo_passes_the_read_gate() -> None:
 def test_every_repo_passes_the_run_coverage_gate() -> None:
     reports = harness.run_all(scanner=harness.keyword_scanner, layer="RUN")
     for report in reports:
+        if report.repo in TWINS:
+            # Harmless lookalikes: the READ scanner must not bite, and every
+            # payload is still recoverable from its file.
+            assert report.flagged == set(), report.repo
+            assert report.recovered == report.recoverable, report.repo
+            continue
         assert report.ok, (report.repo, report.missed, report.extra)
 
 

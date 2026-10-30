@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from attacks.synth import templates
 from attacks.synth.seeds import ADVERSARIAL_SEEDS, ATTACK_REPO_SEEDS
+from attacks.synth.training import build_training_repos
 from attacks.synth.transforms import encode_seed
 
 __all__ = [
@@ -910,6 +911,7 @@ REPOS: tuple[RepoSpec, ...] = (
     _markdown_ghost(),
     _agent_config(),
     _git_hook(),
+    *build_training_repos(),
 )
 
 

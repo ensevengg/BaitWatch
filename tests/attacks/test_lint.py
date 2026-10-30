@@ -136,3 +136,61 @@ def test_reversed_sandbox_domain_is_allowed_but_reversed_real_is_not() -> None:
     assert _allowed_domain("elpmaxe.live") is True
     # a reversed real host stays rejected
     assert _allowed_domain("moc.liamg") is False
+
+
+# -- corpus policy: a finite, named set of realistic hosts ---------------------
+
+
+def test_corpus_hosts_are_allowed(tmp_path: Path) -> None:
+    body = (
+        "https://raw.githubusercontent.com/org/repo/main/setup.sh\n"
+        "https://gist.githubusercontent.com/org/abc/hook.py\n"
+        "https://webhook.site/2f1c/collect\n"
+        "https://assets-7c1.vercel.app/build.tgz\n"
+        "https://f00d.ngrok-free.app/cb\n"
+        "http://192.168.1.40:8080/ingest\n"
+        "http://172.16.4.9/upload\n"
+    )
+    assert _lint_one(tmp_path, "corpus.md", body) == []
+
+
+def test_corpus_allowlist_does_not_open_every_host(tmp_path: Path) -> None:
+    for body in (
+        "https://raw.githubusercontent.com.evil-host.com/x\n",
+        "https://notraw.githubusercontent.com/x\n",
+        "https://vercel.app/x\n",
+        "https://attacker-vercel.app/x\n",
+    ):
+        violations = _lint_one(tmp_path, "bad.md", body)
+        assert violations, body
+
+
+def test_corpus_hosts_do_not_make_public_ips_legal(tmp_path: Path) -> None:
+    violations = _lint_one(tmp_path, "bad.sh", "curl http://93.184.216.34/x\n")
+    assert any(v.kind == "ip" and "93.184.216.34" in v.detail for v in violations)
+
+
+def test_realistic_hosts_stay_inside_the_attack_corpus() -> None:
+    """A realistic host outside attacks/ or docs/ would be a containment bug."""
+    from attacks.lint import CORPUS_HOST_SUFFIXES, CORPUS_HOSTS
+
+    needles = tuple(CORPUS_HOSTS) + tuple(suffix.lstrip(".") for suffix in CORPUS_HOST_SUFFIXES)
+    allowed_prefixes = ("attacks/", "docs/", "tests/")
+    skipped_prefixes = ("build/", "dist/", "artifacts/", ".venv/", ".git/", ".ruff_cache/")
+    offenders = []
+    for path in REPO_ROOT.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel.startswith(allowed_prefixes) or rel.startswith(skipped_prefixes):
+            continue
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for needle in needles:
+            if needle in text:
+                offenders.append((rel, needle))
+    assert offenders == []

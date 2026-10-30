@@ -8,23 +8,61 @@ from attacks import build
 from attacks.decoderlib import produce_views
 from attacks.manifests import load_manifest
 from attacks.synth.generate import build_examples, build_repos
+from attacks.synth.training import build_training_repos
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ATTACKS = REPO_ROOT / "attacks"
 REPOS = ATTACKS / "repos"
 EXAMPLES = ATTACKS / "examples"
 
-EXPECTED_REPOS = {
+BASE_REPOS = {
     "readme-bait-curl",
     "runtime-eval-chain",
     "markdown-ghost",
     "agent-config-injection",
     "git-hook-installer",
 }
+EXPECTED_REPOS = BASE_REPOS | {repo.name for repo in build_training_repos()}
 
 
-def test_exactly_five_repos() -> None:
+def test_expected_repo_set() -> None:
     assert {path.name for path in REPOS.iterdir() if path.is_dir()} == EXPECTED_REPOS
+
+
+def test_training_split_has_two_repos_per_weak_class() -> None:
+    prefixes = {"safety_off", "concealment", "supply_chain", "destructive", "context_leak", "rce"}
+    counts: dict[str, int] = {}
+    for repo in build_training_repos():
+        if repo.threat.startswith("none:"):
+            continue
+        weak_class = repo.threat.split(":", 1)[0]
+        counts[weak_class] = counts.get(weak_class, 0) + 1
+    assert set(counts) == prefixes
+    assert set(counts.values()) == {2}
+
+
+def test_five_harmless_twins() -> None:
+    twins = [repo for repo in build_training_repos() if repo.threat.startswith("none:")]
+    assert len(twins) == 5
+    for repo in twins:
+        assert repo.entries
+        assert {entry.expected_layer for entry in repo.entries} == {"RUN"}
+
+
+def test_training_files_are_contribution_sized() -> None:
+    for repo in build_training_repos():
+        for path, text in repo.files.items():
+            if not path.endswith(".md"):
+                continue
+            lines = len(text.splitlines())
+            assert 200 <= lines <= 600, (repo.name, path, lines)
+
+
+def test_training_attacks_sit_mid_file() -> None:
+    for repo in build_training_repos():
+        for entry in repo.entries:
+            total = len(repo.files[entry.file].splitlines())
+            assert 0.35 <= entry.line / total <= 0.65, (repo.name, entry.file, entry.line, total)
 
 
 def test_every_repo_is_marked_as_test_data() -> None:

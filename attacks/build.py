@@ -60,13 +60,16 @@ def build_tree() -> dict[Path, str]:
     return files
 
 
+_SKIP_DIRS = {"__pycache__", ".ruff_cache", ".pytest_cache"}
+
+
 def _managed_files() -> set[Path]:
     found: set[Path] = set()
     for root in (REPOS_DIR, EXAMPLES_DIR):
         if not root.exists():
             continue
         for path in root.rglob("*"):
-            if path.is_file() and "__pycache__" not in path.parts:
+            if path.is_file() and not (_SKIP_DIRS & set(path.parts)):
                 found.add(path)
     return found
 

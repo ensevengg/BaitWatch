@@ -64,7 +64,15 @@ __all__ = [
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOS_DIR = PACKAGE_DIR / "repos"
-_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", ".tox"}
+_SKIP_DIRS = {
+    ".git",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    ".tox",
+    ".ruff_cache",
+    ".pytest_cache",
+}
 _BINARY_SUFFIXES = {
     ".png",
     ".jpg",
@@ -101,6 +109,8 @@ _MARKERS: tuple[re.Pattern[str], ...] = tuple(
     for pattern in (
         r"ignore (?:all )?(?:the )?(?:previous|prior) instructions",
         r"ignore prior rules",
+        r"ignora (?:las |los )?(?:instrucciones|reglas) (?:anteriores|previas)",
+        r"ignore[rz]? (?:les |toutes )?instructions (?:pr[ée]c[ée]dentes|ant[ée]rieures)",
         r"disregard (?:the|your|all)",
         r"system override",
         r"system\s*:",
@@ -177,7 +187,15 @@ class GateReport:
 def stage_repo(repo_dir: str | Path, dest: str | Path) -> Path:
     """Copy a repo without its manifest or VCS metadata."""
     repo_dir, dest = Path(repo_dir), Path(dest)
-    ignore = shutil.ignore_patterns(MANIFEST_NAME, "__pycache__", ".git", "node_modules", "*.pyc")
+    ignore = shutil.ignore_patterns(
+        MANIFEST_NAME,
+        "__pycache__",
+        ".git",
+        "node_modules",
+        ".ruff_cache",
+        ".pytest_cache",
+        "*.pyc",
+    )
     shutil.copytree(repo_dir, dest, ignore=ignore)
     return dest
 

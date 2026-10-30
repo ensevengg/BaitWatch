@@ -20,8 +20,8 @@ def test_committed_tree_has_no_drift() -> None:
 
 def test_expected_file_count() -> None:
     tree = build.build_tree()
-    assert len(tree) == 57
-    assert sum(1 for path in tree if path.name == "MANIFEST.json") == 5
+    assert len(tree) == 176
+    assert sum(1 for path in tree if path.name == "MANIFEST.json") == 22
     assert sum(1 for path in tree if path.name == "manifest.json") == 1
 
 
