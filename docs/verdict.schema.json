@@ -59,6 +59,11 @@
     "FileDiff": {
       "additionalProperties": false,
       "properties": {
+        "is_repo_file": {
+          "default": false,
+          "title": "Is Repo File",
+          "type": "boolean"
+        },
         "path": {
           "title": "Path",
           "type": "string"
@@ -248,6 +253,12 @@
         },
         "components": {
           "$ref": "#/$defs/RunComponents"
+        },
+        "staged_file_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Staged File Count",
+          "type": "integer"
         },
         "staging_exclusions": {
           "items": {

@@ -17,7 +17,10 @@ _ENTRY_FIELDS = frozenset({"kind", "mode", "size", "sha256", "target", "error"})
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _MAX_PATH_KEY = 65_536
 _MAX_ERROR = 64
-USAGE = "usage: trace.py snapshot ROOT [--limits JSON] | trace.py unlock ROOT [--limits JSON]"
+USAGE = (
+    "usage: trace.py snapshot ROOT [--limits JSON] | trace.py unlock ROOT [--limits JSON]"
+    " | trace.py unlock-pair ROOT... [--limits JSON]"
+)
 
 
 class TraceError(RuntimeError):
@@ -334,6 +337,15 @@ def _entry_from_json(path: str, fields: object) -> Entry:
 
 def main(argv: Sequence[str]) -> int:
     """Entry point for helper containers: snapshot ROOT | unlock ROOT."""
+    if len(argv) >= 2 and argv[0] == "unlock-pair":
+        rest = list(argv[1:])
+        suffix: list[str] = []
+        if len(rest) >= 3 and rest[-2] == "--limits":
+            suffix, rest = rest[-2:], rest[:-2]
+        if not rest:
+            print(USAGE, file=sys.stderr)
+            return 2
+        return max(main(["unlock", root, *suffix]) for root in rest)
     if not (
         len(argv) == 2
         and argv[0] in {"snapshot", "unlock"}

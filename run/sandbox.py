@@ -36,6 +36,7 @@ from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
 from run.trace import TraceError, TraceLimits, diff, error_paths, manifest_from_json
+from run.verdict import is_build_cache
 
 SCAN_LABEL = "org.baitwatch.scan-id"
 DEFAULT_SUBNET = "10.13.37.0/24"
@@ -242,6 +243,12 @@ class Sandbox:
         return self._temporary / "repo"
 
     @property
+    def home_path(self) -> Path:
+        if self._temporary is None:
+            raise SandboxError("repository has not been staged")
+        return self._temporary / "home"
+
+    @property
     def honeytokens(self) -> tuple[Honeytoken, ...]:
         """The tokens planted for this scan; memory only, never persisted."""
         return self._honeytokens
@@ -359,6 +366,8 @@ class Sandbox:
                 ),
                 default=0,
             )
+            self.home_path.mkdir(mode=0o777)
+            self.home_path.chmod(0o777)
             self._subnet = self._create_network()
             self._open = True
             return self
@@ -407,7 +416,7 @@ class Sandbox:
             labels=self.labels,
             user="65532:65532",
             working_dir=working_dir,
-            environment={"HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"},
+            environment={"HOME": "/home/agent", "PYTHONDONTWRITEBYTECODE": "1"},
             mounts=list(mounts),
             read_only=True,
             privileged=False,
@@ -673,6 +682,19 @@ class Sandbox:
         return values
 
     def _run_trace_helper(self, role: str) -> dict:
+        manifest = {}
+        for root, prefix in ((self.staged_path, ""), (self.home_path, "/home/agent/")):
+            try:
+                entries = self._snapshot_tree(role + ("-home" if prefix else ""), root)
+            except Exception as exc:
+                if not prefix:
+                    raise
+                self._error("TRACE_FAILED", str(exc), component="trace")
+                continue
+            manifest.update({prefix + path: entry for path, entry in entries.items()})
+        return manifest
+
+    def _snapshot_tree(self, role: str, root: Path) -> dict:
         command = [
             "python",
             "-I",
@@ -689,7 +711,7 @@ class Sandbox:
             None,
             networked=False,
             mounts=[
-                Mount("/repo", str(self.staged_path), type="bind", read_only=True),
+                Mount("/repo", str(root), type="bind", read_only=True),
                 Mount("/trace/trace.py", str(TRACE_SCRIPT), type="bind", read_only=True),
             ],
         )
@@ -730,7 +752,7 @@ class Sandbox:
         except Exception as exc:
             self._error("TRACE_FAILED", str(exc), component="trace")
             return False
-        return True
+        return self.evidence.components.trace != State.ERROR
 
     def trace_after(self) -> None:
         if self._trace_before is None:
@@ -740,8 +762,19 @@ class Sandbox:
         except Exception as exc:
             self._error("TRACE_FAILED", str(exc), component="trace")
             return
+        planted = {token.location for token in self._honeytokens}
+        repo_files = {
+            path
+            for path, entry in self._trace_before.items()
+            if entry.kind == "file"
+            and not path.startswith("/home/agent/")
+            and path not in planted
+            and not is_build_cache(path)
+        }
+        self.evidence.staged_file_count = len(repo_files)
         self.evidence.file_diffs = [
-            FileDiff(path=path, change=change) for path, change in diff(self._trace_before, after)
+            FileDiff(path=path, change=change, is_repo_file=path in repo_files)
+            for path, change in diff(self._trace_before, after)
         ]
         limits = self.config.staging
         # Bait the cage left untouched is ours, not the repository's growth.
@@ -782,7 +815,8 @@ class Sandbox:
                 component="trace",
             )
             return
-        self.evidence.components.trace = State.COMPLETE
+        if self.evidence.components.trace != State.ERROR:
+            self.evidence.components.trace = State.COMPLETE
 
     def open_cage(self) -> None:
         """Start the long-lived cage the decoy's tool calls exec into.
@@ -801,7 +835,10 @@ class Sandbox:
                 ["sleep", str(max(1, math.ceil(self.config.decoy_seconds)))],
                 "cage",
                 self.cage_ip,
-                mounts=[Mount("/repo", str(self.staged_path), type="bind", read_only=False)],
+                mounts=[
+                    Mount("/repo", str(self.staged_path), type="bind", read_only=False),
+                    Mount("/home/agent", str(self.home_path), type="bind", read_only=False),
+                ],
                 working_dir="/repo",
             )
             self._cage.start()
@@ -1022,7 +1059,10 @@ class Sandbox:
                 command,
                 "cage",
                 self.cage_ip,
-                mounts=[Mount("/repo", str(self.staged_path), type="bind", read_only=False)],
+                mounts=[
+                    Mount("/repo", str(self.staged_path), type="bind", read_only=False),
+                    Mount("/home/agent", str(self.home_path), type="bind", read_only=False),
+                ],
                 working_dir="/repo",
             )
 
@@ -1134,6 +1174,11 @@ class Sandbox:
         Returns (unlocked, helper removed). A helper whose create reply was lost
         has no handle here, so it counts as not removed and the caller sweeps.
         """
+        roots = [
+            (target, root)
+            for target, root in (("/repo", self.staged_path), ("/home/agent", self.home_path))
+            if root.is_dir()
+        ]
         try:
             container = self._create(
                 self.config.sink_image,
@@ -1141,8 +1186,8 @@ class Sandbox:
                     "python",
                     "-I",
                     "/trace/trace.py",
-                    "unlock",
-                    "/repo",
+                    "unlock-pair",
+                    *[target for target, _ in roots],
                     "--limits",
                     json.dumps(self._trace_limits(cleanup=True)),
                 ],
@@ -1150,7 +1195,10 @@ class Sandbox:
                 None,
                 networked=False,
                 mounts=[
-                    Mount("/repo", str(self.staged_path), type="bind", read_only=False),
+                    *[
+                        Mount(target, str(root), type="bind", read_only=False)
+                        for target, root in roots
+                    ],
                     Mount("/trace/trace.py", str(TRACE_SCRIPT), type="bind", read_only=True),
                 ],
             )

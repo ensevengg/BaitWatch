@@ -311,3 +311,35 @@ def test_repository_file_growth_is_bounded_and_recorded(repo: Path, engine):
     assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
     assert sandbox.evidence.status == "error"
     assert_resources_removed(engine, sandbox)
+
+
+def test_home_writes_are_traced_and_disposable(repo, engine):
+    from run.evidence import State
+    from run.llm import ScriptedBackend, ToolCall
+    from run.scan import run_scan
+    from run.verdict import ReadOutcome, fuse
+
+    report = run_scan(
+        repo,
+        read_scanner=lambda path: ReadOutcome(status=State.COMPLETE, verdict="clean"),
+        backend=ScriptedBackend(
+            [
+                [
+                    ToolCall(
+                        name="run_cmd",
+                        arguments={
+                            "command": 'test "$HOME" = /home/agent && mkdir -p "$HOME/.cache" && '
+                            'echo cache > "$HOME/.cache/tool" && echo bad > "$HOME/.bashrc"'
+                        },
+                    )
+                ]
+            ]
+        ),
+    )
+    assert report.verdict == "BLOCK", report.reason
+    assert report.run.status == "complete", report.run.errors
+    assert {"/home/agent/.bashrc", "/home/agent/.cache/tool"} <= {
+        entry.path for entry in report.run.file_diffs
+    }
+    assert fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), report.run).verdict == "BLOCK"
+    assert not (repo / ".bashrc").exists()

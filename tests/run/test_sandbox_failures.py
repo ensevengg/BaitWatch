@@ -1368,3 +1368,47 @@ def test_trace_charges_oversize_new_files_and_rewritten_bait(repo: Path, monkeyp
         sandbox.trace_after()
     assert "REPO_WRITE_LIMIT" in {error.code for error in sandbox.evidence.errors}
     assert sandbox.evidence.status == "error"
+
+
+def test_home_snapshot_failure_keeps_repo_changes_and_trace_error(repo, monkeypatch):
+    before = {"README.md": Entry(kind="file", mode=0o666, sha256="0" * 64)}
+    after = {"README.md": Entry(kind="file", mode=0o666, sha256="1" * 64)}
+
+    def snapshot_tree(self, role, root):
+        if root == self.home_path:
+            raise RuntimeError("home snapshot unavailable")
+        return before if "before" in role else after
+
+    monkeypatch.setattr(Sandbox, "_snapshot_tree", snapshot_tree)
+    sandbox = Sandbox(repo, client_factory=fake_client)
+    with sandbox:
+        assert not sandbox.trace_before()
+        sandbox.trace_after()
+    assert sandbox.evidence.components.trace == State.ERROR
+    assert [(entry.path, entry.change) for entry in sandbox.evidence.file_diffs] == [
+        ("README.md", "modified")
+    ]
+    assert any(error.code == "TRACE_FAILED" for error in sandbox.evidence.errors)
+
+
+def test_trace_counts_repo_files_without_bait_cache_or_directories(repo, monkeypatch):
+    manifests = iter(
+        [
+            {
+                "README.md": Entry(kind="file", mode=0o666, sha256="0" * 64),
+                "build/output": Entry(kind="file", mode=0o666, sha256="0" * 64),
+                ".env": Entry(kind="file", mode=0o666, sha256="0" * 64),
+                "src": Entry(kind="dir", mode=0o777),
+            },
+            {},
+        ]
+    )
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, client_factory=fake_client)
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert sandbox.evidence.staged_file_count == 1
+    assert [entry.path for entry in sandbox.evidence.file_diffs if entry.is_repo_file] == [
+        "README.md"
+    ]
