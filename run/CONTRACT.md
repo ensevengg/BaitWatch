@@ -85,3 +85,10 @@ call (including rejected arguments) toward max_steps as well as bounding model
 turns. Docker exec completion tolerates up to two seconds of delayed exit-event
 publication; a still-running or malformed record remains a transport error.
 Sink and after-trace collection run in finally blocks before sandbox cleanup.
+
+Keyed plain-HTTP model requests are allowed only to exact `localhost` or
+`127.0.0.1` and bypass all environment proxies, regardless of `no_proxy`.
+HTTPS model requests retain urllib's environment proxy behavior: HTTP proxies
+use CONNECT and the request, including Authorization, stays inside the verified
+TLS connection to the endpoint. Keyless HTTP requests retain proxy behavior.
+Redirects remain disabled for all model requests.

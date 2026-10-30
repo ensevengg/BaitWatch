@@ -158,7 +158,13 @@ class OpenAICompatBackend:
         self.max_calls = _positive_int("max_calls", max_calls)
         self.max_response_bytes = _positive_int("max_response_bytes", max_response_bytes)
         self._calls = 0
-        self._opener = urllib.request.build_opener(_NoRedirects())
+        if api_key_env is not None and endpoint.scheme == "http":
+            # The localhost HTTP exception must not send credentials through a proxy.
+            self._opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), _NoRedirects()
+            )
+        else:
+            self._opener = urllib.request.build_opener(_NoRedirects())
 
     def __repr__(self) -> str:
         return (
