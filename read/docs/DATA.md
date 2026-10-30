@@ -84,7 +84,8 @@ files flagged**, detector + decoders, judge off, every set run through
 - Harmless: the FPR corpus (10 repos) + TEST_REPOS files + the held-out 20%
   of fetched agent files (repos never trained on; `agentfiles.split_for_repo`)
   + gold lookalikes + suite benign files. The gate threshold is the lowest one
-  that keeps all of them at ≤0.5%.
+  that keeps the pooled set at ≤0.5%; per-set rates (agent files, for example)
+  can be higher and are reported separately.
 
 Agent files are screened before use (`read.data.v17.screen`): pattern hits
 and the highest-scoring files are read by hand and anything hostile goes into

@@ -14,6 +14,7 @@ Backfill finished runs and gate reports from the files they left behind:
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -57,10 +58,11 @@ class MlflowRun:
             run = _call(uri, "POST", "runs/create", {
                 "experiment_id": exp_id, "run_name": run_name, "start_time": _now_ms(),
                 "tags": [{"key": k, "value": str(v)} for k, v in (tags or {}).items()]})
-        except (OSError, ValueError, KeyError, TypeError) as e:
+            run_id = run["run"]["info"]["run_id"]
+        except (OSError, ValueError, KeyError, TypeError, http.client.HTTPException) as e:
             print(f"mlflow: logging off ({uri}: {e})", file=sys.stderr, flush=True)
             return None
-        out = cls(uri, run["run"]["info"]["run_id"])
+        out = cls(uri, run_id)
         if params:
             out.log_params(params)
         if out.alive:
@@ -91,7 +93,7 @@ class MlflowRun:
             return
         try:
             _call(self.uri, "POST", path, body)
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, http.client.HTTPException) as e:
             self.alive = False
             print(f"mlflow: logging off ({e})", file=sys.stderr, flush=True)
 

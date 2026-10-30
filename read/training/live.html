@@ -142,7 +142,10 @@ const STATUS = {
   idle:     { color: "var(--muted)",    icon: "○", label: "Idle" },
 };
 
-let lastData = null, hoverX = null, lastSeen = Date.now();
+let lastData = null, hoverX = null, lastSeen = Date.now(), lastTs = null;
+
+// Report names and log lines come from files on disk: insert them as text.
+const esc = (x) => String(x).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
 function tile(label, value, delta) {
   return `<div class="card tile"><div class="label">${label}</div><div class="value">${value}</div>` +
@@ -229,7 +232,7 @@ function renderGates(gates, target) {
   const rows = gates.map(g => {
     const st = g.pass ? STATUS.finished : STATUS.failed;
     const w = Math.max(0, Math.min(1, g.held_out || 0)) * 100;
-    return `<tr><td><b>${g.name}</b></td>
+    return `<tr><td><b>${esc(g.name)}</b></td>
       <td><div class="bar-cell" title="held-out recall ${fmtPct(g.held_out)}">
         <div class="fill" style="width:${w}%"></div><div class="target" style="left:${target.recall * 100}%"></div></div></td>
       <td class="num"><b>${fmtPct(g.held_out)}</b></td>
@@ -244,7 +247,7 @@ function renderGates(gates, target) {
 }
 
 function render(d) {
-  lastData = d; lastSeen = Date.now();
+  lastData = d;
   const run = d.run || {};
   const st = STATUS[run.status] || STATUS.idle;
   $("status").innerHTML = `<span class="pill"><span style="color:${st.color}">${st.icon}</span>${st.label}` +
@@ -261,8 +264,9 @@ function render(d) {
   $("elapsed").textContent = fmtDur(run.elapsed_s);
   $("eta").textContent = run.status === "running" && run.stage === "training" ? fmtDur(run.eta_s) : (run.status === "finished" ? "done" : "–");
   $("rate").textContent = run.rate ? `${(run.rate * 60).toFixed(0)}/min` : "–";
-  $("runmeta").textContent = run.log ? `log ${run.log}${run.lr ? " · lr " + run.lr : ""}` : "No training run found.";
-  $("failed").innerHTML = run.failed ? `<pre>${(run.tail || []).join("\n")}</pre>` : "";
+  $("runmeta").textContent = run.log ? `log ${run.log}${run.lr ? " · lr " + run.lr : ""}` :
+    (run.status === "running" ? "Trainer stdout is not a file: restart the watcher with --log." : "No training run found.");
+  $("failed").innerHTML = run.failed ? `<pre>${esc((run.tail || []).join("\n"))}</pre>` : "";
 
   const v = run.val || [], cv = v[v.length - 1], pv = v[v.length - 2];
   $("tiles").innerHTML =
@@ -295,10 +299,18 @@ function render(d) {
 function poll() {
   const s = document.createElement("script");
   s.src = "live_data.js?t=" + Date.now();
-  s.onload = () => { if (window.LIVE) render(window.LIVE); s.remove(); };
+  // A stopped watcher leaves the old file readable: only a new timestamp counts.
+  s.onload = () => {
+    const d = window.LIVE;
+    if (d && d.ts !== lastTs) { lastTs = d.ts; lastSeen = Date.now(); render(d); }
+    s.remove();
+  };
   s.onerror = () => s.remove();
   document.head.appendChild(s);
-  if (Date.now() - lastSeen > 20000) $("updated").innerHTML = `<span class="stale">watcher not updating — is read.training.live running?</span>`;
+  if (Date.now() - lastSeen > 20000) {
+    $("updated").innerHTML = `<span class="stale">watcher not updating — is read.training.live running?</span>`;
+    $("status").innerHTML = `<span class="pill"><span style="color:${STATUS.idle.color}">${STATUS.idle.icon}</span>Unknown</span>`;
+  }
 }
 $("theme").onclick = () => {
   const cur = document.documentElement.dataset.theme ||

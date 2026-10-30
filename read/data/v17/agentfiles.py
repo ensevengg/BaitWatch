@@ -55,23 +55,28 @@ def _gh(args: list[str]) -> dict | list | None:
         return None
 
 
-def search(pages: int = 3, pause_s: float = 7.0) -> list[dict]:
-    """(repo, path, sha) hits; code search allows ~10 requests a minute."""
+def search(pages: int = 3, pause_s: float = 7.0) -> tuple[list[dict], int]:
+    """(repo, path, sha) hits and the number of failed pages; code search
+    allows ~10 requests a minute."""
     hits: dict[tuple[str, str], dict] = {}
+    failed = 0
     for q in QUERIES:
         for size in SIZE_BUCKETS:
             for page in range(1, pages + 1):
                 data = _gh(["-X", "GET", "search/code", "-f", f"q={q} {size}",
                             "-f", "per_page=100", "-f", f"page={page}"])
                 time.sleep(pause_s)
-                items = (data or {}).get("items", []) if isinstance(data, dict) else []
+                if not isinstance(data, dict) or "items" not in data:
+                    failed += 1     # rate limit / network: not the same as no results
+                    break
+                items = data["items"]
                 for it in items:
                     key = (it["repository"]["full_name"], it["path"])
                     hits.setdefault(key, {"repo": key[0], "path": key[1], "sha": it["sha"],
                                           "query": q})
                 if len(items) < 100:
                     break
-    return list(hits.values())
+    return list(hits.values()), failed
 
 
 def repo_infos(repos: list[str], batch: int = 50) -> dict[str, dict]:
@@ -87,7 +92,9 @@ def repo_infos(repos: list[str], batch: int = 50) -> dict[str, dict]:
         data = _gh(["graphql", "-f", "query={ " + " ".join(fields) + " }"])
         repos_data = (data or {}).get("data") or {} if isinstance(data, dict) else {}
         for j, full in enumerate(chunk):
-            d = repos_data.get(f"r{j}") or {}
+            if f"r{j}" not in repos_data:
+                continue    # request failed: leave the repo for the next run
+            d = repos_data[f"r{j}"] or {}    # null: repo gone or private
             out[full] = {"license": (d.get("licenseInfo") or {}).get("spdxId"),
                          "stars": d.get("stargazerCount", 0), "fork": d.get("isFork", False),
                          "archived": d.get("isArchived", False)}
@@ -122,8 +129,11 @@ def fetch(out: Path, min_stars: int = 10, max_bytes: int = 60_000, workers: int 
     if hits_path.exists():
         hits = json.loads(hits_path.read_text())
     else:
-        hits = search()
-        hits_path.write_text(json.dumps(hits, indent=1))
+        hits, failed = search()
+        if failed:      # keep the run going but search again next time
+            print(f"agentfiles: {failed} search page(s) failed; search_hits.json not saved")
+        else:
+            hits_path.write_text(json.dumps(hits, indent=1))
     lock = json.loads(lock_path.read_text()) if lock_path.exists() else {"files": {}, "repos": {}}
     todo = sorted({h["repo"] for h in hits} - set(lock["repos"]))
     lock["repos"].update(repo_infos(todo))

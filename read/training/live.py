@@ -5,10 +5,11 @@ few seconds, and the page re-loads that script in place (script tags work on
 file://, fetch does not). Open the printed path in a browser.
 
 It finds the running trainer through /proc (stdout fd -> log file, cmdline ->
---out-dir / --epochs, etimes -> elapsed), so nothing has to be passed in.
+--out-dir / --epochs, etimes -> elapsed), so nothing has to be passed in. A
+trainer whose stdout is a terminal has no log to read: pass ``--log``.
 Finished runs are read back from the reports directory.
 
-    python -m read.training.live [--reports ~/.local/share/baitwatch/reports/v17]
+    python -m read.training.live [--reports ~/.local/share/baitwatch/reports/v17] [--log LOG]
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ def _procs() -> list[dict]:
             if stage is None:
                 continue
             log = os.readlink(d / "fd/1")
+            if not Path(log).is_file():     # a tty would block the read; pipes have no path
+                log = None
             etimes = int(subprocess.run(["ps", "-o", "etimes=", "-p", d.name],
                                         capture_output=True, text=True).stdout.strip() or 0)
             out.append({"pid": int(d.name), "stage": stage, "argv": argv, "log": log,
@@ -59,10 +62,10 @@ def _arg(argv: list[str], name: str, default: str | None = None) -> str | None:
     return default
 
 
-def parse_train_log(path: Path) -> dict:
+def parse_train_log(path: Path | None) -> dict:
     steps, vals, total, failed = [], [], None, False
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(errors="replace") if path else ""
     except OSError:
         return {"steps": [], "val": [], "total_steps": None, "failed": False}
     for line in text.splitlines():
@@ -117,14 +120,14 @@ def gate_reports(reports: Path) -> list[dict]:
     return rows
 
 
-def snapshot(reports: Path) -> dict:
+def snapshot(reports: Path, log_override: Path | None = None) -> dict:
     procs = _procs()
     train = next((p for p in procs if p["stage"] == "training"), None)
     run: dict = {"status": "idle", "stage": None}
     if train:
-        log = Path(train["log"])
+        log = log_override or (Path(train["log"]) if train["log"] else None)
         out_dir = _arg(train["argv"], "--out-dir")
-        run = {"status": "running", "stage": "training", "log": str(log),
+        run = {"status": "running", "stage": "training", "log": str(log) if log else None,
                "model": Path(out_dir).name if out_dir else None,
                "epochs": int(_arg(train["argv"], "--epochs", "3")),
                "lr": _arg(train["argv"], "--lr"), "base": Path(_arg(train["argv"], "--base-model",
@@ -146,7 +149,7 @@ def snapshot(reports: Path) -> dict:
         rate = done / max(1, run["elapsed_s"])
         run["rate"] = rate
         run["eta_s"] = (run["total_steps"] - done) / rate if rate else None
-    return {"updated": time.strftime("%H:%M:%S"), "run": run, "gpu": gpu(),
+    return {"updated": time.strftime("%H:%M:%S"), "ts": time.time(), "run": run, "gpu": gpu(),
             "others": [{"stage": p["stage"], "pid": p["pid"], "elapsed_s": p["elapsed_s"]}
                        for p in procs if p["stage"] != "training"],
             "gates": gate_reports(reports), "target": {"recall": 0.96, "fpr": 0.005}}
@@ -164,13 +167,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default=str(HOME / "reports/live"))
     parser.add_argument("--every", type=float, default=4.0)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--log", default=None,
+                        help="training log, for a trainer whose stdout is not a file")
     args = parser.parse_args(argv)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     write_atomic(out / "index.html", (Path(__file__).parent / "live.html").read_text())
     print(f"open file://{out / 'index.html'}", flush=True)
     while True:
-        data = snapshot(Path(args.reports))
+        data = snapshot(Path(args.reports), Path(args.log) if args.log else None)
         write_atomic(out / "live_data.js", "window.LIVE = " + json.dumps(data) + ";\n")
         if args.once:
             return 0

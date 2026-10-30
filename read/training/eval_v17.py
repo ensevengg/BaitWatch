@@ -66,7 +66,7 @@ def _cfg(model: Path, max_files: int = 5_000) -> ReadConfig:
 
 
 def file_scores(target: Path, det: Detector, cfg: ReadConfig) -> dict[str, float]:
-    """Max chunk score per scanned file (0.0 for files with no chunk)."""
+    """Max chunk score per file the scan reported (files with no chunk are absent)."""
     res = scan(target, cfg, detector=det, decoders=DECODERS)
     out: dict[str, float] = {}
     for f in res:
@@ -106,9 +106,19 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
     gold_cases = json.loads((gold_root / "cases.json").read_text())
     gold_scores = {**scan_cases(gold_root / "attack", det, cfg),
                    **scan_cases(gold_root / "benign", det, cfg)}
+    # A file the scan never reported (walker skip, key mismatch) is a miss if
+    # it is an attack and left out of the harmless pool otherwise; both are
+    # listed under "unscanned" so a silent mismatch shows up in the report.
+    unscanned: dict[str, list[str]] = {"gold": [], "aditya": [], "agent_files": []}
     gold_attack, gold_benign, gold_rows = [], [], []
     for c in gold_cases:
-        s = gold_scores.get(c["case"], {}).get(c["file"], 0.0)
+        s = gold_scores.get(c["case"], {}).get(c["file"])
+        if s is None:
+            unscanned["gold"].append(c["case"])
+            if c["label"] != 1:
+                gold_rows.append({**c, "score": None})
+                continue
+            s = 0.0
         gold_rows.append({**c, "score": s})
         (gold_attack if c["label"] == 1 else gold_benign).append(s)
 
@@ -125,7 +135,10 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
             manifest = json.loads((repo / ".manifest.json").read_text())
             scores = file_scores(repo / "tree", det, cfg)
             for e in manifest["entries"]:
-                aditya[f'{repo.name}:{e["file"]}'] = scores.get(e["file"], 0.0)
+                key = f'{repo.name}:{e["file"]}'
+                if e["file"] not in scores:
+                    unscanned["aditya"].append(key)
+                aditya[key] = scores.get(e["file"], 0.0)
 
     corpus_files: dict[str, float] = {}
     corpus_cfg = _cfg(model, max_files=corpus_max_files)
@@ -147,7 +160,10 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
                     and split_for_repo(meta["repo"], TRAIN_REPOS, TEST_REPOS) == "test_planted"):
                 path = HOME / "v17_raw/agentfiles/files" / meta["local"]
                 scores = file_scores(path, det, cfg)
-                agent_files[key] = max(scores.values(), default=0.0)
+                if not scores:
+                    unscanned["agent_files"].append(key)
+                    continue
+                agent_files[key] = max(scores.values())
 
     benign_all = np.array(list(corpus_files.values()) + list(agent_files.values())
                           + gold_benign + suite_benign_files)
@@ -182,7 +198,9 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
         "counts": {"gold_attack": len(gold_attack), "gold_benign": len(gold_benign),
                    "suite_attack": len(suite_attack), "suite_benign_files": len(suite_benign_files),
                    "aditya_payload_files": len(aditya), "corpus_files": len(corpus_files),
-                   "heldout_agent_files": len(agent_files)},
+                   "heldout_agent_files": len(agent_files),
+                   **{f"unscanned_{k}": len(v) for k, v in unscanned.items()}},
+        "unscanned": unscanned,
         "at_gate_threshold": gate,
         "held_out_recall_at_gate": recall_at(held_out, t_gate),
         "gate_pass": bool(recall_at(held_out, t_gate) >= TARGET_RECALL),
