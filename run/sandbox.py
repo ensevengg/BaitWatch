@@ -13,7 +13,7 @@ from pathlib import Path
 
 import docker
 from docker.errors import APIError, DockerException, NotFound
-from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount
+from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount, Ulimit
 
 from run.capture import capture_attached, capture_exec
 from run.evidence import CommandResult, FileDiff, RunError, RunEvidence, State
@@ -357,6 +357,15 @@ class Sandbox:
             memswap_limit=config.memory_bytes,
             nano_cpus=config.nano_cpus,
             pids_limit=config.pids_limit,
+            ulimits=[
+                Ulimit(
+                    name="fsize",
+                    soft=config.staging.max_file_bytes,
+                    hard=config.staging.max_file_bytes,
+                )
+            ]
+            if role == "cage"
+            else None,
             tmpfs={"/tmp": f"rw,noexec,nosuid,nodev,size={config.tmpfs_bytes},mode=1777"},
             log_config=LogConfig(type="json-file", config={"max-size": "1m", "max-file": "1"}),
             restart_policy={"Name": "no"},
@@ -619,6 +628,19 @@ class Sandbox:
         self.evidence.file_diffs = [
             FileDiff(path=path, change=change) for path, change in diff(self._trace_before, after)
         ]
+        limits = self.config.staging
+        if (
+            len(after) > limits.max_entries
+            or sum(entry.size for entry in after.values() if entry.kind == "file")
+            > limits.max_bytes
+            or any(
+                entry.kind == "file" and entry.size >= limits.max_file_bytes
+                for entry in after.values()
+            )
+        ):
+            self._error(
+                "REPO_WRITE_LIMIT", "staged repository reached a file, total byte or entry limit"
+            )
         marked = sorted(set(error_paths(self._trace_before)) | set(error_paths(after)))
         if marked:
             # The diffs are still evidence, but a snapshot that could not read

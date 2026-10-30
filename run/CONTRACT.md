@@ -62,3 +62,7 @@ READ system findings are operational failures, with ERROR coverage and a
 truthful note, never detector scores. Genuine flagged model/judge scores still
 block at the threshold even alongside system failures. Attack verdict reasons
 retain coverage gaps.
+
+A snapshot reaching the per-file cap or exceeding staging total-byte/entry
+limits records `REPO_WRITE_LIMIT` and prevents ALLOW. RLIMIT_FSIZE is a hard
+per-file bound, not an aggregate disk quota; see SANDBOX.md for the residual gap.

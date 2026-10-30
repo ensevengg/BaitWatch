@@ -18,10 +18,29 @@ Each scan follows these steps.
 - If Docker drops whole output frames at a frame boundary while reporting a clean exit, capture cannot detect the loss; this requires a Docker transport fault rather than cage control, and a per-stream end-of-output record is the planned fix.
 
 - The cage cannot reach public addresses or the host over the network. It can still reach the other containers on its own bridge, which are the sinks. This milestone makes no claim of resistance to kernel or container escapes.
-- The isolated gateway also means the container resolver has no working upstream: name lookups inside the cage fail even though the DNS sink logs the forwarded queries. Sink contacts are made by IP, which is how the tests exercise them.
+- With the configured DNS sink running, the container resolver forwards queries to it and resolves A records to the HTTP sink. Hostname-based HTTP contacts therefore reach the sink; without the sink, name lookups fail.
 - The sinks listen only for DNS on `.53:53` and HTTP/TLS on `.9:80/443`. TCP or UDP to arbitrary literal IPs, including off-subnet destinations rejected with `ENETUNREACH`, is not logged. Contacts on other ports can also fail without a hit. Non-DNS UDP and TLS bodies (only ClientHello SNI is logged) remain uncovered. Network blocking alone does not prove observation: a clean READ plus an otherwise complete RUN can still ALLOW such attempts. No catch-all route or packet logger is installed. A future design needs a trusted namespace-only route helper and bounded packet evidence with fail-closed lifecycle checks; repo processes must retain zero capabilities and no host network access.
 - Killed cage processes can linger as zombies until the cage exits: PID 1 is a trusted `sleep`, not an init, so it never reaps them. A zombie is dead — it cannot run, write or reach the network — but it does hold a PID slot out of the cage's PID limit until cleanup.
 - The decoy loop and provisional verdict fusion exist, but honeytoken attribution and model transcript scanning do not. Hits never change the RUN status; fusion interprets them separately. An executed `run_cmd` is required before fusion can ALLOW; a complete evidence record alone grants no agent permission.
 - Automatic subnet selection tries up to 16 subnets. If every candidate is taken, for example by many concurrent scans or a VPN that covers most of the range, the scan fails closed instead of sharing a network.
 
 Docker references: [bridge networks](https://docs.docker.com/engine/network/drivers/bridge/), [SDK containers](https://docker-py.readthedocs.io/en/stable/containers.html) and [SDK networks](https://docker-py.readthedocs.io/en/stable/networks.html).
+
+## Repository write limits
+
+Cage processes inherit a hard and soft RLIMIT_FSIZE equal to the staging
+per-file cap (8 MiB by default). They cannot raise the hard limit with zero
+capabilities. This bounds each regular file, including sparse writes, without
+adding mounts or changing the cage privileges. The after snapshot records
+`REPO_WRITE_LIMIT` when a file reaches the cap, or total file sizes or entry
+counts exceed the staging limits; all captured diffs remain available.
+
+This is a partial disk bound. Many files can still consume aggregate bytes or
+inodes during a tool call, before the after snapshot. A process may also catch
+a failed write and delete the capped file before collection, hiding that limit
+hit. There is no claim of a hard total quota. A total bound needs a per-scan
+size/inode-limited filesystem shared by the cage and trace helpers; a Docker
+local tmpfs volume would require a new copy-in, mount and cleanup lifecycle.
+The current bind-copy design keeps that work open rather than granting mount
+capabilities to repository processes. Deadlines, PID/memory limits and staging
+bounds remain enforced, but do not substitute for that total quota.

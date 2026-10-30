@@ -92,7 +92,7 @@ assert evidence.status == "incomplete"
 
 ## What the tests check
 
-- From the cage, public TCP, public DNS and name lookups fail, the host's listening services do not answer, and an HTTP service inside the network does.
+- From the cage, public TCP, public DNS fail; with the DNS sink active, names resolve to the HTTP sink, the host's listening services do not answer, and an HTTP service inside the network does.
 - The command runs as a non-root user with restricted mounts and resource limits.
 - Staging preserves symlinks, rejects hard links and special files, and never copies a host file when a repository file turns into a symlink during the copy.
 - Output floods and deadlines stop the container, and nonzero exit codes are kept.
@@ -112,3 +112,7 @@ Registry downgrades apply only to exact pypi.org, files.pythonhosted.org,
 registry.npmjs.org and registry.yarnpkg.com names: DNS questions, TLS SNI,
 or HTTP GET/HEAD with no body, query or incomplete capture. Subdomains and
 uploads BLOCK. Registry-attempt reasons are bounded.
+
+Cage file writes have an 8 MiB per-file hard limit by default. Post-run
+size/entry checks record errors, but aggregate disk use during execution is
+not quota-bound; see [repository write limits](SANDBOX.md#repository-write-limits).
