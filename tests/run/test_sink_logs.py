@@ -506,3 +506,30 @@ def test_tls_capture_incomplete_wrong_type_is_a_problem(tmp_path, value):
     assert not log.tls_hits
     assert len(log.problems) == 1
     assert "capture_incomplete is not a boolean" in log.problems[0]
+
+
+def test_forged_http_authority_is_not_a_registry_lookup(tmp_path):
+    import json
+
+    from run.evidence import RunEvidence
+    from run.verdict import ReadOutcome, fuse
+
+    path = tmp_path / "http.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "kind": "http",
+                "source_ip": "192.0.2.20",
+                "method": "GET",
+                "host": "pypi.org/stolen.evil.example",
+                "path": "/pkg",
+                "headers": {},
+                "headers_truncated": False,
+                "body": "",
+                "body_truncated": False,
+            }
+        )
+        + "\n"
+    )
+    log = read_sink_log(path)
+    assert fuse(ReadOutcome(), RunEvidence(http_hits=log.http_hits)).verdict == "BLOCK"

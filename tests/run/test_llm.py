@@ -763,3 +763,49 @@ def test_make_backend_rejects_hostile_scripted_files(tmp_path):
     huge.write_text("[9" + "9" * 5000 + "]")
     with pytest.raises(LLMError):
         make_backend(f"scripted:{huge}")
+
+
+@pytest.mark.parametrize(
+    "url", ["http://api.example/v1", "http://localhost.evil.example/v1", "http://127.0.0.2/v1"]
+)
+def test_api_keys_are_not_sent_to_remote_plain_http(monkeypatch, url):
+    monkeypatch.setenv(ENV, SECRET)
+    with pytest.raises(ValueError, match="HTTPS"):
+        OpenAICompatBackend(url, "fixture", api_key_env=ENV)
+
+
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1"])
+@pytest.mark.parametrize("proxy_env", ["http_proxy", "HTTP_PROXY"])
+@pytest.mark.parametrize("keyed", [False, True])
+def test_local_http_key_bypasses_environment_proxy(monkeypatch, host, proxy_env, keyed):
+    for name in (
+        "http_proxy",
+        "HTTP_PROXY",
+        "https_proxy",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+        "no_proxy",
+        "NO_PROXY",
+        "REQUEST_METHOD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(ENV, SECRET)
+    with (
+        fake_server(reply(completion({"content": "direct"}))) as endpoint,
+        fake_server(reply(completion({"content": "proxy"}))) as proxy,
+    ):
+        monkeypatch.setenv(proxy_env, proxy.base_url.removesuffix("/v1"))
+        monkeypatch.setenv("ALL_PROXY", proxy.base_url.removesuffix("/v1"))
+        backend = OpenAICompatBackend(
+            f"http://{host}:{endpoint.server_port}/v1",
+            "m",
+            api_key_env=ENV if keyed else None,
+        )
+        assert backend.chat([], []).text == ("direct" if keyed else "proxy")
+        if keyed:
+            assert endpoint.requests[0].headers["authorization"] == f"Bearer {SECRET}"
+            assert proxy.requests == []
+        else:
+            assert endpoint.requests == []
+            assert "authorization" not in proxy.requests[0].headers

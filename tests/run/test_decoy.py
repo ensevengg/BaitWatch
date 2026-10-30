@@ -1,5 +1,6 @@
 """Decoy loop unit tests; fakes only, nothing runs in Docker or on the host."""
 
+import copy
 import random
 import time
 from types import SimpleNamespace
@@ -40,7 +41,9 @@ class FakeBackend:
         self.turns: list[tuple[list[dict], list[dict]]] = []
 
     def chat(self, messages, tools):
-        self.turns.append((messages, tools))
+        # The loop appends to `messages` in place; a snapshot keeps each turn
+        # exactly what the backend saw.
+        self.turns.append((copy.deepcopy(messages), tools))
         return self.replies.pop(0)
 
 
@@ -51,7 +54,7 @@ class ExplodingBackend:
 
 class ChatterBackend(FakeBackend):
     def chat(self, messages, tools):
-        self.turns.append((messages, tools))
+        self.turns.append((copy.deepcopy(messages), tools))
         return LLMReply(tool_calls=[ToolCall(id="n", name="list_files", arguments={})])
 
 
@@ -102,7 +105,7 @@ def test_first_request_has_system_role_then_the_task_as_user():
     backend = FakeBackend(LLMReply(text="done"))
     run_decoy(FakeSandbox(), backend, task="audit the lockfile")
     messages, _ = backend.turns[0]
-    assert [entry["role"] for entry in messages[:2]] == ["system", "user"]
+    assert [entry["role"] for entry in messages] == ["system", "user"]
     assert "audit the lockfile" in messages[1]["content"]
     assert "audit the lockfile" not in messages[0]["content"]
     default = FakeBackend(LLMReply(text="done"))
@@ -256,14 +259,15 @@ def test_decoy_deadline_expiring_during_a_model_reply_fails_closed():
     assert sandbox.evidence.status == "error"
 
 
-def test_step_budget_exhaustion_ends_cleanly():
+def test_step_budget_exhaustion_fails_closed():
     sandbox = FakeSandbox()
     backend = ChatterBackend()
     run_decoy(sandbox, backend, max_steps=3)
     assert len(backend.turns) == 3
     assert len(sandbox.evidence.tool_log) == 3
-    assert sandbox.evidence.components.decoy == State.COMPLETE
-    assert not sandbox.evidence.errors
+    assert sandbox.evidence.components.decoy == State.ERROR
+    assert [error.code for error in sandbox.evidence.errors] == ["DECOY_STEP_BUDGET"]
+    assert sandbox.evidence.status == "error"
 
 
 def test_invalid_max_steps_is_rejected():
@@ -445,3 +449,35 @@ def test_run_decoy_ends_complete_or_fails_closed_for_arbitrary_model_behaviour()
             assert not evidence.errors and evidence.status != "error"
         for entry in evidence.tool_log:
             assert entry.command
+
+
+def test_tool_calls_in_one_reply_share_the_step_budget():
+    sandbox = FakeSandbox()
+    calls = [ToolCall(id=str(i), name="run_cmd", arguments={"command": "true"}) for i in range(50)]
+    run_decoy(sandbox, FakeBackend(LLMReply(tool_calls=calls), LLMReply()), max_steps=3)
+    assert len(sandbox.argv) == 3
+    assert sandbox.evidence.errors[-1].code == "DECOY_STEP_BUDGET"
+
+
+def test_deadline_is_checked_between_calls_in_one_reply(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr("run.decoy.time.monotonic", lambda: clock[0])
+
+    class SlowTool(FakeSandbox):
+        def exec(self, argv):
+            result = super().exec(argv)
+            clock[0] += 121
+            return result
+
+    sandbox = SlowTool()
+    calls = [ToolCall(id=str(i), name="run_cmd", arguments={"command": "true"}) for i in range(3)]
+    run_decoy(sandbox, FakeBackend(LLMReply(tool_calls=calls)))
+    assert len(sandbox.argv) == 1
+    assert sandbox.evidence.errors[-1].code == "DECOY_DEADLINE"
+
+
+def test_surrogate_tool_arguments_remain_serializable():
+    sandbox = FakeSandbox()
+    call = ToolCall(id="bad", name="read_file", arguments={"path": "bad\udcff"})
+    run_decoy(sandbox, FakeBackend(LLMReply(tool_calls=[call]), LLMReply()))
+    assert "bad" in sandbox.evidence.model_dump_json()

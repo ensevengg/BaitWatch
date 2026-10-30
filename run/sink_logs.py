@@ -114,6 +114,10 @@ def _http_hit(record) -> NetworkHit:
     if raw is not None and not isinstance(raw, str):
         raise SinkLogLineError("raw is not a string")
     parts = [method]
+    if host and any(not ch.isascii() or not (ch.isalnum() or ch in "-.:") for ch in host):
+        parts.append("invalid_host")
+    if path and not path.startswith("/"):
+        parts.append("invalid_path")
     if body:
         parts.append(f"body={body[:BODY_PREVIEW_CHARS]}")
     if truncated:

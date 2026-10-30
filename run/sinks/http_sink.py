@@ -122,7 +122,12 @@ def server_name_from(data):
         entry_length = int.from_bytes(data[pos + 1 : pos + 3], "big")
         if data[pos] == 0 and entry_length and pos + 3 + entry_length <= list_end:
             name = data[pos + 3 : pos + 3 + entry_length]
-            return name.decode("ascii", errors="backslashreplace")[:255]
+            return "".join(
+                chr(byte)
+                if chr(byte).isascii() and (chr(byte).isalnum() or byte in (45, 46))
+                else f"\\{byte:03d}"
+                for byte in name
+            )
         pos += 3 + entry_length
     return None
 
@@ -244,14 +249,19 @@ def _log_request(conn, addr, log, lines, parts, body_prefix):
         headers[key] = f"{headers[key]}, {text}" if key in headers else text
         if key == "host":
             host = headers[key]
+    length_text = headers.get("content-length", "0")
+    invalid_length = not length_text.isascii() or not length_text.isdigit()
     try:
-        content_length = max(0, int(headers.get("content-length", "0"), 10))
+        content_length = 0 if invalid_length else int(length_text, 10)
     except ValueError:
         content_length = 0
-    chunked = "chunked" in headers.get("transfer-encoding", "").lower()
+        invalid_length = True
+    chunked = bool(headers.get("transfer-encoding"))
     body = bytearray(body_prefix[:BODY_LIMIT])
     # Chunked framing carries no length to satisfy, so its drain runs to the cap.
-    needed = (BODY_LIMIT if chunked else min(content_length, BODY_LIMIT)) - len(body)
+    needed = (BODY_LIMIT if chunked or invalid_length else min(content_length, BODY_LIMIT)) - len(
+        body
+    )
     if needed > 0 and "100-continue" in headers.get("expect", "").lower():
         # The client is holding its body until an interim response arrives.
         with contextlib.suppress(OSError):
@@ -278,7 +288,10 @@ def _log_request(conn, addr, log, lines, parts, body_prefix):
             "body": body.decode("utf-8", errors="replace"),
             # Chunked framing is never decoded, so its capture cannot claim to be
             # whole; a connection that ends early is as truncated as one past the cap.
-            "body_truncated": chunked or content_length > BODY_LIMIT or len(body) < content_length,
+            "body_truncated": chunked
+            or invalid_length
+            or content_length > BODY_LIMIT
+            or len(body) < content_length,
             **({"raw": raw_preview(lines[0])} if len(parts) > 3 else {}),
         }
     )

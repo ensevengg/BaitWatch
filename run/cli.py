@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Annotated
 
@@ -17,11 +18,22 @@ def sandbox(
     image: Annotated[
         str, typer.Option(help="Trusted image; must already exist locally.")
     ] = "alpine:3.20",
-    timeout: Annotated[float, typer.Option(min=0.1, help="Execution deadline in seconds.")] = 20,
+    timeout: Annotated[
+        float, typer.Option(help="Execution deadline in seconds (at least 0.1).")
+    ] = 20,
 ) -> None:
     """Print RUN evidence; missing components always remain incomplete."""
-    evidence = detonate(repo, command, config=SandboxConfig(image=image, timeout_seconds=timeout))
-    typer.echo(evidence.model_dump_json(indent=2))
+    try:
+        if not repo.is_dir():
+            raise ValueError("repository must be an existing directory")
+        if timeout < 0.1:
+            raise ValueError("timeout must be at least 0.1")
+        config = SandboxConfig(image=image, timeout_seconds=timeout)
+    except ValueError as exc:
+        typer.echo(f"sandbox: {exc}", err=True)
+        raise typer.Exit(3) from exc
+    evidence = detonate(repo, command, config=config)
+    typer.echo(json.dumps(evidence.model_dump(mode="json"), ensure_ascii=True, indent=2))
     # Exit 0 is reserved for a complete scan. Neither 2 (incomplete) nor 3 (error) permits an agent.
     raise typer.Exit(3 if evidence.errors else 2)
 
@@ -38,27 +50,35 @@ def decoy(
     image: Annotated[
         str, typer.Option(help="Trusted image; must already exist locally.")
     ] = "alpine:3.20",
-    max_steps: Annotated[int, typer.Option(min=1, help="Maximum model turns.")] = 20,
+    max_steps: Annotated[int, typer.Option(help="Maximum model turns and total tool calls.")] = 20,
 ) -> None:
     """Run the decoy agent; its tool calls execute only inside the cage."""
     # Imported lazily so the sandbox-only path never loads backend machinery.
     from run.llm import LLMError, make_backend
 
     try:
+        if not repo.is_dir():
+            raise ValueError("repository must be an existing directory")
+        if max_steps < 1:
+            raise ValueError("max-steps must be positive")
+        config = SandboxConfig(image=image)
         backend = make_backend(llm)
     except (LLMError, ValueError) as exc:
         typer.echo(f"decoy: {exc}", err=True)
         raise typer.Exit(3) from exc
     evidence = detonate(
         repo,
-        config=SandboxConfig(image=image),
+        config=config,
         backend=backend,
         max_steps=max_steps,
     )
-    typer.echo(evidence.model_dump_json(indent=2))
-    # Exit 0 means the evidence is complete, never that the repository is safe:
-    # verdict fusion is a later milestone, so this still permits no agent.
-    raise typer.Exit(3 if evidence.errors else 2 if evidence.status != "complete" else 0)
+    typer.echo(json.dumps(evidence.model_dump(mode="json"), ensure_ascii=True, indent=2))
+    contacts = (
+        evidence.dns_hits or evidence.http_hits or evidence.tls_hits or evidence.honeytoken_hits
+    )
+    raise typer.Exit(
+        3 if evidence.errors else 2 if evidence.status != "complete" or contacts else 0
+    )
 
 
 @app.command()

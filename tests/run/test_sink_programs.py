@@ -184,7 +184,7 @@ def test_dns_binary_label_does_not_decode_to_replacement_noise(dns_sink):
     label = base64.b64encode(b"\xff\xfe\xfd\xfc\xfb\xfa").decode().rstrip("=")
     dns_query(dns_sink["port"], f"{label}.evil.example")
     hit = read_records(dns_sink["log"], "dns")[-1]
-    assert hit["qname"] == f"{label}.evil.example"
+    assert hit["qname"] == f"{label.replace(chr(47), chr(92) + '047')}.evil.example"
     assert hit["decoded"] == []
 
 
@@ -1163,3 +1163,141 @@ def test_http_chunked_body_is_drained_and_marked_truncated(http_sink):
     )
     assert hit["body"] == (first + second).decode()
     assert hit["body_truncated"] is True
+
+
+def test_dns_names_preserve_label_boundaries_and_all_questions(tmp_path):
+    import io
+
+    from run.sink_logs import read_sink_log
+
+    module = load_sink_module("dns_sink.py")
+    labels = [b"pypi", b"org/secret:.\xff", b"evil", b"com"]
+    question = b"".join(bytes([len(label)]) + label for label in labels) + b"\0\0\1\0\1"
+    second = b"\x06secret\x04evil\x03com\0\0\1\0\1"
+    packet = bytes.fromhex("123401000002000000000000") + question + second
+    output = io.StringIO()
+    log = module.JsonlLog(output)
+    module.log_query(log, "192.0.2.20", packet, module.parse_query(packet))
+    records = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [r["qname"] for r in records] == [
+        r"pypi.org\047secret\058\046\255.evil.com",
+        "secret.evil.com",
+    ]
+    path = tmp_path / "log"
+    path.write_text(output.getvalue())
+    assert read_sink_log(path).problems
+
+
+def test_dns_expanded_name_and_long_sni_are_not_silently_cut():
+    import io
+
+    dns = load_sink_module("dns_sink.py")
+    output = io.StringIO()
+    labels = [b"\xff" * 60, b"\xff" * 60, b"evil", b"com"]
+    question = b"".join(bytes([len(label)]) + label for label in labels) + b"\0\0\1\0\1"
+    packet = bytes.fromhex("123401000001000000000000") + question
+    dns.log_query(dns.JsonlLog(output), "192.0.2.20", packet, dns.parse_query(packet))
+    assert json.loads(output.getvalue())["qname"].endswith(".evil.com")
+    http = load_sink_module("http_sink.py")
+    name = "a" * 246 + ".pypi.org.evil.com"
+    assert http.parse_sni(tls_records(build_client_hello(name, 400), 500)) == name
+
+
+def test_ambiguous_http_body_length_is_incomplete():
+    import io
+
+    module = load_sink_module("http_sink.py")
+    output = io.StringIO()
+
+    class Connection:
+        def recv(self, count):
+            return b""
+
+        def sendall(self, data):
+            pass
+
+    module._log_request(
+        Connection(),
+        ("192.0.2.20", 80),
+        module.JsonlLog(output),
+        [b"GET /pkg HTTP/1.1", b"Host: pypi.org", b"Content-Length: 6", b"Content-Length: 6"],
+        [b"GET", b"/pkg", b"HTTP/1.1"],
+        b"",
+    )
+    assert json.loads(output.getvalue())["body_truncated"] is True
+
+
+@pytest.mark.parametrize(
+    "additional,counts,incomplete",
+    [
+        (bytes.fromhex("00002904d0000000000000"), "000000000001", False),
+        (bytes.fromhex("00002904d000008000000c000a00086162636465666768"), "000000000001", False),
+        (bytes.fromhex("00002904d0000080000008000a000461626364"), "000000000001", True),
+        (bytes.fromhex("00002904d0000000000000") * 2, "000000000002", True),
+        (bytes.fromhex("00002904d0000000000000"), "000100000001", True),
+        (bytes.fromhex("00002904d0000000000001"), "000000000001", True),
+        (bytes.fromhex("00002904d000000000000100"), "000000000001", True),
+        (bytes.fromhex("00002904d0000000000004000a0001"), "000000000001", True),
+        (bytes.fromhex("016100002904d0000000000000"), "000000000001", True),
+        (bytes.fromhex("00000104d0000000000000"), "000000000001", True),
+        (bytes.fromhex("00002904d0000100000000"), "000000000001", True),
+        (bytes.fromhex("00002904d000000000000000"), "000000000001", True),
+    ],
+)
+def test_dns_accepts_only_one_well_formed_edns0_opt(additional, counts, incomplete, tmp_path):
+    import io
+
+    from run.sink_logs import read_sink_log
+
+    dns = load_sink_module("dns_sink.py")
+    packet = (
+        bytes.fromhex("123401000001" + counts)
+        + build_dns_query(b"\x12\x34", "pypi.org")[12:]
+        + additional
+    )
+    output = io.StringIO()
+    dns.log_query(dns.JsonlLog(output), "192.0.2.20", packet, dns.parse_query(packet))
+    record = json.loads(output.getvalue())
+    assert bool(record.get("capture_incomplete")) is incomplete
+    path = tmp_path / "dns.jsonl"
+    path.write_text(output.getvalue())
+    assert bool(read_sink_log(path).problems) is incomplete
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        b"\x00\x0c\x00\x09secret=42",
+        b"\x00\x0a\x00\x10client00secret42",
+        b"\x00\x0a\x00\x08client00\x00\x0c\x00\x09secret=42",
+        b"\x00\x0c\x00\x00",
+        b"\x00\x0a\x00\x08client00\x00\x0a\x00\x08secret42",
+        b"\x00\x0c\x01\x00" + b"secret\x00\n" * 32,
+    ],
+)
+def test_dns_edns_payload_blocks_registry_downgrade(options, tmp_path):
+    import io
+
+    from run.evidence import RunEvidence
+    from run.sink_logs import read_sink_log
+    from run.verdict import ReadOutcome, fuse
+
+    dns = load_sink_module("dns_sink.py")
+    opt = bytes.fromhex("00002904d000000000") + len(options).to_bytes(2, "big") + options
+    packet = (
+        bytes.fromhex("123401000001000000000001")
+        + build_dns_query(b"\x12\x34", "pypi.org")[12:]
+        + opt
+    )
+    output = io.StringIO()
+    dns.log_query(dns.JsonlLog(output), "192.0.2.20", packet, dns.parse_query(packet))
+    path = tmp_path / "dns.jsonl"
+    path.write_text(output.getvalue())
+    captured = read_sink_log(path)
+    assert fuse(ReadOutcome(), RunEvidence(dns_hits=captured.dns_hits)).verdict == "BLOCK"
+    record = json.loads(output.getvalue())
+    assert record["capture_incomplete"] is True
+    assert "secret" in record["raw"] or options == b"\x00\x0c\x00\x00"
+    assert "\\x00" in record["raw"]
+    assert len(record["raw"]) <= dns.RAW_LIMIT
+    assert captured.problems
