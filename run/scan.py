@@ -20,6 +20,15 @@ ReadScanner = Callable[[Path], ReadOutcome]
 def _outcome_from(result) -> ReadOutcome:
     """Map a read.scan ScanResult onto what fusion consumes."""
     reasons = list(result.stats.incomplete_reasons)
+    system = [finding for finding in result.findings if finding.layer == "system"]
+    flagged = [
+        finding for finding in result.findings if finding.layer != "system" and finding.is_flagged
+    ]
+    if system:
+        notes = "; ".join(
+            str(finding.evidence.get("note", "READ system failure"))[:200] for finding in system[:5]
+        )
+        reasons.append(f"{len(system)} READ system failure(s): {notes}")
     coverage_fields = (
         "partial_files",
         "files_truncated",
@@ -32,15 +41,15 @@ def _outcome_from(result) -> ReadOutcome:
     )
     if any(getattr(result.stats, field) for field in coverage_fields):
         reasons.append("partial or truncated READ coverage")
-    verdict = result.read_verdict
+    verdict = "attack" if flagged else "incomplete" if system else result.read_verdict
     if reasons and verdict == "clean":
         verdict = "incomplete"
     gaps = len(reasons)
     reasons = "; ".join(reasons)
     return ReadOutcome(
-        status=State.COMPLETE,
+        status=State.ERROR if system else State.COMPLETE,
         verdict=verdict,
-        max_score=result.max_score,
+        max_score=max((finding.score for finding in flagged), default=0.0),
         reason=f"{gaps} coverage gap(s): {reasons}" if reasons else "",
     )
 

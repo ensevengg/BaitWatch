@@ -77,11 +77,7 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     if run.honeytoken_hits:
         tokens = ", ".join(dict.fromkeys(hit.token_id for hit in run.honeytoken_hits))
         blockers.append(_bounded(f"honeytoken hit(s): {tokens}"))
-    if (
-        read.status is State.COMPLETE
-        and read.verdict == "attack"
-        and read.max_score >= READ_BLOCK_SCORE
-    ):
+    if read.verdict == "attack" and read.max_score >= READ_BLOCK_SCORE:
         blockers.append(f"READ top score {read.max_score:.2f} reaches the block threshold")
 
     if read.status is not State.COMPLETE:
@@ -125,6 +121,8 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     else:
         verdict = "ALLOW"
         why = ["READ is clean and the RUN decoy completed with no sink or honeytoken evidence"]
+    if read.verdict == "attack" and read.reason:
+        why.append(_bounded(f"READ coverage is incomplete: {read.reason}"))
     return VerdictReport(
         verdict=verdict,
         reason="; ".join(why),

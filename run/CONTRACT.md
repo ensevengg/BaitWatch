@@ -57,3 +57,8 @@ and retained within the bounded ClientHello capture, without a silent name cut.
 Evidence fields replace lone Unicode surrogates with literal backslash escapes
 before validation, so byte filenames, tool text and error paths cannot suppress
 JSON reports. Raw trace keys remain unchanged for comparing snapshots.
+
+READ system findings are operational failures, with ERROR coverage and a
+truthful note, never detector scores. Genuine flagged model/judge scores still
+block at the threshold even alongside system failures. Attack verdict reasons
+retain coverage gaps.

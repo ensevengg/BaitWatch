@@ -191,3 +191,22 @@ def test_default_read_scanner_requests_strict_coverage(monkeypatch, tmp_path):
     assert outcome.verdict == "clean"
     assert len(seen) == 1
     assert seen[0].strict_coverage is True
+
+
+def test_read_system_failures_are_not_attack_scores():
+    from read.findings import system_finding
+
+    result = real_scan_result(findings=[system_finding("README.md", "detector crashed")])
+    outcome = _outcome_from(result)
+    assert outcome.status == State.ERROR
+    assert outcome.max_score == 0
+    report = fuse(outcome, complete_run())
+    assert report.verdict == "FLAG"
+    assert "detector crashed" in report.reason
+
+
+def test_attack_reason_retains_coverage_gaps():
+    result = real_scan_result(findings=[flagged(0.97)], reasons=["file cap: 2 files"])
+    report = fuse(_outcome_from(result), complete_run())
+    assert report.verdict == "BLOCK"
+    assert "file cap" in report.reason
