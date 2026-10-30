@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BaitWatch · training live</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+.viz-root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface-1: #fcfcfb; --text-primary: #0b0b0b; --text-secondary: #52514e;
+  --muted: #898781; --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+  --series-1: #2a78d6; --good: #0ca30c; --good-text: #006300; --warning: #fab219;
+  --serious: #ec835a; --critical: #d03b3b; --track: #eceae4;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface-1: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7;
+    --muted: #898781; --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --series-1: #3987e5; --good-text: #0ca30c; --track: #262624;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface-1: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7;
+  --muted: #898781; --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+  --series-1: #3987e5; --good-text: #0ca30c; --track: #262624;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.viz-root { background: var(--page); color: var(--text-primary); min-height: 100vh;
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 24px; }
+.wrap { max-width: 1120px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+h1 { font-size: 20px; margin: 0; font-weight: 600; }
+h2 { font-size: 14px; margin: 0 0 12px; font-weight: 600; }
+.sub { color: var(--text-secondary); }
+.muted { color: var(--muted); }
+.card { background: var(--surface-1); border: 1px solid var(--ring); border-radius: 10px; padding: 16px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px;
+  border: 1px solid var(--ring); font-weight: 600; font-size: 13px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+@media (max-width: 860px) { .grid4 { grid-template-columns: repeat(2, 1fr); } .grid2 { grid-template-columns: 1fr; } }
+.tile .label { color: var(--text-secondary); font-size: 12px; }
+.tile .value { font-size: 26px; font-weight: 600; margin-top: 2px; }
+.tile .delta { font-size: 12px; color: var(--text-secondary); }
+.progress { height: 10px; background: var(--track); border-radius: 999px; overflow: hidden; margin: 10px 0 6px; }
+.progress > div { height: 100%; background: var(--series-1); border-radius: 999px; transition: width .6s; }
+.hero { display: flex; gap: 32px; flex-wrap: wrap; align-items: baseline; }
+.hero .big { font-size: 34px; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 500; color: var(--text-secondary); font-size: 12px; padding: 6px 8px;
+  border-bottom: 1px solid var(--axis); }
+td { padding: 7px 8px; border-bottom: 1px solid var(--grid); }
+td.num, th.num { text-align: right; }
+.bar-cell { position: relative; height: 14px; background: var(--track); border-radius: 4px; min-width: 140px; }
+.bar-cell > .fill { position: absolute; left: 0; top: 3px; height: 8px; background: var(--series-1);
+  border-radius: 0 4px 4px 0; }
+.bar-cell > .target { position: absolute; top: -2px; width: 2px; height: 18px; background: var(--text-primary); }
+.chart { position: relative; }
+svg text { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.tip { position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--ring);
+  border-radius: 8px; padding: 6px 10px; box-shadow: 0 4px 16px rgba(0,0,0,.12); font-size: 12px;
+  white-space: nowrap; display: none; }
+.tip b { font-weight: 600; }
+pre { white-space: pre-wrap; font-size: 12px; color: var(--critical); margin: 0; }
+details summary { cursor: pointer; color: var(--text-secondary); }
+.stale { color: var(--serious); font-weight: 600; }
+.theme { margin-left: auto; background: none; border: 1px solid var(--ring); color: var(--text-secondary);
+  border-radius: 8px; padding: 2px 10px; cursor: pointer; font: inherit; }
+</style>
+</head>
+<body>
+<div class="viz-root">
+<div class="wrap">
+  <header>
+    <h1>BaitWatch · training live</h1>
+    <span id="status"></span>
+    <span class="sub" id="runname"></span>
+    <button class="theme" id="theme" title="Toggle light/dark">◐ theme</button>
+    <span class="muted" id="updated"></span>
+  </header>
+
+  <section class="card">
+    <div class="hero">
+      <div><div class="sub">Progress</div><div class="big" id="pct">–</div></div>
+      <div><div class="sub">Step</div><div class="big" id="step">–</div></div>
+      <div><div class="sub">Epoch</div><div class="big" id="epoch">–</div></div>
+      <div><div class="sub">Elapsed</div><div class="big" id="elapsed">–</div></div>
+      <div><div class="sub">ETA</div><div class="big" id="eta">–</div></div>
+      <div><div class="sub">Speed</div><div class="big" id="rate">–</div></div>
+    </div>
+    <div class="progress" role="progressbar" aria-label="training progress"><div id="bar" style="width:0%"></div></div>
+    <div class="muted" id="runmeta"></div>
+    <div id="failed"></div>
+  </section>
+
+  <section class="grid4" id="tiles"></section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>Training loss (every 50 steps)</h2>
+      <div class="chart" id="losschart"></div>
+      <details><summary>Loss as a table</summary><div id="losstable"></div></details>
+    </div>
+    <div class="card">
+      <h2>GPU</h2>
+      <div id="gpu" class="muted">–</div>
+      <h2 style="margin-top:20px">Other jobs</h2>
+      <div id="others" class="muted">none</div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Validation, per epoch <span class="muted" style="font-weight:400">(in-distribution val split, threshold 0.5)</span></h2>
+    <div id="valtable" class="muted">No epoch has finished yet.</div>
+  </section>
+
+  <section class="card">
+    <h2>Gate: held-out attacks caught at ≤0.5% harmless files flagged <span class="muted" style="font-weight:400">(target ≥96%)</span></h2>
+    <div id="gates" class="muted">No gate reports yet.</div>
+  </section>
+</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtPct = (x, d = 1) => x == null || Number.isNaN(x) ? "–" : (100 * x).toFixed(d) + "%";
+const fmtNum = (x, d = 3) => x == null ? "–" : Number(x).toFixed(d);
+const fmtDur = (s) => {
+  if (s == null || !isFinite(s)) return "–";
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}h ${String(m).padStart(2, "0")}m` : `${m}m ${String(sec).padStart(2, "0")}s`;
+};
+const STATUS = {
+  running:  { color: "var(--series-1)", icon: "●", label: "Running" },
+  finished: { color: "var(--good)",     icon: "✓", label: "Finished" },
+  failed:   { color: "var(--critical)", icon: "✕", label: "Failed" },
+  idle:     { color: "var(--muted)",    icon: "○", label: "Idle" },
+};
+
+let lastData = null, hoverX = null, lastSeen = Date.now();
+
+function tile(label, value, delta) {
+  return `<div class="card tile"><div class="label">${label}</div><div class="value">${value}</div>` +
+         `<div class="delta">${delta || "&nbsp;"}</div></div>`;
+}
+
+function deltaText(cur, prev, betterUp, asPct) {
+  if (cur == null || prev == null) return "";
+  const d = cur - prev;
+  const arrow = d === 0 ? "→" : (d > 0 ? "↑" : "↓");
+  const good = d === 0 ? null : (d > 0) === betterUp;
+  const v = asPct ? (100 * Math.abs(d)).toFixed(2) + " pp" : Math.abs(d).toFixed(4);
+  const word = good == null ? "same" : (good ? "better" : "worse");
+  return `${arrow} ${v} vs epoch before (${word})`;
+}
+
+function renderLoss(run) {
+  const el = $("losschart");
+  const pts = run.steps || [];
+  if (!pts.length) { el.innerHTML = `<div class="muted">Waiting for the first 50 steps…</div>`; return; }
+  // steps are global across epochs in the trainer's log
+  const W = el.clientWidth || 640, H = 260, m = { l: 44, r: 16, t: 10, b: 28 };
+  const total = run.total_steps || pts[pts.length - 1].step;
+  const nice = (span, n) => { const raw = span / n, mag = 10 ** Math.floor(Math.log10(raw));
+    return [1, 2, 2.5, 5, 10].map(k => k * mag).find(k => k >= raw); };
+  const ystep = nice(Math.max(...pts.map(p => p.loss)), 4);
+  const ymax = Math.ceil(Math.max(...pts.map(p => p.loss)) / ystep) * ystep;
+  const xs = (s) => m.l + (W - m.l - m.r) * (s / total);
+  const ys = (v) => m.t + (H - m.t - m.b) * (1 - v / ymax);
+  const grid = [];
+  for (let v = 0; v <= ymax + 1e-9; v += ystep) {
+    const y = ys(v);
+    grid.push(`<line x1="${m.l}" x2="${W - m.r}" y1="${y}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>` +
+              `<text x="${m.l - 6}" y="${y + 4}" text-anchor="end">${v.toFixed(2)}</text>`);
+  }
+  const xt = [];
+  const xstep = nice(total, 4);
+  for (let s = 0; s <= total; s += xstep) {
+    xt.push(`<text x="${xs(s)}" y="${H - 8}" text-anchor="middle">${s}</text>`);
+  }
+  // Epoch boundaries: first logged step of each epoch after the first.
+  const bounds = [];
+  for (let i = 1; i < pts.length; i++) if (pts[i].epoch !== pts[i - 1].epoch) bounds.push(pts[i]);
+  const brules = bounds.map(p => `<line x1="${xs(p.step)}" x2="${xs(p.step)}" y1="${m.t}" y2="${H - m.b}" ` +
+    `stroke="var(--text-secondary)" stroke-opacity="0.6" stroke-dasharray="3 3"/><text x="${xs(p.step) + 4}" y="${m.t + 10}">epoch ${p.epoch}</text>`);
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${xs(p.step).toFixed(1)},${ys(p.loss).toFixed(1)}`).join("");
+  const last = pts[pts.length - 1];
+  el.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="Training loss by step">
+    ${grid.join("")}
+    <line x1="${m.l}" x2="${W - m.r}" y1="${H - m.b}" y2="${H - m.b}" stroke="var(--axis)"/>
+    ${xt.join("")}${brules.join("")}
+    <path d="${path}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${xs(last.step)}" cy="${ys(last.loss)}" r="4" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2"/>
+    <text x="${Math.min(xs(last.step) + 8, W - m.r - 40)}" y="${ys(last.loss) - 8}" style="fill:var(--text-primary)">${last.loss.toFixed(4)}</text>
+    <g id="hover" style="display:none">
+      <line id="hx" y1="${m.t}" y2="${H - m.b}" stroke="var(--text-secondary)" stroke-width="1"/>
+      <circle id="hc" r="5" fill="var(--series-1)" stroke="var(--surface-1)" stroke-width="2"/>
+    </g>
+    <rect x="${m.l}" y="0" width="${W - m.l - m.r}" height="${H}" fill="transparent" id="hit"/>
+  </svg><div class="tip" id="tip"></div>`;
+  const hit = el.querySelector("#hit"), tip = el.querySelector("#tip"), g = el.querySelector("#hover");
+  const show = (px) => {
+    const s = (px - m.l) / (W - m.l - m.r) * total;
+    let best = pts[0];
+    for (const p of pts) if (Math.abs(p.step - s) < Math.abs(best.step - s)) best = p;
+    const cx = xs(best.step), cy = ys(best.loss);
+    g.style.display = "";
+    el.querySelector("#hx").setAttribute("x1", cx); el.querySelector("#hx").setAttribute("x2", cx);
+    el.querySelector("#hc").setAttribute("cx", cx); el.querySelector("#hc").setAttribute("cy", cy);
+    tip.style.display = "block";
+    tip.innerHTML = `<b>step ${best.step}</b> · epoch ${best.epoch}<br>loss <b>${best.loss.toFixed(4)}</b>`;
+    tip.style.left = Math.min(cx + 12, W - 150) + "px"; tip.style.top = Math.max(cy - 40, 0) + "px";
+  };
+  hit.addEventListener("mousemove", (e) => { hoverX = e.offsetX; show(hoverX); });
+  hit.addEventListener("mouseleave", () => { hoverX = null; g.style.display = "none"; tip.style.display = "none"; });
+  if (hoverX != null) show(hoverX);
+  $("losstable").innerHTML = `<table><tr><th class="num">Step</th><th class="num">Epoch</th><th class="num">Loss</th></tr>` +
+    pts.map(p => `<tr><td class="num">${p.step}</td><td class="num">${p.epoch}</td><td class="num">${p.loss.toFixed(4)}</td></tr>`).join("") +
+    `</table>`;
+}
+
+function renderGates(gates, target) {
+  if (!gates.length) return;
+  const rows = gates.map(g => {
+    const st = g.pass ? STATUS.finished : STATUS.failed;
+    const w = Math.max(0, Math.min(1, g.held_out || 0)) * 100;
+    return `<tr><td><b>${g.name}</b></td>
+      <td><div class="bar-cell" title="held-out recall ${fmtPct(g.held_out)}">
+        <div class="fill" style="width:${w}%"></div><div class="target" style="left:${target.recall * 100}%"></div></div></td>
+      <td class="num"><b>${fmtPct(g.held_out)}</b></td>
+      <td class="num">${fmtPct(g.gold)}</td><td class="num">${fmtPct(g.aditya)}</td><td class="num">${fmtPct(g.suite)}</td>
+      <td class="num">${fmtPct(g.fpr, 2)}</td><td class="num">${fmtNum(g.threshold, 4)}</td>
+      <td><span class="pill"><span style="color:${st.color}">${g.pass ? "✓" : "✕"}</span>${g.pass ? "Passes" : "Below target"}</span></td></tr>`;
+  }).join("");
+  $("gates").classList.remove("muted");
+  $("gates").innerHTML = `<table><tr><th>Model</th><th>Held-out recall <span class="muted">(bar; tick = 96%)</span></th>
+    <th class="num">Held-out</th><th class="num">Gold</th><th class="num">Aditya</th><th class="num">Suite (dev)</th>
+    <th class="num">Harmless FP</th><th class="num">Threshold</th><th>Gate</th></tr>${rows}</table>`;
+}
+
+function render(d) {
+  lastData = d; lastSeen = Date.now();
+  const run = d.run || {};
+  const st = STATUS[run.status] || STATUS.idle;
+  $("status").innerHTML = `<span class="pill"><span style="color:${st.color}">${st.icon}</span>${st.label}` +
+    (run.stage && run.stage !== "training" ? ` · ${run.stage}` : "") + `</span>`;
+  $("runname").textContent = run.model ? `${run.model}${run.base ? " · " + run.base : ""}` : "";
+  $("updated").textContent = `updated ${d.updated}`;
+  const steps = run.steps || [], last = steps[steps.length - 1];
+  const total = run.total_steps;
+  const frac = last && total ? last.step / total : (run.status === "finished" ? 1 : 0);
+  $("pct").textContent = fmtPct(frac, 0);
+  $("bar").style.width = (100 * frac) + "%";
+  $("step").textContent = last ? `${last.step} / ${total}` : "–";
+  $("epoch").textContent = last ? `${last.epoch}${run.epochs ? " / " + run.epochs : ""}` : "–";
+  $("elapsed").textContent = fmtDur(run.elapsed_s);
+  $("eta").textContent = run.status === "running" && run.stage === "training" ? fmtDur(run.eta_s) : (run.status === "finished" ? "done" : "–");
+  $("rate").textContent = run.rate ? `${(run.rate * 60).toFixed(0)}/min` : "–";
+  $("runmeta").textContent = run.log ? `log ${run.log}${run.lr ? " · lr " + run.lr : ""}` : "No training run found.";
+  $("failed").innerHTML = run.failed ? `<pre>${(run.tail || []).join("\n")}</pre>` : "";
+
+  const v = run.val || [], cv = v[v.length - 1], pv = v[v.length - 2];
+  $("tiles").innerHTML =
+    tile("Latest train loss", last ? last.loss.toFixed(4) : "–",
+         steps.length > 1 ? deltaText(last.loss, steps[steps.length - 2].loss, false, false).replace("epoch before", "50 steps before") : "") +
+    tile("Val average precision", cv ? fmtNum(cv.ap, 4) : "–", cv && pv ? deltaText(cv.ap, pv.ap, true, false) : (cv ? `after epoch ${cv.epoch}` : "after epoch 1")) +
+    tile("Val recall @0.5", cv ? fmtPct(cv.recall) : "–", cv && pv ? deltaText(cv.recall, pv.recall, true, true) : "") +
+    tile("Val false positives @0.5", cv ? fmtPct(cv.fpr, 2) : "–", cv && pv ? deltaText(cv.fpr, pv.fpr, false, true) : "");
+
+  if (v.length) {
+    $("valtable").classList.remove("muted");
+    $("valtable").innerHTML = `<table><tr><th class="num">Epoch</th><th class="num">Val loss</th><th class="num">Avg precision</th>
+      <th class="num">Recall</th><th class="num">Precision</th><th class="num">False positives</th></tr>` +
+      v.map(r => `<tr><td class="num">${r.epoch}</td><td class="num">${fmtNum(r.loss, 4)}</td><td class="num">${fmtNum(r.ap, 4)}</td>
+        <td class="num">${fmtPct(r.recall)}</td><td class="num">${fmtPct(r.precision)}</td><td class="num">${fmtPct(r.fpr, 2)}</td></tr>`).join("") +
+      `</table>`;
+  }
+
+  const gp = d.gpu;
+  $("gpu").innerHTML = gp ? `<div style="color:var(--text-primary)">${gp.name}</div>
+    <div class="progress" title="memory"><div style="width:${100 * gp.mem_used / gp.mem_total}%"></div></div>
+    <div>memory ${(gp.mem_used / 1024).toFixed(1)} / ${(gp.mem_total / 1024).toFixed(1)} GB</div>
+    <div>utilization ${gp.util}% · ${gp.temp} °C${gp.power != null ? " · " + gp.power.toFixed(0) + " W" : ""}</div>` : "nvidia-smi unavailable";
+  $("others").innerHTML = (d.others || []).length ? d.others.map(o => `${o.stage} · pid ${o.pid} · ${fmtDur(o.elapsed_s)}`).join("<br>") : "none";
+
+  renderLoss(run);
+  renderGates(d.gates || [], d.target || { recall: 0.96, fpr: 0.005 });
+}
+
+function poll() {
+  const s = document.createElement("script");
+  s.src = "live_data.js?t=" + Date.now();
+  s.onload = () => { if (window.LIVE) render(window.LIVE); s.remove(); };
+  s.onerror = () => s.remove();
+  document.head.appendChild(s);
+  if (Date.now() - lastSeen > 20000) $("updated").innerHTML = `<span class="stale">watcher not updating — is read.training.live running?</span>`;
+}
+$("theme").onclick = () => {
+  const cur = document.documentElement.dataset.theme ||
+    (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark";
+  if (lastData) render(lastData);
+};
+window.addEventListener("resize", () => lastData && render(lastData));
+poll();
+setInterval(poll, 4000);
+</script>
+</body>
+</html>
