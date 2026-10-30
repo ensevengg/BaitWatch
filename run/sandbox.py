@@ -956,6 +956,11 @@ class Sandbox:
             raise ValueError("command must be a nonempty argument sequence, never a shell string")
         if self._command_started:
             raise SandboxError("one command per sandbox; create a new sandbox for another run")
+        if self._sinks_collected or self._honeytoken_scanned:
+            # Output produced after collection would skip the honeytoken search.
+            message = "run_command is not allowed after the sinks are collected"
+            self._error("COMMAND_ERROR", message)
+            raise SandboxError(message)
         self._command_started = True
         result = CommandResult(command=list(command))
         # Sink or trace failures that happened before this command must not

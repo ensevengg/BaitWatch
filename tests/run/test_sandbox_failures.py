@@ -928,6 +928,23 @@ def test_exec_is_rejected_after_the_sinks_are_collected(repo: Path, monkeypatch)
     assert sandbox.evidence.status == "error"
 
 
+def test_run_command_is_rejected_after_the_sinks_are_collected(repo: Path, monkeypatch):
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.collect_sinks()
+        with pytest.raises(SandboxError, match="after the sinks"):
+            sandbox.run_command(["true"])
+    assert sandbox.evidence.tool_log == []
+    assert any(error.code == "COMMAND_ERROR" for error in sandbox.evidence.errors)
+    assert sandbox.evidence.status == "error"
+
+
 def test_exec_is_rejected_after_run_command(repo: Path, monkeypatch):
     monkeypatch.setattr(
         "run.sandbox.capture_attached",
