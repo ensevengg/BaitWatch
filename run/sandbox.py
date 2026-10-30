@@ -42,7 +42,17 @@ SINK_POLL_SECONDS = 0.05
 # record yields no Z and is killed like a live process.
 # Busybox's timeout watchdog notices a finished parent on its next 1s tick.
 KILL_LINGERING = (
-    "sleep 1; round=0; killed=0; "
+    "poll=0; "
+    "while [ $poll -lt 25 ]; do alive=0; "
+    "for entry in /proc/[0-9]*; do pid=${entry#/proc/}; "
+    'if [ "$pid" != "1" ] && [ "$pid" != "$$" ]; then '
+    'stat=$(cat "$entry/stat" 2>/dev/null); '
+    "state=${stat##*) }; state=${state%% *}; "
+    'if [ "$state" != "Z" ]; then alive=1; fi; fi; '
+    "done; "
+    'if [ "$alive" -eq 0 ]; then exit 0; fi; '
+    "poll=$((poll + 1)); sleep 0.1; done; "
+    "round=0; killed=0; "
     "while [ $round -lt 3 ]; do "
     "alive=0; "
     "for entry in /proc/[0-9]*; do pid=${entry#/proc/}; "
@@ -635,8 +645,10 @@ class Sandbox:
             or sum(entry.size for entry in after.values() if entry.kind == "file")
             > limits.max_bytes
             or any(
-                entry.kind == "file" and entry.size >= limits.max_file_bytes
-                for entry in after.values()
+                entry.kind == "file"
+                and entry.size >= limits.max_file_bytes
+                and self._trace_before.get(path) != entry
+                for path, entry in after.items()
             )
         ):
             self._error(

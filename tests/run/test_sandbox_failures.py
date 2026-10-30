@@ -1229,3 +1229,29 @@ def test_byte_filename_exclusions_serialize_after_staging(repo: Path):
     with sandbox:
         payload = sandbox.evidence.model_dump_json()
         assert ".env" in payload
+
+
+@pytest.mark.parametrize("change", ["unchanged", "added", "modified"])
+def test_only_added_or_modified_files_at_the_cap_trigger_write_limit(repo, monkeypatch, change):
+    from run.staging import StagingLimits
+
+    entry = Entry(kind="file", mode=0o666, size=4096, sha256="0" * 64)
+    before = {} if change == "added" else {"fixture": entry}
+    after = {
+        "fixture": entry
+        if change != "modified"
+        else Entry(kind="file", mode=0o666, size=4096, sha256="1" * 64)
+    }
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(
+        repo,
+        SandboxConfig(staging=StagingLimits(max_file_bytes=4096)),
+        client_factory=lambda: fake_client(),
+    )
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert any(e.code == "REPO_WRITE_LIMIT" for e in sandbox.evidence.errors) is (
+        change != "unchanged"
+    )

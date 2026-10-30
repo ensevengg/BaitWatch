@@ -319,7 +319,37 @@ def test_clean_exec_does_not_flag_the_trusted_timeout_watchdog(repo: Path, engin
     sandbox = Sandbox(repo, SandboxConfig(image=PYTHON_IMAGE, decoy_seconds=90))
     with sandbox:
         sandbox.open_cage()
-        result = sandbox.exec(["true"])
+        for _ in range(3):
+            result = sandbox.exec(["true"])
+            assert result.exit_code == 0
+    assert not sandbox.evidence.errors, [error.code for error in sandbox.evidence.errors]
+    assert_no_leftovers(engine, sandbox.evidence)
+
+
+def test_sweep_waits_for_short_lived_children_before_killing(repo: Path, engine):
+    sandbox = Sandbox(repo, SandboxConfig(image=PYTHON_IMAGE, decoy_seconds=90))
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sh", "-c", "sleep 2 </dev/null >/dev/null 2>&1 &"])
     assert result.exit_code == 0
     assert not sandbox.evidence.errors, [error.code for error in sandbox.evidence.errors]
+    assert_no_leftovers(engine, sandbox.evidence)
+
+
+def test_decoy_exec_inherits_repository_file_size_limit(repo: Path, engine):
+    from run.staging import StagingLimits
+
+    sandbox = Sandbox(
+        repo, SandboxConfig(image=PYTHON_IMAGE, staging=StagingLimits(max_file_bytes=4096))
+    )
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.open_cage()
+        result = sandbox.exec(
+            ["sh", "-c", "dd if=/dev/zero of=/repo/flood bs=1024 count=32 2>/dev/null; true"]
+        )
+        assert result.exit_code == 0
+        assert (sandbox.staged_path / "flood").stat().st_size == 4096
+        sandbox.trace_after()
+    assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
     assert_no_leftovers(engine, sandbox.evidence)
