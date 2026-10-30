@@ -5,11 +5,26 @@ from enum import StrEnum
 from typing import Literal, Self
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def _serializable_text(value):
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="backslashreplace").decode("utf-8")
+    if isinstance(value, list):
+        return [_serializable_text(item) for item in value]
+    if isinstance(value, dict):
+        return {_serializable_text(key): _serializable_text(item) for key, item in value.items()}
+    return value
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def serializable_text(cls, value):
+        return _serializable_text(value)
 
 
 class State(StrEnum):

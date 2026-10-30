@@ -156,7 +156,7 @@ def decode_label(label):
     return entries
 
 
-def parse_query(packet):
+def parse_query(packet, start=12):
     """Return (question_wire_bytes, qname_labels, qtype) or None for malformed input."""
     if len(packet) < 12:
         return None
@@ -164,7 +164,7 @@ def parse_query(packet):
         return None  # a response, not a query
     if int.from_bytes(packet[4:6], "big") < 1:
         return None
-    offset = 12
+    offset = start
     labels = []
     while True:
         if offset >= len(packet):
@@ -176,7 +176,7 @@ def parse_query(packet):
         offset += 1
         if length == 0:
             break
-        if offset + length > len(packet) or len(labels) >= 128:
+        if offset + length > len(packet) or offset + length - start > 254:
             return None
         labels.append(packet[offset : offset + length])
         offset += length
@@ -184,7 +184,7 @@ def parse_query(packet):
         return None
     # The echoed question carries its QTYPE and QCLASS; resolvers reject replies without them.
     qtype = int.from_bytes(packet[offset : offset + 2], "big")
-    return packet[12 : offset + 4], labels, qtype
+    return packet[start : offset + 4], labels, qtype
 
 
 def build_response(query_id, question, qtype, answer):
@@ -201,27 +201,55 @@ def build_response(query_id, question, qtype, answer):
 
 
 def label_text(label):
-    return label.decode("utf-8", errors="backslashreplace")
+    return "".join(
+        chr(byte)
+        if chr(byte).isascii() and (chr(byte).isalnum() or byte == 45)
+        else f"\\{byte:03d}"
+        for byte in label
+    )
 
 
-def log_query(log, source_ip, packet, parsed, *, capture_incomplete=False):
+def log_question(log, source_ip, parsed, *, capture_incomplete=False):
     question, labels, qtype = parsed
     decoded = []
     for label in labels:
-        decoded.extend(decode_label(label_text(label)))
+        decoded.extend(decode_label(label.decode("ascii", errors="backslashreplace")))
         if len(decoded) >= DECODED_LIMIT:
             break
     record = {
         "kind": "dns",
         "ts": time.time(),
         "source_ip": source_ip,
-        "qname": ".".join(label_text(label) for label in labels)[:500],
+        "qname": ".".join(label_text(label) for label in labels),
         "qtype": QTYPE_NAMES.get(qtype, qtype),
         "decoded": decoded[:DECODED_LIMIT],
     }
     if capture_incomplete:
         record["capture_incomplete"] = True
     log.write(record)
+
+
+def log_query(log, source_ip, packet, parsed, *, capture_incomplete=False):
+    count = int.from_bytes(packet[4:6], "big")
+    offset = 12
+    questions = []
+    for _ in range(min(count, 128)):
+        question = parse_query(packet, offset)
+        if question is None:
+            break
+        questions.append(question)
+        offset += len(question[0])
+    incomplete = (
+        capture_incomplete
+        or count != 1
+        or len(questions) != count
+        or offset != len(packet)
+        or any(packet[6:12])
+    )
+    for question in questions:
+        log_question(log, source_ip, question, capture_incomplete=incomplete)
+    if len(questions) != count:
+        log_unparsed(log, source_ip, packet[offset:], capture_incomplete=True)
 
 
 def handle_query(log, sock, answer, packet, source, *, capture_incomplete=False):

@@ -122,7 +122,12 @@ def server_name_from(data):
         entry_length = int.from_bytes(data[pos + 1 : pos + 3], "big")
         if data[pos] == 0 and entry_length and pos + 3 + entry_length <= list_end:
             name = data[pos + 3 : pos + 3 + entry_length]
-            return name.decode("ascii", errors="backslashreplace")[:255]
+            return "".join(
+                chr(byte)
+                if chr(byte).isascii() and (chr(byte).isalnum() or byte in (45, 46))
+                else f"\\{byte:03d}"
+                for byte in name
+            )
         pos += 3 + entry_length
     return None
 

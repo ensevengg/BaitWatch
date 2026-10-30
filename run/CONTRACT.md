@@ -47,3 +47,13 @@ Registry downgrades apply only to exact pypi.org, files.pythonhosted.org,
 registry.npmjs.org and registry.yarnpkg.com names: DNS questions, TLS SNI,
 or HTTP GET/HEAD with no body, query or incomplete capture. Subdomains and
 uploads BLOCK. Registry-attempt reasons are bounded.
+
+DNS labels escape every non-LDH byte as `\DDD` (decimal), including embedded
+dots. Names are bounded by DNS wire length and never cut in presentation.
+Up to 128 questions per packet are logged; multiple questions, extra sections,
+malformed names or budget overflow mark capture incomplete. TLS SNI is escaped
+and retained within the bounded ClientHello capture, without a silent name cut.
+
+Evidence fields replace lone Unicode surrogates with literal backslash escapes
+before validation, so byte filenames, tool text and error paths cannot suppress
+JSON reports. Raw trace keys remain unchanged for comparing snapshots.

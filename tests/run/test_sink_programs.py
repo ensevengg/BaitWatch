@@ -184,7 +184,7 @@ def test_dns_binary_label_does_not_decode_to_replacement_noise(dns_sink):
     label = base64.b64encode(b"\xff\xfe\xfd\xfc\xfb\xfa").decode().rstrip("=")
     dns_query(dns_sink["port"], f"{label}.evil.example")
     hit = read_records(dns_sink["log"], "dns")[-1]
-    assert hit["qname"] == f"{label}.evil.example"
+    assert hit["qname"] == f"{label.replace(chr(47), chr(92) + '047')}.evil.example"
     assert hit["decoded"] == []
 
 
@@ -1163,3 +1163,41 @@ def test_http_chunked_body_is_drained_and_marked_truncated(http_sink):
     )
     assert hit["body"] == (first + second).decode()
     assert hit["body_truncated"] is True
+
+
+def test_dns_names_preserve_label_boundaries_and_all_questions(tmp_path):
+    import io
+
+    from run.sink_logs import read_sink_log
+
+    module = load_sink_module("dns_sink.py")
+    labels = [b"pypi", b"org/secret:.\xff", b"evil", b"com"]
+    question = b"".join(bytes([len(label)]) + label for label in labels) + b"\0\0\1\0\1"
+    second = b"\x06secret\x04evil\x03com\0\0\1\0\1"
+    packet = bytes.fromhex("123401000002000000000000") + question + second
+    output = io.StringIO()
+    log = module.JsonlLog(output)
+    module.log_query(log, "192.0.2.20", packet, module.parse_query(packet))
+    records = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [r["qname"] for r in records] == [
+        r"pypi.org\047secret\058\046\255.evil.com",
+        "secret.evil.com",
+    ]
+    path = tmp_path / "log"
+    path.write_text(output.getvalue())
+    assert read_sink_log(path).problems
+
+
+def test_dns_expanded_name_and_long_sni_are_not_silently_cut():
+    import io
+
+    dns = load_sink_module("dns_sink.py")
+    output = io.StringIO()
+    labels = [b"\xff" * 60, b"\xff" * 60, b"evil", b"com"]
+    question = b"".join(bytes([len(label)]) + label for label in labels) + b"\0\0\1\0\1"
+    packet = bytes.fromhex("123401000001000000000000") + question
+    dns.log_query(dns.JsonlLog(output), "192.0.2.20", packet, dns.parse_query(packet))
+    assert json.loads(output.getvalue())["qname"].endswith(".evil.com")
+    http = load_sink_module("http_sink.py")
+    name = "a" * 246 + ".pypi.org.evil.com"
+    assert http.parse_sni(tls_records(build_client_hello(name, 400), 500)) == name

@@ -79,3 +79,27 @@ def test_evidence_lists_are_per_scan():
     first.dns_hits.append({"source_ip": "fixture"})
     assert not second.dns_hits
     assert first.scan_id != second.scan_id
+
+
+def test_unencodable_cage_text_cannot_suppress_a_report():
+    from run.evidence import (
+        CommandResult,
+        FileDiff,
+        NetworkHit,
+        RunError,
+        RunEvidence,
+        VerdictReport,
+    )
+
+    run = RunEvidence(
+        file_diffs=[FileDiff(path="bad\udcff", change="added")],
+        staging_exclusions=["bad\udcff/.env"],
+        tool_log=[CommandResult(command=["run_cmd", "bad\udcff"], stdout="bad\udcff")],
+        errors=[RunError(code="TRACE_INCOMPLETE", message="bad\udcff")],
+        dns_hits=[NetworkHit(source_ip="192.0.2.20", destination="evil.example")],
+    )
+    report = VerdictReport(verdict="BLOCK", reason="bad\udcff", run=run)
+    payload = report.model_dump_json()
+    assert "evil.example" in payload
+    assert "\udcff" not in payload
+    assert report.run.file_diffs[0].path == r"bad\udcff"
