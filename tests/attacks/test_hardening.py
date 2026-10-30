@@ -118,6 +118,7 @@ def test_user_config_mode_ignores_inherited_security_env(
     monkeypatch.setenv("BAITWATCH_HOOK_TTL", "999999")
     monkeypatch.setenv("BAITWATCH_APPROVAL_TTL", "999999")
     monkeypatch.setenv("BAITWATCH_MODEL_PATH", str(tmp_path / "checkout-model"))
+    monkeypatch.setenv("BAITWATCH_MODEL_DIR", str(tmp_path / "checkout-models"))
     monkeypatch.setenv("BAITWATCH_HOOK_DEADLINE", "999")
 
     assert hook_cli._hook_disabled() is True
@@ -145,12 +146,45 @@ def test_user_config_mode_ignores_inherited_security_env(
         "BAITWATCH_HOOK_TTL",
         "BAITWATCH_APPROVAL_TTL",
         "BAITWATCH_MODEL_PATH",
+        "BAITWATCH_MODEL_DIR",
         "BAITWATCH_HOOK_DEADLINE",
     ):
         assert seen[key] is None, key
     assert os.environ["BAITWATCH_REPO"] == str(tmp_path / "checkout-controlled")
     assert os.environ["BAITWATCH_JUDGE_BASE_URL"] == "https://checkout-controlled.example/v1"
     assert os.environ["BAITWATCH_HOOK_DEADLINE"] == "999"
+
+
+def test_management_commands_use_the_trusted_user_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted_approvals = tmp_path / "trusted-approvals.json"
+    trusted_cache = tmp_path / "trusted-cache.json"
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "BAITWATCH_HOOK_APPROVALS": str(trusted_approvals),
+                    "BAITWATCH_HOOK_CACHE": str(trusted_cache),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(hook_cli, "settings_path", lambda _scope="user": settings)
+    monkeypatch.setenv("BAITWATCH_HOOK_APPROVALS", str(tmp_path / "checkout-approvals.json"))
+    monkeypatch.setenv("BAITWATCH_HOOK_CACHE", str(tmp_path / "checkout-cache.json"))
+
+    repo = _repo(tmp_path / "repo")
+    assert hook_cli.main(["approve", "--repo", str(repo)]) == 0
+    assert trusted_approvals.is_file()
+    assert not (tmp_path / "checkout-approvals.json").exists()
+
+    trusted_cache.write_text('{"entry": {}}\n', encoding="utf-8")
+    assert hook_cli.main(["cache", "clear"]) == 0
+    assert not trusted_cache.exists()
+    assert not (tmp_path / "checkout-cache.json").exists()
 
 
 def test_python_i_keeps_the_working_directory_off_sys_path(tmp_path: Path) -> None:

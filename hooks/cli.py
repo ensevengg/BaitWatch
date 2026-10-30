@@ -87,6 +87,7 @@ _USER_HOOK_ENV_KEYS = (
     "BAITWATCH_HOOK_TTL",
     "BAITWATCH_APPROVAL_TTL",
     "BAITWATCH_MODEL_PATH",
+    "BAITWATCH_MODEL_DIR",
     "BAITWATCH_HOOK_DEADLINE",
 )
 
@@ -382,12 +383,15 @@ def _install_command(args: argparse.Namespace) -> int:
 
 
 def _cache_command(args: argparse.Namespace) -> int:
-    cache = ScanCache()
-    if args.cache_action == "clear":
-        removed = cache.clear()
-        print(f"cleared {removed} cache entr{'y' if removed == 1 else 'ies'}")
-    else:
-        print(str(default_cache_path()))
+    # Management commands must use the same trusted settings as an installed
+    # gate; otherwise a custom user path would clear (or report) another file.
+    with _applied_user_hook_env():
+        cache = ScanCache()
+        if args.cache_action == "clear":
+            removed = cache.clear()
+            print(f"cleared {removed} cache entr{'y' if removed == 1 else 'ies'}")
+        else:
+            print(str(default_cache_path()))
     return 0
 
 
@@ -397,16 +401,19 @@ def _approve_command(args: argparse.Namespace) -> int:
     if root is None:
         print(f"error: cannot resolve a project root from {repo} ({status})", file=sys.stderr)
         return 2
-    store = ApprovalStore()
-    if args.revoke:
-        removed = store.revoke(root)
-        print(f"revoked {removed} approval(s) for {root}")
-        return 0
-    try:
-        fingerprint = store.approve(root, args.minutes)
-    except (OSError, ValueError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    # Gate A reads approvals through trusted user settings; write them there
+    # too, or a custom approval path would leave the block in place.
+    with _applied_user_hook_env():
+        store = ApprovalStore()
+        if args.revoke:
+            removed = store.revoke(root)
+            print(f"revoked {removed} approval(s) for {root}")
+            return 0
+        try:
+            fingerprint = store.approve(root, args.minutes)
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     print(f"approved {root} for {args.minutes:g} minute(s); fingerprint {fingerprint[:16]}...")
     return 0
 

@@ -142,6 +142,15 @@ def test_default_data_root_prefers_env(monkeypatch, tmp_path):
     assert rc.default_data_root() == tmp_path / "datasets"
 
 
+def test_local_Beaconir_uses_the_config_candidates(monkeypatch, tmp_path):
+    from tests.read.conftest import local_model_dir
+
+    candidate = tmp_path / "mnt-models" / "Llama-Prompt-Guard-2-22M"
+    candidate.mkdir(parents=True)
+    monkeypatch.setattr(rc, "DEFAULT_MODEL_DIRS", (tmp_path / "missing", candidate))
+    assert local_model_dir() == candidate
+
+
 def test_committed_pin_has_no_personal_path() -> None:
     pinned = rc.load_model_config()
     assert pinned is not None

@@ -24,13 +24,11 @@ FIXTURES = Path(__file__).parent / "fixtures"
 ATTACK_REPO = FIXTURES / "attack_repo"
 BENIGN_REPO = FIXTURES / "benign_repo"
 
-DEFAULT_MODEL_DIRS = [
-    Path.home() / "hf_models" / "Llama-Prompt-Guard-2-22M",
-    Path.home() / "hf_models" / "Llama-Prompt-Guard-2-86M",
-]
-
-
 def local_model_dir() -> Path | None:
+    # One candidate list, owned by read.config (home first, /mnt/d fallback);
+    # a second copy here silently skipped every model test when it drifted.
+    from read.config import DEFAULT_MODEL_DIRS
+
     for p in DEFAULT_MODEL_DIRS:
         if p.exists():
             return p
