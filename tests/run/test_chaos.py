@@ -425,6 +425,7 @@ def test_cage_dying_mid_run_fails_the_decoy(
     repo, recorded_sandbox, run_scan, tree_digest, assert_no_leftovers, assert_staging_gone
 ):
     command = f"touch /repo/{CAGE_MARKER} && sleep 30"
+    killed = threading.Event()
 
     def kill_once_marker() -> None:
         deadline = time.monotonic() + 45
@@ -434,6 +435,7 @@ def test_cage_dying_mid_run_fails_the_decoy(
                 if staged is not None and (staged / "repo" / CAGE_MARKER).exists():
                     with contextlib.suppress(Exception):
                         instance.kill_cage()
+                        killed.set()
                     return
             time.sleep(0.02)
 
@@ -447,11 +449,15 @@ def test_cage_dying_mid_run_fails_the_decoy(
     )
     killer.join(timeout=5)
     assert not killer.is_alive(), "the marker never reached the staged copy"
+    assert killed.is_set(), "the cage kill failed"
     assert evidence.components.decoy == State.ERROR
     assert evidence.status == "error"
     assert evidence.tool_log[0].command == ["run_cmd", command]
-    # The kill lands mid-call, so the run must fail on the dead cage.
-    assert [error.code for error in evidence.errors] == ["CAGE_EXITED", "DECOY_FAILED"]
+    # Docker can still report running while SIGKILL teardown is underway.
+    assert [error.code for error in evidence.errors] in (
+        ["CAGE_EXITED", "DECOY_FAILED"],
+        ["EXEC_KILL_FAILED", "EXEC_TIMEOUT", "DECOY_FAILED"],
+    )
     assert tree_digest(repo) == before
     assert_staging_gone(recorded_sandbox.instances[-1], evidence)
     assert_no_leftovers(evidence)
