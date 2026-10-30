@@ -48,6 +48,16 @@ def test_wsl_mount_is_flagged(tmp_path: Path) -> None:
     assert [v.kind for v in violations] == ["wsl-drive-mount"]
 
 
+def test_generic_shared_data_mounts_are_allowed(tmp_path: Path) -> None:
+    body = (
+        f"models: {_posix('mnt', 'd', 'hf_models')}\n"
+        f"data: {_posix('mnt', 'd', 'hf_datasets')}\n"
+    )
+    assert _check(tmp_path, "config.py", body) == []
+    other = _check(tmp_path, "other.py", f"mine: {_posix('mnt', 'c', 'Users', 'x', 'train.py')}\n")
+    assert {v.kind for v in other} == {"posix-home", "wsl-drive-mount"}
+
+
 def test_local_checkout_is_flagged(tmp_path: Path) -> None:
     violations = _check(tmp_path, "a.py", f'ROOT = r"{_win("Hackathon")}"\n')
     assert [v.kind for v in violations] == ["local-checkout"]

@@ -18,8 +18,44 @@ MODEL_CONFIG_PATH = PACKAGE_DIR / "model_config.json"
 DEFAULT_MODEL_DIRS = (
     Path.home() / "hf_models" / "Llama-Prompt-Guard-2-22M",
     Path.home() / "hf_models" / "Llama-Prompt-Guard-2-86M",
+    Path("/mnt/d/hf_models/Llama-Prompt-Guard-2-22M"),
+    Path("/mnt/d/hf_models/Llama-Prompt-Guard-2-86M"),
 )
 _IS_WINDOWS = os.name == "nt"
+
+MODEL_DIR_PLACEHOLDER = "<model-dir>"
+
+
+def model_dir() -> Path:
+    """Where `<model-dir>` points: $BAITWATCH_MODEL_DIR or the shared default."""
+    env = os.environ.get("BAITWATCH_MODEL_DIR")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".local" / "share" / "baitwatch" / "models"
+
+
+def expand_model_placeholder(raw: str) -> Path | None:
+    """Expand a `<model-dir>` pin, or return None for a non-placeholder path."""
+    if raw == MODEL_DIR_PLACEHOLDER:
+        return model_dir()
+    prefix = MODEL_DIR_PLACEHOLDER + "/"
+    if raw.startswith(prefix):
+        return model_dir() / raw[len(prefix) :]
+    return None
+
+
+def default_data_root() -> Path:
+    """Dataset root: $BAITWATCH_DATA_ROOT, then ~/hf_datasets, then /mnt/d."""
+    env = os.environ.get("BAITWATCH_DATA_ROOT")
+    if env:
+        return Path(env).expanduser()
+    home_root = Path.home() / "hf_datasets"
+    if home_root.exists():
+        return home_root
+    mnt_root = Path("/mnt/d/hf_datasets")
+    if mnt_root.exists():
+        return mnt_root
+    return home_root
 
 # Prompt Guard 2's config.json ships no label names: index 0 is benign,
 # index 1 is injection (verified against the sanity strings in tests).
@@ -183,6 +219,18 @@ def resolve_model_path(explicit: Path | str | None = None) -> Path:
     pinned = load_model_config()
     if pinned:
         raw = str(pinned["checkpoint_path"])
+        candidate = expand_model_placeholder(raw)
+        if candidate is not None:
+            if candidate.exists():
+                return candidate
+            raise FileNotFoundError(
+                "read/model_config.json stores a publication placeholder instead of a "
+                f"machine path; it expands to {candidate} (BAITWATCH_MODEL_DIR, "
+                "default ~/.local/share/baitwatch/models). Restore the pinned "
+                f"checkpoint there (tag {pinned.get('tag')!r}), set "
+                "BAITWATCH_MODEL_DIR to the directory holding it, or set "
+                "BAITWATCH_MODEL_PATH to the pinned checkpoint before scanning."
+            )
         if raw.startswith("<"):
             raise FileNotFoundError(
                 "read/model_config.json stores a publication placeholder instead of a "

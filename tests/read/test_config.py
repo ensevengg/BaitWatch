@@ -103,11 +103,43 @@ def test_publication_placeholder_pin_is_an_actionable_error(monkeypatch, tmp_pat
     monkeypatch.setattr(rc, "MODEL_CONFIG_PATH", tmp_path / "model_config.json")
     (tmp_path / "model_config.json").write_text(json.dumps(pin))
     monkeypatch.delenv("BAITWATCH_MODEL_PATH", raising=False)
+    monkeypatch.delenv("BAITWATCH_MODEL_DIR", raising=False)
+    monkeypatch.setattr(rc, "model_dir", lambda: tmp_path / "no-models-here")
     with pytest.raises(FileNotFoundError) as exc:
         rc.resolve_model_path()
     message = str(exc.value)
     assert "placeholder" in message
     assert "BAITWATCH_MODEL_PATH" in message
+
+
+def test_placeholder_expands_from_model_dir(monkeypatch, tmp_path):
+    models = tmp_path / "models"
+    checkpoint = models / "v15f_22m"
+    checkpoint.mkdir(parents=True)
+    pin = {"tag": "v1.5f", "checkpoint_path": "<model-dir>/v15f_22m"}
+    monkeypatch.setattr(rc, "MODEL_CONFIG_PATH", tmp_path / "model_config.json")
+    (tmp_path / "model_config.json").write_text(json.dumps(pin))
+    monkeypatch.delenv("BAITWATCH_MODEL_PATH", raising=False)
+    monkeypatch.setenv("BAITWATCH_MODEL_DIR", str(models))
+    assert rc.resolve_model_path() == checkpoint
+
+
+def test_placeholder_default_is_the_shared_model_dir(monkeypatch, tmp_path):
+    monkeypatch.delenv("BAITWATCH_MODEL_DIR", raising=False)
+    monkeypatch.setattr(rc.Path, "home", classmethod(lambda cls: tmp_path))
+    assert rc.model_dir() == tmp_path / ".local" / "share" / "baitwatch" / "models"
+
+
+def test_default_model_dirs_try_home_before_mnt_d():
+    paths = [p.as_posix() for p in rc.DEFAULT_MODEL_DIRS]
+    home = [i for i, p in enumerate(paths) if "hf_models" in p and not p.startswith("/mnt")]
+    mnt = [i for i, p in enumerate(paths) if p.startswith("/mnt/d/hf_models")]
+    assert home and mnt and max(home) < min(mnt)
+
+
+def test_default_data_root_prefers_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BAITWATCH_DATA_ROOT", str(tmp_path / "datasets"))
+    assert rc.default_data_root() == tmp_path / "datasets"
 
 
 def test_committed_pin_has_no_personal_path() -> None:

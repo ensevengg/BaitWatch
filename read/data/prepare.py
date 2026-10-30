@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import random
 import sys
 import time
@@ -33,11 +32,19 @@ from pathlib import Path
 
 import numpy as np
 
-from read.data.schema import (SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, Row,
-                              normalize_for_dedupe, read_jsonl,
-                              text_sha256, write_parquet)
+from read.config import default_data_root
+from read.data.schema import (
+    SPLIT_TEST,
+    SPLIT_TRAIN,
+    SPLIT_VAL,
+    Row,
+    normalize_for_dedupe,
+    read_jsonl,
+    text_sha256,
+    write_parquet,
+)
 
-_DATA_ROOT = Path(os.environ.get("BAITWATCH_DATA_ROOT", str(Path.home() / "hf_datasets")))
+_DATA_ROOT = default_data_root()
 
 DEFAULT_RAW_DIRS = {
     "prodnull": _DATA_ROOT / "prompt-injection-repo-dataset" / "train.jsonl",

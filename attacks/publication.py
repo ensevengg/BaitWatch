@@ -73,6 +73,18 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# Generic shared-data mounts are configuration candidates, not a person's
+# workstation path: they carry no username and are tried only after the
+# home-directory location. Every other /mnt/<drive>/ path stays a violation.
+_GENERIC_WSL_PREFIXES = ("/mnt/d/hf_models", "/mnt/d/hf_datasets")
+
+
+def _only_generic_mounts(line: str, pattern: re.Pattern[str]) -> bool:
+    matches = list(pattern.finditer(line))
+    return bool(matches) and all(
+        line[match.start() :].lower().startswith(_GENERIC_WSL_PREFIXES) for match in matches
+    )
+
 
 @dataclass(frozen=True)
 class Violation:
@@ -116,10 +128,13 @@ def publication_violations(root: Path | None = None) -> list[Violation]:
         for lineno, line in enumerate(text.splitlines(), start=1):
             for kind, pattern in _PATTERNS:
                 match = pattern.search(line)
-                if match:
-                    violations.append(
-                        Violation(rel, lineno, kind, f"personal path {match.group()!r}")
-                    )
+                if not match:
+                    continue
+                if kind == "wsl-drive-mount" and _only_generic_mounts(line, pattern):
+                    continue
+                violations.append(
+                    Violation(rel, lineno, kind, f"personal path {match.group()!r}")
+                )
     return violations
 
 
