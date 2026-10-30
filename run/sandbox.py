@@ -232,6 +232,7 @@ class Sandbox:
         self._planted_max_file_bytes = 0
         self._honeytoken_scanned = False
         self._trace_before: dict | None = None
+        self._git_paths: frozenset[str] = frozenset()
 
     @property
     def network_id(self) -> str | None:
@@ -758,11 +759,42 @@ class Sandbox:
         except TraceError as exc:
             raise SandboxError(str(exc)) from exc
 
+    def prepare_repository(self) -> None:
+        command = [
+            "sh",
+            "-ec",
+            "umask 000; git init -q --template= --initial-branch=main /repo; "
+            "mkdir /repo/.git/hooks",
+        ]
+        container = self._create(
+            DEFAULT_IMAGE,
+            command,
+            "git-init",
+            None,
+            networked=False,
+            mounts=[Mount("/repo", str(self.staged_path), type="bind", read_only=False)],
+        )
+        try:
+            result = capture_attached(
+                ["docker", "--host", self._docker_host, "start", "--attach", container.id],
+                command,
+                timeout_seconds=self.config.timeout_seconds,
+                max_output_bytes=self.config.max_output_bytes,
+                stop_container=container.kill,
+            )
+        finally:
+            self._remove_container(container, set())
+        if result.exit_code != 0 or result.timed_out or result.output_truncated:
+            raise SandboxError("trusted staged git initialization failed")
+
     def trace_before(self) -> bool:
         if self._trace_before is not None:
             raise SandboxError("the before snapshot can only be taken once")
         try:
             self._trace_before = self._run_trace_helper("trace-before")
+            self._git_paths = frozenset(
+                path for path in self._trace_before if path == ".git" or path.startswith(".git/")
+            )
         except Exception as exc:
             self._error("TRACE_FAILED", str(exc), component="trace")
             return False
@@ -783,6 +815,7 @@ class Sandbox:
             if entry.kind == "file"
             and not path.startswith("/home/agent/")
             and path not in planted
+            and path not in self._git_paths
             and not is_build_cache(path)
         }
         self.evidence.staged_file_count = len(repo_files)
@@ -804,7 +837,9 @@ class Sandbox:
         limits = self.config.staging
         # Bait the cage left untouched is ours, not the repository's growth.
         planted = {
-            path for path in self._planted_paths if after.get(path) == self._trace_before.get(path)
+            path
+            for path in self._planted_paths | self._git_paths
+            if after.get(path) == self._trace_before.get(path)
         }
         if (
             sum(1 for path in after if path not in planted) > limits.max_entries
@@ -1328,6 +1363,7 @@ def detonate(
     try:
         with sandbox:
             try:
+                sandbox.prepare_repository()
                 sandbox.start_sinks()
                 sandbox.trace_before()
                 if backend is None:

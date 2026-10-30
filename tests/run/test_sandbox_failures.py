@@ -1312,6 +1312,7 @@ def test_exec_waits_for_the_daemon_exit_event(repo: Path, monkeypatch):
 
 
 def test_detonate_collects_evidence_after_a_late_exception(repo: Path, monkeypatch):
+    monkeypatch.setattr(Sandbox, "prepare_repository", lambda self: None)
     from run.evidence import NetworkHit
 
     monkeypatch.setattr("run.sandbox.docker.DockerClient", lambda **kwargs: fake_client())

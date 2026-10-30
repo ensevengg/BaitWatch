@@ -146,3 +146,13 @@ traced directory at `/home/agent`; shell startup and configuration changes there
 BLOCK, while cache writes alone remain eligible for ALLOW. Repository deletions
 FLAG, or BLOCK at 50% of staged regular files or more than 200 files, excluding
 build/cache trees and planted bait. See [file-change rules](CONTRACT.md#file-change-rules).
+
+Before the first trace snapshot, a trusted, network-disabled helper creates an
+empty Git repository in the staged copy with templates disabled. The original
+`.git` stays excluded from staging. Unchanged synthetic metadata is baseline,
+not a repository file or growth; subsequent `.git/hooks` and `.git/config`
+changes remain traced and BLOCK. The image trusts only `/repo` for Git ownership checks because the staging
+owner differs from the cage uid. A failed initialization keeps the scan non-ALLOW.
+A `run_cmd` that exits 126/127 or emits a shell command-not-found diagnostic does
+not establish execution coverage. If no setup program ran, fusion FLAGs; ordinary
+program failures (such as failing tests) still count as executed.
