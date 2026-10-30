@@ -415,11 +415,12 @@ def test_agent_control_changes_block(path, change):
         "ordinary.txt",
     ],
 )
-def test_ordinary_setup_changes_allow(path):
+@pytest.mark.parametrize("change", ["added", "modified"])
+def test_ordinary_setup_changes_allow(path, change):
     from run.evidence import FileDiff
 
     run = complete_run()
-    run.file_diffs = [FileDiff(path=path, change="added")]
+    run.file_diffs = [FileDiff(path=path, change=change)]
     assert fuse(CLEAN, run).verdict == "ALLOW"
 
 

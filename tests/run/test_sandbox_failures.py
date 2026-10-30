@@ -1412,3 +1412,27 @@ def test_trace_counts_repo_files_without_bait_cache_or_directories(repo, monkeyp
     assert [entry.path for entry in sandbox.evidence.file_diffs if entry.is_repo_file] == [
         "README.md"
     ]
+
+
+@pytest.mark.parametrize("bound", ["bytes", "entries", "file"])
+def test_home_writes_share_repository_collection_limits(repo, monkeypatch, bound):
+    from run.staging import StagingLimits
+
+    (repo / "README.md").write_text("x")
+    limits = StagingLimits(max_bytes=10, max_entries=2, max_file_bytes=8)
+    file = Entry(kind="file", mode=0o666, size=6, sha256="0" * 64)
+    if bound == "bytes":
+        after = {"repo.txt": file, "/home/agent/.cache/data": file}
+    elif bound == "entries":
+        after = {"/home/agent/.cache/" + str(i): Entry(kind="dir", mode=0o777) for i in range(3)}
+    else:
+        after = {"/home/agent/data": Entry(kind="file", mode=0o666, size=8, sha256="0" * 64)}
+    manifests = iter([{}, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, SandboxConfig(staging=limits), client_factory=fake_client)
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
+    assert sandbox.evidence.status == "error"
+    assert any(entry.path.startswith("/home/agent/") for entry in sandbox.evidence.file_diffs)
