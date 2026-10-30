@@ -1371,3 +1371,18 @@ the training split was built to expose. Most of v17a's remaining misses are
 in long `AGENTS.md`, `CONTRIBUTING.md` and docs files. On
 `readme-bait-curl` the README scores 0.86 on v17a, so READ returns
 `incomplete` and the hook asks instead of blocking.
+
+### Detector scores reported by Manan (2026-10-30)
+
+| Model | Held-out | Gold | Aditya (D6 held-out) |
+|---|---|---|---|
+| v17a (22M) | 0.7467 | 0.7197 | 0.9444 |
+| v17c epoch 1 | 0.7533 | 0.7197 | 1.0000 |
+| v17c epoch 2 | 0.8400 | 0.8182 | 1.0000 |
+| v17c epoch 3 | 0.8333 | 0.8106 | 1.0000 |
+
+These are the READ owner's reported scores, not re-measured in this
+repository; the checkpoint and evaluation data are not committed here.
+Epoch 2 is the strongest held-out result so far, with a small regression at
+epoch 3. The D6 held-out set was shared with the READ owner privately, not
+committed.

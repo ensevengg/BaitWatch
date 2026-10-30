@@ -132,9 +132,7 @@ def publication_violations(root: Path | None = None) -> list[Violation]:
                     continue
                 if kind == "wsl-drive-mount" and _only_generic_mounts(line, pattern):
                     continue
-                violations.append(
-                    Violation(rel, lineno, kind, f"personal path {match.group()!r}")
-                )
+                violations.append(Violation(rel, lineno, kind, f"personal path {match.group()!r}"))
     return violations
 
 
