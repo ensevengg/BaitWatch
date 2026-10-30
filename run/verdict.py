@@ -175,14 +175,14 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         blockers.append(_path_reason("agent-control or persistence changes", controls))
 
     deleted = sorted(
-        {
+        [
             change.path
             for change in run.file_diffs
             if change.change == "deleted"
             and change.is_repo_file
             and not change.path.startswith("/home/agent/")
             and not is_build_cache(change.path)
-        }
+        ]
     )
     if deleted:
         reason = _path_reason("staged repository file deletions", deleted)

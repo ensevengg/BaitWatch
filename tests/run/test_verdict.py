@@ -524,3 +524,16 @@ def test_deleted_bait_and_directories_do_not_count():
         for path in [".env", ".env.local", "config/credentials", "src"]
     ]
     assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_distinct_deleted_files_with_colliding_display_names_still_count():
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.staged_file_count = 3
+    run.file_diffs = [
+        FileDiff(path=path, change="deleted", is_repo_file=True)
+        for path in ["bad\udcff", r"bad\udcff"]
+    ]
+    assert run.file_diffs[0].path == run.file_diffs[1].path
+    assert fuse(CLEAN, run).verdict == "BLOCK"
