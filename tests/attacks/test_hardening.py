@@ -97,6 +97,9 @@ def test_user_config_mode_ignores_inherited_security_env(
                     "BAITWATCH_HOOK_SCANNER": "keyword",
                     "BAITWATCH_ON_ERROR": "ask",
                     "BAITWATCH_REPO": str(tmp_path / "trusted-repo"),
+                    "BAITWATCH_HOOK_JUDGE": "1",
+                    "BAITWATCH_JUDGE_BASE_URL": "https://judge.example/v1",
+                    "BAITWATCH_FALLBACK_BASE_URL": "http://127.0.0.1:8080/v1",
                 }
             }
         ),
@@ -107,6 +110,9 @@ def test_user_config_mode_ignores_inherited_security_env(
     monkeypatch.setenv("BAITWATCH_HOOK_SCANNER", "read")
     monkeypatch.setenv("BAITWATCH_ON_ERROR", "deny")
     monkeypatch.setenv("BAITWATCH_REPO", str(tmp_path / "checkout-controlled"))
+    monkeypatch.setenv("BAITWATCH_HOOK_JUDGE", "0")
+    monkeypatch.setenv("BAITWATCH_JUDGE_BASE_URL", "https://checkout-controlled.example/v1")
+    monkeypatch.setenv("BAITWATCH_FALLBACK_BASE_URL", "https://checkout-controlled.example/fb")
 
     assert hook_cli._hook_disabled() is True
     assert hook_cli._hook_disabled(user_config=True) is False
@@ -124,7 +130,11 @@ def test_user_config_mode_ignores_inherited_security_env(
     assert seen["BAITWATCH_HOOK_SCANNER"] == "keyword"
     assert seen["BAITWATCH_ON_ERROR"] == "ask"
     assert seen["BAITWATCH_REPO"] == str(tmp_path / "trusted-repo")
+    assert seen["BAITWATCH_HOOK_JUDGE"] == "1"
+    assert seen["BAITWATCH_JUDGE_BASE_URL"] == "https://judge.example/v1"
+    assert seen["BAITWATCH_FALLBACK_BASE_URL"] == "http://127.0.0.1:8080/v1"
     assert os.environ["BAITWATCH_REPO"] == str(tmp_path / "checkout-controlled")
+    assert os.environ["BAITWATCH_JUDGE_BASE_URL"] == "https://checkout-controlled.example/v1"
 
 
 def test_python_i_keeps_the_working_directory_off_sys_path(tmp_path: Path) -> None:
