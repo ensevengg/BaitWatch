@@ -3,8 +3,9 @@
 The thresholds here are provisional until agreed with Manan; the fixed rules
 are already binding: any exception, timeout, truncated scan, missing component,
 READ incomplete/unavailable or RUN error is at least FLAG, never ALLOW, and any
-non-registry sink contact or honeytoken hit is BLOCK. Package-registry lookups
-to the exact hosts in REGISTRY_HOSTS are network attempts, not exfiltration: they
+non-registry sink contact or honeytoken sent over the network is BLOCK. A
+decoy that only reads a honeytoken FLAGs. Package-registry lookups to the
+exact hosts in REGISTRY_HOSTS are network attempts, not exfiltration: they
 FLAG instead of BLOCK. The judge inside READ may escalate but never clears a
 high READ score, so fusion sees only the resulting top score.
 """
@@ -28,6 +29,8 @@ REGISTRY_HOSTS = (
     "index.rubygems.org",
 )
 _REASON_PART_CHARS = 400
+# A decoy reading the bait is expected; only these sources mean it left the cage.
+_NETWORK_SOURCES = frozenset({"dns", "http", "tls"})
 
 
 @dataclass(frozen=True)
@@ -80,9 +83,11 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         destinations = ", ".join(dict.fromkeys(hit.destination for hit in exfil))
         message = f"{len(exfil)} sink contact(s) outside the package registries: {destinations}"
         blockers.append(_bounded(message))
-    if run.honeytoken_hits:
-        tokens = ", ".join(dict.fromkeys(hit.token_id for hit in run.honeytoken_hits))
-        blockers.append(_bounded(f"honeytoken hit(s): {tokens}"))
+    sent = [hit for hit in run.honeytoken_hits if hit.source in _NETWORK_SOURCES]
+    read_only = [hit for hit in run.honeytoken_hits if hit.source not in _NETWORK_SOURCES]
+    if sent:
+        tokens = ", ".join(dict.fromkeys(hit.token_id for hit in sent))
+        blockers.append(_bounded(f"honeytoken hit(s) sent over the network: {tokens}"))
     if read.verdict == "attack" and read.max_score >= READ_BLOCK_SCORE:
         blockers.append(f"READ top score {read.max_score:.2f} reaches the block threshold")
 
@@ -114,6 +119,9 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         for entry in run.tool_log
     ):
         flags.append("RUN decoy did not execute a run_cmd tool call")
+    if read_only:
+        tokens = ", ".join(dict.fromkeys(hit.token_id for hit in read_only))
+        flags.append(_bounded(f"the decoy read planted honeytoken(s): {tokens}"))
     if attempts:
         hosts = ", ".join(dict.fromkeys(_host_of(hit.destination) for hit in attempts))
         flags.append(

@@ -78,6 +78,24 @@ def test_honeytoken_hit_blocks():
     assert "honeytoken" in report.reason
 
 
+@pytest.mark.parametrize("source", ["tool_log", "transcript"])
+def test_a_decoy_reading_a_honeytoken_flags_without_blocking(source):
+    # Reading the bait is what an agent setting up a repo does; only sending it
+    # over the network is exfiltration.
+    run = complete_run()
+    run.honeytoken_hits.append(HoneytokenHit(token_id="ht-1", source=source))
+    report = fuse(CLEAN, run)
+    assert report.verdict == "FLAG"
+    assert "ht-1" in report.reason
+
+
+def test_a_sent_honeytoken_blocks_even_when_it_was_also_read():
+    run = complete_run()
+    run.honeytoken_hits.append(HoneytokenHit(token_id="ht-1", source="tool_log"))
+    run.honeytoken_hits.append(HoneytokenHit(token_id="ht-1", source="http"))
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
 def test_high_read_score_blocks_and_lower_score_flags():
     run = complete_run()
     hot = ReadOutcome(status=State.COMPLETE, verdict="attack", max_score=READ_BLOCK_SCORE)
@@ -192,7 +210,8 @@ def random_run(rng: random.Random) -> RunEvidence:
                 contact.detail = rng.choice(["GET", "HEAD", "POST", "PUT", "GET body=secret"])
             getattr(run, f"{kind}_hits").append(contact)
     for _ in range(rng.randrange(3)):
-        run.honeytoken_hits.append(HoneytokenHit(token_id="t", source="dns"))
+        source = rng.choice(["dns", "http", "tls", "tool_log", "transcript"])
+        run.honeytoken_hits.append(HoneytokenHit(token_id="t", source=source))
     return run
 
 

@@ -77,10 +77,10 @@ directory or regular file, also FLAG. READ runs with strict coverage, and its
 partial/truncated statistics prevent ALLOW. READ-skipped directories that RUN copies (including
 build, dist and target) also prevent ALLOW; paths staging already omits are
 handled by fusion, with only top-level `.git` exempt; any sink
-contact or honeytoken hit outside the package registries is BLOCK; package-
-registry lookups (the exact hosts listed below) are counted as attempts, not
-exfiltration; honeytoken hits are always BLOCK (the generator arrives in a
-later milestone, so the field is empty today).
+contact outside the package registries is BLOCK; package-registry lookups (the
+exact hosts listed below) are counted as attempts, not exfiltration. A
+honeytoken sent over DNS, HTTP or TLS is BLOCK; a decoy that only read one
+(`tool_log`) is FLAG.
 
 ## Library interface
 
