@@ -52,8 +52,12 @@ def test_http_and_tls_hits_block():
 def test_registry_lookups_flag_but_do_not_block():
     run = complete_run()
     run.dns_hits.append(hit("pypi.org"))
-    run.http_hits.append(hit("registry.npmjs.org/simple/pkg/"))
-    run.tls_hits.append(hit("files.pypi.org"))
+    run.http_hits.append(
+        NetworkHit(
+            source_ip="10.13.37.20", destination="registry.npmjs.org/simple/pkg/", detail="GET"
+        )
+    )
+    run.tls_hits.append(hit("files.pythonhosted.org"))
     report = fuse(CLEAN, run)
     assert report.verdict == "FLAG"
     assert "package-registry" in report.reason
@@ -271,3 +275,27 @@ def test_errors_prevent_allow_even_after_status_is_overwritten():
     report = fuse(CLEAN, run)
     assert report.verdict == "FLAG"
     assert "DECOY_STEP_BUDGET" in report.reason
+
+
+@pytest.mark.parametrize(
+    "kind,destination,detail,verdict",
+    [
+        ("dns", "secret.pypi.org", "", "BLOCK"),
+        ("dns", "pypi.org/secret.evil.com", "", "BLOCK"),
+        ("dns", "files.pythonhosted.org", "", "FLAG"),
+        ("dns", "registry.yarnpkg.com", "", "FLAG"),
+        ("tls", "secret.pypi.org", "", "BLOCK"),
+        ("tls", "pypi.org", "", "FLAG"),
+        ("http", "pypi.org/upload", "POST body=secret", "BLOCK"),
+        ("http", "pypi.org/simple?q=secret", "GET", "BLOCK"),
+        ("http", "pypi.org/simple", "GET body=secret", "BLOCK"),
+        ("http", "pypi.org/simple", "GET", "FLAG"),
+        ("http", "registry.yarnpkg.com/pkg", "HEAD", "FLAG"),
+    ],
+)
+def test_only_plain_exact_registry_lookups_are_downgraded(kind, destination, detail, verdict):
+    run = complete_run()
+    getattr(run, f"{kind}_hits").append(
+        NetworkHit(source_ip="10.13.37.20", destination=destination, detail=detail)
+    )
+    assert fuse(CLEAN, run).verdict == verdict

@@ -107,3 +107,8 @@ These tests cover the boundary built so far. They do not prove that a container 
 Literal-IP connections and unlisted ports are a known observation gap: blocked
 network access does not necessarily create a sink hit, so otherwise clean
 scans can still ALLOW them. See [the uncovered channels](SANDBOX.md#known-limits).
+
+Registry downgrades apply only to exact pypi.org, files.pythonhosted.org,
+registry.npmjs.org and registry.yarnpkg.com names: DNS questions, TLS SNI,
+or HTTP GET/HEAD with no body, query or incomplete capture. Subdomains and
+uploads BLOCK. Registry-attempt reasons are bounded.

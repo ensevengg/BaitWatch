@@ -42,3 +42,8 @@ Network evidence covers the DNS listener and HTTP/TLS listeners, not all failed
 connections. TCP or UDP to literal IPs outside those listeners, and contacts on
 unlisted ports, can fail without a sink hit. A clean READ and otherwise complete
 RUN can still yield ALLOW in that case. See [SANDBOX.md](SANDBOX.md).
+
+Registry downgrades apply only to exact pypi.org, files.pythonhosted.org,
+registry.npmjs.org and registry.yarnpkg.com names: DNS questions, TLS SNI,
+or HTTP GET/HEAD with no body, query or incomplete capture. Subdomains and
+uploads BLOCK. Registry-attempt reasons are bounded.

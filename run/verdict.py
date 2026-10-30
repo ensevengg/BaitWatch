@@ -15,7 +15,12 @@ from run.evidence import NetworkHit, ReadEvidence, RunEvidence, State, VerdictRe
 
 # Provisional until agreed with Manan.
 READ_BLOCK_SCORE = 0.9
-REGISTRY_HOSTS = ("pypi.org", "registry.npmjs.org")
+REGISTRY_HOSTS = (
+    "pypi.org",
+    "registry.npmjs.org",
+    "files.pythonhosted.org",
+    "registry.yarnpkg.com",
+)
 _REASON_PART_CHARS = 400
 
 
@@ -35,15 +40,21 @@ class ReadOutcome:
 
 
 def _host_of(destination: str) -> str:
-    # DNS qnames and TLS SNI carry no port or path; HTTP destinations are
-    # host[:port]/path. Sinks log IPv4 peers, so bracketed IPv6 is out of scope.
-    authority = destination.split("/", 1)[0].rsplit("@", 1)[-1]
-    return authority.partition(":")[0].lower().rstrip(".")
+    return destination.partition("/")[0].lower().removesuffix(".")
 
 
-def _is_registry_attempt(hit: NetworkHit) -> bool:
-    host = _host_of(hit.destination)
-    return any(host == known or host.endswith(f".{known}") for known in REGISTRY_HOSTS)
+def _is_registry_attempt(hit: NetworkHit, kind: str = "dns") -> bool:
+    if "capture_incomplete" in hit.detail:
+        return False
+    if kind == "http":
+        if hit.detail not in {"GET", "HEAD"} or "?" in hit.destination or "#" in hit.destination:
+            return False
+        host, separator, _path = hit.destination.partition("/")
+        if not separator:
+            return False
+    else:
+        host = hit.destination
+    return host.lower().removesuffix(".") in REGISTRY_HOSTS
 
 
 def _bounded(text: str) -> str:
@@ -55,9 +66,9 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         run = run.model_copy(update={"status": "error"})
     blockers: list[str] = []
     flags: list[str] = []
-    hits = (*run.dns_hits, *run.http_hits, *run.tls_hits)
-    exfil = [hit for hit in hits if not _is_registry_attempt(hit)]
-    attempts = [hit for hit in hits if _is_registry_attempt(hit)]
+    hits = [(kind, hit) for kind in ("dns", "http", "tls") for hit in getattr(run, f"{kind}_hits")]
+    exfil = [hit for kind, hit in hits if not _is_registry_attempt(hit, kind)]
+    attempts = [hit for kind, hit in hits if _is_registry_attempt(hit, kind)]
 
     if exfil:
         destinations = ", ".join(dict.fromkeys(hit.destination for hit in exfil))
@@ -103,7 +114,9 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         flags.append("RUN decoy did not execute a run_cmd tool call")
     if attempts:
         hosts = ", ".join(dict.fromkeys(_host_of(hit.destination) for hit in attempts))
-        flags.append(f"{len(attempts)} package-registry lookup(s) treated as attempts: {hosts}")
+        flags.append(
+            _bounded(f"{len(attempts)} package-registry lookup(s) treated as attempts: {hosts}")
+        )
 
     if blockers:
         verdict, why = "BLOCK", blockers
