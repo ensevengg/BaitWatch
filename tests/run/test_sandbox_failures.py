@@ -749,6 +749,23 @@ def test_trace_after_does_not_charge_planted_files_to_the_write_limit(repo: Path
     assert sandbox.evidence.components.trace == State.COMPLETE
 
 
+def test_trace_after_charges_planted_files_the_cage_rewrote(repo: Path, monkeypatch):
+    before = _planted_manifest()
+    after = dict(before)
+    after[".env"] = Entry(kind="file", mode=0o666, size=4096, sha256="5" * 64)
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(
+        repo,
+        SandboxConfig(staging=StagingLimits(max_bytes=1024)),
+        client_factory=lambda: fake_client(),
+    )
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
+
+
 def test_trace_after_still_charges_cage_entries_past_the_write_limit(repo: Path, monkeypatch):
     before = _planted_manifest()
     before["README.md"] = Entry(kind="file", mode=0o644, size=64, sha256="0" * 64)

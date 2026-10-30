@@ -703,7 +703,10 @@ class Sandbox:
             FileDiff(path=path, change=change) for path, change in diff(self._trace_before, after)
         ]
         limits = self.config.staging
-        planted = self._planted_paths
+        # Bait the cage left untouched is ours, not the repository's growth.
+        planted = {
+            path for path in self._planted_paths if after.get(path) == self._trace_before.get(path)
+        }
         if (
             sum(1 for path in after if path not in planted) > limits.max_entries
             or sum(
