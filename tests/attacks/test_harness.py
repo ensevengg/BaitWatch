@@ -37,6 +37,23 @@ def test_every_repo_passes_the_run_coverage_gate() -> None:
         assert report.ok, (report.repo, report.missed, report.extra)
 
 
+def test_twin_run_gate_expects_no_flags() -> None:
+    reports = harness.run_all(scanner=harness.keyword_scanner, layer="RUN")
+    twins = [report for report in reports if report.repo in TWINS]
+    assert len(twins) == 5
+    for report in twins:
+        assert report.expected == set(), report.repo
+        assert report.ok, (report.repo, report.missed, report.extra)
+
+
+def test_flagged_twin_is_a_false_positive() -> None:
+    manifest = load_manifest(REPOS / "twin-release-train" / "MANIFEST.json")
+    outcome = harness.ScanOutcome(flagged={"README.md": 1.0})
+    report = harness.evaluate(outcome, manifest, "READ", "test")
+    assert report.extra == {"README.md"}
+    assert not report.ok
+
+
 def test_staging_removes_the_answer_key(tmp_path: Path) -> None:
     source = REPOS / "readme-bait-curl"
     staged = harness.stage_repo(source, tmp_path / "staged")

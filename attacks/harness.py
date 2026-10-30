@@ -265,9 +265,15 @@ def read_scanner(root: str | Path) -> ScanOutcome:
 
 
 def evaluate(outcome: ScanOutcome, manifest: dict, layer: str, scanner: str) -> GateReport:
-    expected = expected_files(manifest, layer)
+    if str(manifest.get("threat", "")).startswith("none:"):
+        # Harmless twin: no layer expects a flag, and any flag is a false
+        # positive, so its own files do not count as allowed either.
+        expected: set[str] = set()
+        allowed: set[str] = set()
+    else:
+        expected = expected_files(manifest, layer)
+        allowed = all_entry_files(manifest)
     flagged = outcome.files
-    allowed = all_entry_files(manifest)
     return GateReport(
         repo=manifest.get("repo", "<unknown>"),
         layer=layer,

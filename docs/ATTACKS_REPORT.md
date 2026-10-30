@@ -48,7 +48,7 @@ require the fine-tuned READ checkpoint or the training corpus.
 | De-Caffeinator credit without external URLs | root README + `attacks/README.md` | `test_attack_readme_names_prior_work_without_a_url` |
 
 **Test result on this machine:** `python -m pytest tests/attacks -q` →
-`239 passed`, `0 failed`, `0 skipped` (239 collected). Symlink privilege was
+`241 passed`, `0 failed`, `0 skipped` (241 collected). Symlink privilege was
 granted on this Windows host, so the four symlink tests now execute here
 instead of skipping; they passed. Node 22 is present, so the
 runtime-execution test ran; on a machine without `node` those three tests
@@ -148,7 +148,7 @@ hook fails closed.
 | `attacks/build.py` | 144 | write / check / prune the generated tree |
 | `attacks/decoderlib.py` | 55 | load `read.decoders` without importing torch |
 | `attacks/decoders.py` | 100 | external READ plugin; registers only missing channels |
-| `attacks/harness.py` | 386 | stage repo, scan, compare against manifest, recovery count |
+| `attacks/harness.py` | 392 | stage repo, scan, compare against manifest, recovery count |
 | `attacks/leakage.py` | 361 | exact / embedded / fuzzy payload-vs-corpus check |
 | `attacks/lint.py` | 284 | URL, domain, IP, credential, `.env` safety lint |
 | `attacks/manifests.py` | 195 | load, validate, span hash, expected-file sets |
@@ -185,7 +185,7 @@ Generated tree size: **176 files** (`build.build_tree()`), of which
 | `test_decoders.py` | 14 | plugin registration, each channel, budget exhaustion, builtin drift |
 | `test_docs.py` | 5 | docs exist, demo under 3:00, hook docs, credit |
 | `test_hardening.py` | 42 | the PR #13 review findings, one test group per comment |
-| `test_harness.py` | 13 | staging, recall, extras, incomplete, recovery, CLI |
+| `test_harness.py` | 15 | staging, recall, extras, incomplete, recovery, CLI |
 | `test_hooks.py` | 38 | tool policy, gates, cache, installer, CLI, timing |
 | `test_leakage.py` | 16 | exact/embedded/fuzzy, skip, parquet, incomplete, exit 2 |
 | `test_lint.py` | 23 | URL/domain/IP/key/.env rules, every scheme, dynamic hosts, corpus hosts |
@@ -194,7 +194,7 @@ Generated tree size: **176 files** (`build.build_tree()`), of which
 | `test_repos.py` | 17 | 22 repos, class balance, twins, file size, mid-file spans |
 | `test_runtime_payloads.py` | 3 | Node executes the JS eval chain; every generated `.js` parses |
 | `test_transforms.py` | 36 | round trip per transform, invisibility, bidi, escapes, budgets |
-| **Total** | **239** | |
+| **Total** | **241** | |
 
 ### 4.4 Other new paths
 
@@ -636,7 +636,7 @@ selftest: 11/11
 
 ```text
 $ python -m pytest tests/attacks -q
-239 passed
+241 passed
 ```
 
 No test skips on this machine: Node 22 is present and symlink privilege is
@@ -1010,7 +1010,7 @@ Exit codes:
 | publication check | clean |
 | READ gate | 22/22 repos, 68/68 payloads recovered |
 | RUN coverage gate | 22/22 repos (twins must stay unflagged) |
-| tests | 239 collected: 239 passed, 0 skipped (symlink privilege granted on this host) |
+| tests | 241 collected: 241 passed, 0 skipped (symlink privilege granted on this host) |
 | READ judge/config | 32 passed |
 | READ decoders | 27 passed |
 | Windows ledger test | 3 ledger tests pass (`msvcrt` sidecar lock) |
@@ -1311,7 +1311,7 @@ gate READ ...: ok (22/22 repos, 68/68 payloads recovered)
 PASS: lint, publication, generated tree, and READ gate
 
 $ python -m pytest tests/attacks -q
-239 passed
+241 passed
 ```
 
 This section describes the corpus, not a detector score. The fine-tuned READ
