@@ -205,7 +205,10 @@ def walk(repo_root: Path, cfg: WalkerConfig | None = None) -> WalkResult:
             continue
         for name in names:
             full = logical_dir / name
-            rel = str(Path(rel_dir) / name) if rel_dir else name
+            # Logical paths are POSIX on every platform: findings, manifests
+            # and the priority tiers all speak "/", and str(Path) would give
+            # "\" on Windows.
+            rel = f"{rel_dir}/{name}" if rel_dir else name
             try:
                 lst = full.lstat()
             except OSError as exc:
