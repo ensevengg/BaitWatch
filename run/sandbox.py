@@ -855,6 +855,11 @@ class Sandbox:
             message = "the cage must be started with open_cage before exec"
             self._error("EXEC_ERROR", message)
             raise SandboxError(message)
+        if self._sinks_collected or self._honeytoken_scanned:
+            # Output produced after collection would skip the honeytoken search.
+            message = "exec is not allowed after the sinks are collected"
+            self._error("EXEC_ERROR", message)
+            raise SandboxError(message)
         try:
             running = self._cage_running()
         except Exception as exc:
