@@ -143,6 +143,13 @@ class OpenAICompatBackend:
             raise ValueError("api_key_env must be a nonempty environment variable name")
         if seed is not None and (type(seed) is not int or seed < 0):
             raise ValueError("seed must be a non-negative integer or None")
+        endpoint = urllib.parse.urlsplit(self.base_url)
+        if (
+            api_key_env is not None
+            and endpoint.scheme == "http"
+            and endpoint.hostname not in {"localhost", "127.0.0.1"}
+        ):
+            raise ValueError("API keys require HTTPS except on localhost or 127.0.0.1")
         self.model = model
         self.api_key_env = api_key_env
         self.temperature = _finite_number("temperature", temperature, allow_zero=True)

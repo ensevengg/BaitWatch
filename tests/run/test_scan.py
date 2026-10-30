@@ -210,3 +210,69 @@ def test_attack_reason_retains_coverage_gaps():
     report = fuse(_outcome_from(result), complete_run())
     assert report.verdict == "BLOCK"
     assert "file cap" in report.reason
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["build", "dist", "target", ".tox", ".next", ".parcel-cache", ".mypy_cache", ".hg", ".svn"],
+)
+def test_read_skipped_directories_copied_to_cage_prevent_allow(monkeypatch, tmp_path, name):
+    import importlib
+
+    (tmp_path / name).mkdir()
+    (tmp_path / name / "INSTALL.md").write_text("fixture instructions")
+    result = real_scan_result()
+    result.stats.dirs_skipped = 1
+    monkeypatch.setattr(importlib.import_module("read.scan"), "scan", lambda *a: result)
+    outcome = default_read_scanner(tmp_path)
+    assert outcome.verdict == "incomplete"
+    assert fuse(outcome, complete_run()).verdict == "FLAG"
+
+
+def test_only_git_skipped_still_allows(monkeypatch, tmp_path):
+    import importlib
+
+    (tmp_path / ".git").mkdir()
+    result = real_scan_result()
+    result.stats.dirs_skipped = 1
+    monkeypatch.setattr(importlib.import_module("read.scan"), "scan", lambda *a: result)
+    assert fuse(default_read_scanner(tmp_path), complete_run()).verdict == "ALLOW"
+
+
+def test_unknown_skipped_directory_coverage_never_allows():
+    result = real_scan_result()
+    result.stats.dirs_skipped = 1
+    assert fuse(_outcome_from(result), complete_run()).verdict == "FLAG"
+
+
+@pytest.mark.parametrize(
+    "name", ["node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".ruff_cache"]
+)
+def test_staging_excluded_directories_are_not_counted_twice(monkeypatch, tmp_path, name):
+    import importlib
+
+    (tmp_path / name / "build").mkdir(parents=True)
+    result = real_scan_result()
+    result.stats.dirs_skipped = 1
+    monkeypatch.setattr(importlib.import_module("read.scan"), "scan", lambda *a: result)
+    outcome = default_read_scanner(tmp_path)
+    assert outcome.verdict == "clean"
+    run = complete_run()
+    run.staging_exclusions = [name]
+    assert fuse(outcome, run).verdict == "FLAG"
+
+
+@pytest.mark.parametrize("limit", ["max_entries", "max_depth", "timeout_seconds"])
+def test_read_directory_coverage_bounds_fail_closed(monkeypatch, tmp_path, limit):
+    import importlib
+
+    from run.staging import StagingLimits
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "nested").mkdir()
+    result = real_scan_result()
+    result.stats.dirs_skipped = 1
+    monkeypatch.setattr(importlib.import_module("read.scan"), "scan", lambda *a: result)
+    outcome = default_read_scanner(tmp_path, staging_limits=StagingLimits(**{limit: 0}))
+    assert outcome.status == State.ERROR
+    assert fuse(outcome, complete_run()).verdict == "FLAG"

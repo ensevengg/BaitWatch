@@ -770,9 +770,5 @@ def test_make_backend_rejects_hostile_scripted_files(tmp_path):
 )
 def test_api_keys_are_not_sent_to_remote_plain_http(monkeypatch, url):
     monkeypatch.setenv(ENV, SECRET)
-    backend = OpenAICompatBackend(url, "fixture", api_key_env=ENV)
-    sent = []
-    monkeypatch.setattr(backend, "_post", lambda request: sent.append(request) or b"{}")
-    with pytest.raises(LLMError, match="HTTPS"):
-        backend.chat([], [])
-    assert not sent
+    with pytest.raises(ValueError, match="HTTPS"):
+        OpenAICompatBackend(url, "fixture", api_key_env=ENV)

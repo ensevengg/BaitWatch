@@ -116,14 +116,72 @@ def test_runtime_copy_excludes_host_state_but_keeps_agent_hooks(repo: Path, tmp_
     assert (repo / ".env").read_text() == "HOST-ENV-FIXTURE"
 
 
-@pytest.mark.parametrize("symlink", [False, True])
-def test_top_level_git_exemption_requires_a_directory(tmp_path, symlink):
+def test_top_level_git_symlink_is_refused(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     git = source / ".git"
-    if symlink:
-        git.symlink_to("missing")
-    else:
-        git.write_text("payload")
+    git.symlink_to("missing")
     with pytest.raises(StagingError, match=".git"):
         stage_repository(source, tmp_path / "staged", StagingLimits())
+
+
+@pytest.mark.parametrize(
+    "name", [".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults"]
+)
+def test_committed_env_templates_are_scanned_and_can_allow(repo, tmp_path, name):
+    from run.verdict import fuse
+    from tests.run.test_verdict import CLEAN, complete_run
+
+    (repo / name).write_text("PLACEHOLDER")
+    target = tmp_path / "staged"
+    run = complete_run()
+    run.staging_exclusions = stage_repository(repo, target, StagingLimits())
+    assert (target / name).read_text() == "PLACEHOLDER"
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize(
+    "name", [".env", ".env.development", ".env.test", ".env.local", ".env.other"]
+)
+def test_potential_secret_env_files_remain_excluded_and_flag(repo, tmp_path, name):
+    from run.verdict import fuse
+    from tests.run.test_verdict import CLEAN, complete_run
+
+    (repo / name).write_text("SECRET-FIXTURE")
+    target = tmp_path / "staged"
+    run = complete_run()
+    run.staging_exclusions = stage_repository(repo, target, StagingLimits())
+    assert not (target / name).exists()
+    assert fuse(CLEAN, run).verdict == "FLAG"
+
+
+def test_regular_top_level_git_pointer_is_excluded_and_can_allow(repo, tmp_path):
+    from run.verdict import fuse
+    from tests.run.test_verdict import CLEAN, complete_run
+
+    (repo / ".git").write_text("gitdir: ../metadata/worktrees/fixture\n")
+    target = tmp_path / "staged"
+    run = complete_run()
+    run.staging_exclusions = stage_repository(repo, target, StagingLimits())
+    assert run.staging_exclusions == [".git"]
+    assert not (target / ".git").exists()
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
+def test_nested_git_metadata_remains_excluded_and_flags(repo, tmp_path, kind):
+    from run.verdict import fuse
+    from tests.run.test_verdict import CLEAN, complete_run
+
+    (repo / "nested").mkdir()
+    metadata = repo / "nested/.git"
+    if kind == "file":
+        metadata.write_text("gitdir: ../metadata\n")
+    elif kind == "directory":
+        metadata.mkdir()
+    else:
+        metadata.symlink_to("missing")
+    run = complete_run()
+    run.staging_exclusions = stage_repository(repo, tmp_path / "staged", StagingLimits())
+    assert run.staging_exclusions == ["nested/.git"]
+    assert fuse(CLEAN, run).verdict == "FLAG"

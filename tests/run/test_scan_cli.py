@@ -37,7 +37,7 @@ def script(tmp_path) -> str:
 
 def patched(monkeypatch, run: RunEvidence, read: ReadOutcome = CLEAN):
     monkeypatch.setattr("run.scan.detonate", lambda *a, **k: run)
-    monkeypatch.setattr("run.scan.default_read_scanner", lambda path: read)
+    monkeypatch.setattr("run.scan.default_read_scanner", lambda path, **kwargs: read)
 
 
 def test_allow_exits_zero_with_json_on_stdout_and_report_on_stderr(monkeypatch, tmp_path):
@@ -133,3 +133,15 @@ def test_json_stdout_is_ascii_and_human_report_escapes_bidi(monkeypatch, tmp_pat
     assert result.stdout.isascii()
     assert "<U+202E>" in result.stderr
     assert "<U+200B>" in result.stderr
+
+
+def test_remote_http_key_is_a_config_error_before_docker(monkeypatch, tmp_path):
+    scanned = []
+    monkeypatch.setenv("FIXTURE_LLM_KEY", "fixture")
+    monkeypatch.setattr("run.scan.detonate", lambda *a, **k: scanned.append(1))
+    result = runner.invoke(
+        app, ["scan", str(tmp_path), "--llm", "openai:http://api.example/v1#m#FIXTURE_LLM_KEY"]
+    )
+    assert result.exit_code == 3, result.output
+    assert "HTTPS" in result.stderr
+    assert not scanned
