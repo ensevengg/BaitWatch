@@ -16,7 +16,22 @@ from docker.errors import APIError, DockerException, NotFound
 from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount, Ulimit
 
 from run.capture import capture_attached, capture_exec
-from run.evidence import CommandResult, FileDiff, RunError, RunEvidence, State, safe_text
+from run.evidence import (
+    CommandResult,
+    FileDiff,
+    HoneytokenHit,
+    RunError,
+    RunEvidence,
+    State,
+    safe_text,
+)
+from run.honeytokens import (
+    Honeytoken,
+    generate_tokens,
+    plant_tokens,
+    scan_sink_log,
+    scan_tool_results,
+)
 from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
@@ -205,6 +220,8 @@ class Sandbox:
         self._sinks: dict[str, object] = {}
         self._sink_logs: dict[str, Path] = {}
         self._sinks_collected: set[str] = set()
+        self._honeytokens: tuple[Honeytoken, ...] = ()
+        self._honeytoken_scanned = False
         self._trace_before: dict | None = None
 
     @property
@@ -220,6 +237,11 @@ class Sandbox:
         if self._temporary is None:
             raise SandboxError("repository has not been staged")
         return self._temporary / "repo"
+
+    @property
+    def honeytokens(self) -> tuple[Honeytoken, ...]:
+        """The tokens planted for this scan; memory only, never persisted."""
+        return self._honeytokens
 
     def _network_subnet(self) -> ipaddress.IPv4Network:
         if self._subnet is None:
@@ -309,6 +331,9 @@ class Sandbox:
                 safe_text(path)
                 for path in stage_repository(self.path, self.staged_path, self.config.staging)
             ]
+            # Planted before the first trace snapshot, so the bait never shows
+            # up as one of the repository's own file diffs.
+            self._honeytokens = plant_tokens(self.staged_path, generate_tokens())
             self._subnet = self._create_network()
             self._open = True
             return self
@@ -540,6 +565,33 @@ class Sandbox:
             return f"{role} sink log has no stopped record", "SINK_LOG"
         return None, None
 
+    def _scan_honeytokens(self) -> None:
+        """After the sinks stop, search every sink record and every tool output
+        for planted token values. A bound hit is an error, never a clean pass;
+        the hits themselves never change the RUN status."""
+        if self._honeytoken_scanned or not self._honeytokens:
+            return
+        self._honeytoken_scanned = True
+        hits: list[HoneytokenHit] = []
+        incomplete = False
+        for role in ("dns", "http"):
+            log = self._sink_logs.get(role)
+            if log is None:
+                continue  # a sink that never started has already failed closed
+            scan = scan_sink_log(log, self._honeytokens)
+            hits.extend(scan.hits)
+            incomplete = incomplete or scan.incomplete
+        tool_scan = scan_tool_results(self.evidence.tool_log, self._honeytokens)
+        hits.extend(tool_scan.hits)
+        incomplete = incomplete or tool_scan.incomplete
+        self.evidence.honeytoken_hits.extend(hits)
+        if incomplete:
+            self._error(
+                "HONEYTOKEN_SCAN_INCOMPLETE",
+                "honeytoken detection hit a size bound; records past it were not scanned",
+                component=None,
+            )
+
     def collect_sinks(self) -> None:
         """Stop each sink, then read its log. A component is complete only when
         the sink acknowledged the stop after draining everything it accepted;
@@ -575,6 +627,7 @@ class Sandbox:
                 setattr(self.evidence.components, component, State.ERROR)
             self.evidence.errors.append(RunError(code=code, message=f"{role}: {problem}"[:1000]))
             self.evidence.status = "error"
+        self._scan_honeytokens()
 
     def _run_trace_helper(self, role: str) -> dict:
         command = ["python", "-I", "/trace/trace.py", "snapshot", "/repo"]

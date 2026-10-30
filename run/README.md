@@ -2,7 +2,7 @@
 
 BaitWatch checks a repository for attacks aimed at coding agents before a developer lets an agent work in it. The planned product has two parts. READ runs a detector over the files. RUN executes the repository as a decoy inside an isolated Docker network and records what it tries to reach.
 
-This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, and the Day 4 fused scan. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not yet include honeytoken attribution, the agreed verdict thresholds, or agent hooks.
+This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, the Day 4 fused scan, and Day 5 honeytokens. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, plants per-scan fake credentials in the staged copy and detects them in sink and tool output, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not yet include model transcript scanning, the agreed verdict thresholds, or agent hooks.
 
 ## Setup on Linux
 
@@ -100,6 +100,7 @@ assert evidence.status == "incomplete"
 - Staging preserves symlinks, rejects hard links and special files, and never copies a host file when a repository file turns into a symlink during the copy.
 - Output floods and deadlines stop the container, and nonzero exit codes are kept.
 - The scripted decoy's tool calls execute inside the cage, land in `tool_log` in order, and its fake exfil reaches the DNS and HTTP sinks attributed to the cage and shows up in `file_diffs`; a decoy run that only finishes cleanly can make the whole evidence `complete`.
+- Honeytokens are generated per scan in shapes no provider's scanner matches, planted only in the staged copy before the first snapshot, and a leak to a sink or into tool output becomes a `HoneytokenHit` that forbids `ALLOW`; a benign scan records none.
 - A tool call that outlives its deadline is killed inside the cage and recorded timed out; forked or backgrounded work from any tool call leaves no live process behind, for compound (`sleep 100; echo done`) and backgrounded (`sleep 100 &`) commands alike.
 - The sandbox records setup failures, cleanup failures and subnet conflicts as errors, and `exec` fails closed on a cage that was never opened, has closed, or has exited.
 - The fusion flags or blocks on every incomplete READ or RUN, blocks on sink contacts outside the package registries, and only allows a clean READ plus a complete, contact-free decoy run — the local attack fixtures block, the benign fixture allows, and every report validates against the schema.
