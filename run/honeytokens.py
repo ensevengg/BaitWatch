@@ -223,7 +223,7 @@ def _search(text: str, mode: str, variants: tuple[str, ...]) -> bool:
     return joined != lowered and any(variant in joined for variant in variants)
 
 
-def _common_suffix_length(first: str, second: str) -> int:
+def _common_suffix_labels(first: tuple[str, ...], second: tuple[str, ...]) -> int:
     limit = min(len(first), len(second))
     length = 0
     while length < limit and first[-1 - length] == second[-1 - length]:
@@ -277,15 +277,19 @@ def scan_records(records: list, tokens: tuple[Honeytoken, ...]) -> HoneytokenSca
     if not prepared:
         return HoneytokenScan((), False)
     window = 4 * max(len(variant) for entry in prepared for variant in entry.variants) + 64
-    qnames: list[str] = []
+    qname_labels: list[tuple[str, ...]] = []
     scanned = 0
     for record in records:
         if not isinstance(record, dict) or record.get("kind") != "dns":
             continue
         qname = record.get("qname")
-        squashed = qname.replace(".", "").lower() if isinstance(qname, str) else ""
-        scanned += len(squashed)
-        qnames.append(squashed)
+        labels = (
+            tuple(part for part in qname.lower().split(".") if part)
+            if isinstance(qname, str)
+            else ()
+        )
+        scanned += len("".join(labels))
+        qname_labels.append(labels)
     if scanned > SCAN_TOTAL_BYTES:
         return HoneytokenScan((), True)
     hits: dict[tuple[str, str, str | None], HoneytokenHit] = {}
@@ -302,10 +306,12 @@ def scan_records(records: list, tokens: tuple[Honeytoken, ...]) -> HoneytokenSca
         source_ip = source_ip if isinstance(source_ip, str) else None
         if kind == "dns":
             dns_index += 1
-            piece = qnames[dns_index]
-            if dns_index + 1 < len(qnames):
-                overlap = _common_suffix_length(piece, qnames[dns_index + 1])
-                piece = piece[: len(piece) - overlap]
+            labels = qname_labels[dns_index]
+            piece = "".join(labels)
+            if dns_index + 1 < len(qname_labels):
+                overlap = _common_suffix_labels(labels, qname_labels[dns_index + 1])
+                if overlap:
+                    piece = "".join(labels[:-overlap])
             stream = (stream + piece)[-window:]
             for entry in prepared:
                 key = (entry.token.token_id, "dns", source_ip)

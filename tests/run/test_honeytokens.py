@@ -312,8 +312,8 @@ def test_value_split_across_dns_labels_is_detected():
 
 
 def test_value_split_across_adjacent_queries_to_one_domain_is_detected():
-    rng = random.Random(SEED + 2)
-    for _ in range(10):
+    for seed in range(300):
+        rng = random.Random(SEED + 2 + seed)
         value = "".join(rng.choice(string.ascii_letters + string.digits) for _ in range(18))
         token = _token(value)
         encoded = base64.b32encode(value.encode()).decode()
@@ -322,7 +322,7 @@ def test_value_split_across_adjacent_queries_to_one_domain_is_detected():
             [dns_record(f"{chunk}.exfil.evil.example") for chunk in chunks], (token,)
         )
         assert not scan.incomplete
-        assert [hit.source for hit in scan.hits] == ["dns"]
+        assert [hit.source for hit in scan.hits] == ["dns"], seed
 
 
 def test_canary_url_is_detected_by_host_label_and_whole_url():
