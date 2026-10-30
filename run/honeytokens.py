@@ -1,6 +1,7 @@
 """Per-scan honeytokens. Generated fresh in memory from `secrets`, planted only
-in the staged copy inside the cage, and never written to evidence, logs or
-stdout by the runner: HoneytokenHit carries the token_id only."""
+in the staged copy inside the cage, and recorded in evidence by token id alone:
+the fake value can still appear in quoted tool output and sink details because
+those quote what the cage emitted."""
 
 import base64
 import contextlib
