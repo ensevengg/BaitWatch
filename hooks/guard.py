@@ -208,8 +208,15 @@ def _repo_from(payload: dict) -> Path:
 
 
 # Markers strong enough to identify a project root from a subdirectory.  A
-# bare README is deliberately not here: it is accepted only for the directory
-# the session started in, so an unrelated README higher up cannot widen a scan.
+# bare README is deliberately not a strong marker: it is handled by the
+# fallback in resolve_project_root below, which adopts the nearest ancestor
+# containing one when no strong marker exists.  That fallback stops before
+# the user's home directory and before a volume root.  It has no depth cap:
+# cutting the walk to one or two levels would leave deeper sessions in a real
+# README-only project unscanned.  The trade-off is that a session below a
+# large README-bearing tree (for example ~/notes/2026/oct under ~/notes) can
+# adopt that tree; the scanner's normal file cap and incomplete-evidence
+# handling keep an oversized result fail-closed rather than silently clean.
 _PROJECT_MARKERS = (
     ".git",
     "AGENTS.md",
@@ -231,8 +238,9 @@ def resolve_project_root(path: str | Path) -> tuple[Path | None, str]:
 
     Returns ``(root, status)`` where status is:
 
-    - ``ok``: a marker (or a README-only project root) was found walking up
-      from ``path``;
+    - ``ok``: a strong marker was found walking up from ``path``, or (when no
+      strong marker exists) the nearest ``README.md`` ancestor below home and
+      below the volume root was adopted;
     - ``not_a_repo``: a real directory with no project marker (not a repo);
     - ``unresolved``: the path is missing or is not a directory.
     """

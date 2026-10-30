@@ -147,8 +147,13 @@ def _allowed_host(host: str) -> bool:
         # Only the literal text after the LAST placeholder is fixed, so that
         # tail has to be the allowed suffix: ``${REGISTRY}.evil.example``
         # passes, ``evil.example${TAIL}`` does not (TAIL could be ``.com``).
-        tail = host[placeholders[-1].end() :].strip(".")
-        return _fixed_host(tail)
+        # The fixed tail must start with a dot: without one, an empty
+        # placeholder expansion could join it to the preceding label, e.g.
+        # ``evil${SUB}webhook.site`` becoming the unlisted ``evilwebhook.site``.
+        raw_tail = host[placeholders[-1].end() :]
+        if raw_tail and not raw_tail.startswith("."):
+            return False
+        return _fixed_host(raw_tail.strip("."))
     return _fixed_host(host)
 
 

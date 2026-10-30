@@ -112,14 +112,15 @@ reads `tool_name` and `tool_input`.
 
 `cwd` is resolved upward to a project root (a directory holding `.git`,
 `AGENTS.md`, `CLAUDE.md`, `.claude/`, `.mcp.json`, `pyproject.toml`,
-`package.json`, …). The user's home directory and the filesystem root are never
-adopted as a root. Three outcomes:
+`package.json`, …). When no strong marker exists, the nearest ancestor
+containing `README.md` is adopted as a README-only root. The user's home
+directory and the filesystem root are never adopted as a root. Three outcomes:
 
 | Root resolution | Gate A | Gate B |
 |---|---|---|
-| `ok` — marker found | scan that root | scan that root |
-| `not_a_repo` — real dir, no marker | allow (nothing to scan) | static policy only |
-| `unresolved` — path missing, or no marker before home | ask → block | ask |
+| `ok` — strong marker or README-only root found | scan that root | scan that root |
+| `not_a_repo` — real dir, no marker or README ancestor before home | allow (nothing to scan) | static policy only |
+| `unresolved` — path missing or not a directory | ask → block | ask |
 
 Output, Claude Code format:
 

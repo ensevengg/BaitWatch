@@ -1396,3 +1396,20 @@ vocabulary (session, approval, activate, workspace, settings, ...).
 Recovery on the Colab set is now 129/129, the Rot13 decoder fires on zero
 benign fixture files, and `test_rot13_recovers_a_short_agent_note` covers
 both the payload and a benign control line.
+
+---
+
+## 22. PR #13 round-3 follow-up (Ashutosh review at `24cd05f`)
+
+Three comments remained after five of the six round-2 findings were verified
+fixed. All three are closed here:
+
+| Severity | Finding | Fix |
+|---|---|---|
+| medium | A placeholder could glue a label onto a trusted host (`evil${SUB}webhook.site`) | `attacks/lint.py::_allowed_host` now rejects a fixed tail that does not start with `.`; `evil${SUB}webhook.site` and `${SUB}webhook.site` are tests |
+| low | The README root fallback rule was not written down and contradicted an older comment | `resolve_project_root` now documents the nearest-README-ancestor rule, its home/volume-root bound, and the absence of a depth cap; `test_deep_session_adopts_the_nearest_readme_ancestor` covers a session two levels below the README root |
+| low | The cache fingerprint skip set is a hand copy of READ's excluded directories | `test_fingerprint_skip_dirs_match_read_excluded_dirs` asserts the two sets are equal |
+
+Current local verification after this follow-up: `attacks check` passes, the
+full `tests/attacks` suite plus the READ config, decoder and judge test files
+pass (309 tests), and `ruff check` / `ruff format --check` are clean.

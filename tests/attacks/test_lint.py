@@ -129,6 +129,17 @@ def test_fixed_suffix_after_the_last_placeholder_decides(tmp_path: Path) -> None
     assert _lint_one(tmp_path, "bad.js", "fetch(`https://evil.example${TAIL}`)\n")
 
 
+def test_placeholder_tail_must_start_with_a_dot(tmp_path: Path) -> None:
+    """An empty expansion must not glue a label onto a trusted suffix."""
+    from attacks.lint import allowed_host
+
+    assert allowed_host("evil${SUB}webhook.site") is False
+    assert allowed_host("${SUB}webhook.site") is False
+    assert allowed_host("${REGISTRY}.evil.example") is True
+    assert _lint_one(tmp_path, "bad.js", "fetch(`https://evil${SUB}webhook.site/x`)\n")
+    assert _lint_one(tmp_path, "bad.js", "fetch(`https://${SUB}webhook.site/x`)\n")
+
+
 def test_reversed_sandbox_domain_is_allowed_but_reversed_real_is_not() -> None:
     from attacks.lint import _allowed_domain
 

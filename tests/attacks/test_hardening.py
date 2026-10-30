@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from attacks.synth.transforms import encode_seed
+from hooks import cache as hook_cache
 from hooks import cli as hook_cli
 from hooks.cache import ApprovalStore, CachedScan, ScanCache, repo_fingerprint
 from hooks.guard import (
@@ -146,6 +147,19 @@ def test_cache_key_is_none_when_the_tree_cannot_be_fingerprinted(tmp_path: Path)
     # Missing directory: "unknown", never "unchanged".
     assert repo_fingerprint(tmp_path / "absent") is None
     assert ScanCache(tmp_path / "cache.json").key(tmp_path / "absent") is None
+
+
+def test_fingerprint_skip_dirs_match_read_excluded_dirs() -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_baitwatch_read_config_for_skip_dirs", REPO_ROOT / "read" / "config.py"
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    assert set(module.WalkerConfig().excluded_dirs) == hook_cache._SKIP_DIRS
 
 
 def test_cache_ignores_its_own_file(tmp_path: Path) -> None:
@@ -337,6 +351,20 @@ def test_readme_only_root_is_found_from_a_subdirectory(tmp_path: Path) -> None:
     nested = repo / "src" / "pkg"
     nested.mkdir(parents=True)
     assert resolve_project_root(nested) == (repo.resolve(), "ok")
+
+
+def test_deep_session_adopts_the_nearest_readme_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The README fallback has no depth cap, but never adopts home itself."""
+    home = tmp_path / "home"
+    notes = home / "notes"
+    notes.mkdir(parents=True)
+    (notes / "README.md").write_text("# notes\n", encoding="utf-8")
+    nested = notes / "2026" / "oct"
+    nested.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+    assert resolve_project_root(nested) == (notes.resolve(), "ok")
 
 
 def test_gate_b_scans_the_readme_only_root_from_a_subfolder(
