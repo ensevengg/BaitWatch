@@ -83,7 +83,48 @@ def _symlink(link: Path, target: str, *, directory: bool = True) -> None:
 
 def test_hook_command_isolates_the_interpreter() -> None:
     command = hook_command("b", "/usr/bin/python3")
-    assert command == '"/usr/bin/python3" -I -m hooks gate-b'
+    assert command == '"/usr/bin/python3" -I -m hooks gate-b --user-config'
+
+
+def test_user_config_mode_ignores_inherited_security_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "BAITWATCH_HOOK_SCANNER": "keyword",
+                    "BAITWATCH_ON_ERROR": "ask",
+                    "BAITWATCH_REPO": str(tmp_path / "trusted-repo"),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(hook_cli, "settings_path", lambda _scope="user": settings)
+    monkeypatch.setenv("BAITWATCH_HOOK", "off")
+    monkeypatch.setenv("BAITWATCH_HOOK_SCANNER", "read")
+    monkeypatch.setenv("BAITWATCH_ON_ERROR", "deny")
+    monkeypatch.setenv("BAITWATCH_REPO", str(tmp_path / "checkout-controlled"))
+
+    assert hook_cli._hook_disabled() is True
+    assert hook_cli._hook_disabled(user_config=True) is False
+
+    seen: dict[str, str | None] = {}
+
+    def fake_run_gate(gate, payload, cache=None):
+        seen.update({key: os.environ.get(key) for key in hook_cli._USER_HOOK_ENV_KEYS})
+        return hook_cli.Decision(gate, "allow", "trusted settings")
+
+    monkeypatch.setattr(hook_cli, "run_gate", fake_run_gate)
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    assert hook_cli.main(["gate-b", "--user-config"]) == 0
+    assert seen["BAITWATCH_HOOK"] is None
+    assert seen["BAITWATCH_HOOK_SCANNER"] == "keyword"
+    assert seen["BAITWATCH_ON_ERROR"] == "ask"
+    assert seen["BAITWATCH_REPO"] == str(tmp_path / "trusted-repo")
+    assert os.environ["BAITWATCH_REPO"] == str(tmp_path / "checkout-controlled")
 
 
 def test_python_i_keeps_the_working_directory_off_sys_path(tmp_path: Path) -> None:
@@ -328,6 +369,16 @@ def test_root_walks_up_from_a_subdirectory(tmp_path: Path) -> None:
     nested = root / "src" / "pkg"
     nested.mkdir(parents=True)
     assert resolve_project_root(nested) == (root.resolve(), "ok")
+
+
+def test_root_walk_stops_at_the_nearest_marker(tmp_path: Path) -> None:
+    root = _git_dir(tmp_path / "project")
+    nested_project = root / "packages" / "app"
+    nested_project.mkdir(parents=True)
+    (nested_project / "package.json").write_text("{}\n", encoding="utf-8")
+    session = nested_project / "src"
+    session.mkdir()
+    assert resolve_project_root(session) == (nested_project.resolve(), "ok")
 
 
 def test_missing_session_directory_is_unresolved(tmp_path: Path) -> None:

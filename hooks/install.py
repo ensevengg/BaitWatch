@@ -53,7 +53,9 @@ def hook_command(gate: str, python: str | None = None) -> str:
     # ``-I`` isolates the hook from the scanned checkout: without it, Python
     # puts the current directory first on sys.path, so a hostile repo could
     # ship ``hooks/__init__.py`` (or ``json.py``) and replace the guard.
-    return f'"{interpreter}" -I -m hooks gate-{gate}'
+    # ``--user-config`` likewise keeps a checkout's project ``env`` block from
+    # supplying the guard's security-sensitive settings.
+    return f'"{interpreter}" -I -m hooks gate-{gate} --user-config'
 
 
 def parse_claude_version(value: str) -> tuple[int, ...]:

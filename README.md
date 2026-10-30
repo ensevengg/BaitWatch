@@ -45,7 +45,7 @@ No GPU and no model download are needed for the attack package:
 ```bash
 python -m attacks build --check       # generated repos/manifests are current
 python -m attacks lint                # safety rails: *.example + 10.13.37.0/24 only
-python -m attacks harness             # five repos, READ gate, CPU stand-in
+python -m attacks harness             # all attack repos, READ gate, CPU stand-in
 python -m attacks check               # lint + drift + gate
 python -m hooks selftest              # 11 gate decisions
 python -m hooks install --scope user --dry-run

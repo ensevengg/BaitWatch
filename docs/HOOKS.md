@@ -53,7 +53,7 @@ The generated hook entries look like this:
         "hooks": [
           {
             "type": "command",
-            "command": "\"/usr/bin/python3\" -I -m hooks gate-a",
+            "command": "\"/usr/bin/python3\" -I -m hooks gate-a --user-config",
             "timeout": 30,
             "onFailure": "block"
           }
@@ -66,7 +66,7 @@ The generated hook entries look like this:
         "hooks": [
           {
             "type": "command",
-            "command": "\"/usr/bin/python3\" -I -m hooks gate-b",
+            "command": "\"/usr/bin/python3\" -I -m hooks gate-b --user-config",
             "timeout": 30,
             "onFailure": "block"
           }
@@ -79,8 +79,12 @@ The generated hook entries look like this:
 
 `-I` matters: without it Python puts the current directory first on
 `sys.path`, so the scanned checkout could ship its own `hooks/` (or `json.py`)
-and replace the guard with attacker code. `onFailure: "block"` covers the case
-the process never runs.
+and replace the guard with attacker code. `--user-config` applies the same
+boundary to four security-sensitive settings (`BAITWATCH_HOOK`,
+`BAITWATCH_HOOK_SCANNER`, `BAITWATCH_ON_ERROR`, and `BAITWATCH_REPO`): in
+that mode, inherited process values are discarded and only string values from
+the `env` object in the user's own `~/.claude/settings.json` are used.
+`onFailure: "block"` covers the case the process never runs.
 
 Restart the agent after installing. The command uses the interpreter that ran
 the installer; pass `--python PATH` to pin another one. The hook imports the
@@ -242,6 +246,12 @@ first call in a fresh process (imports plus the first walk) must stay under
 10 s, and the steady-state call must stay under 3 s.
 
 ## Environment variables
+
+For the first four variables below, installer-generated gates run with
+`--user-config` and read values only from the user's Claude settings as
+described above; inherited checkout-controlled values are ignored. Direct,
+non-installed hook invocations retain the process-environment behavior used
+by CI and the demo.
 
 | Variable | Meaning |
 |---|---|

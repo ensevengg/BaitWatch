@@ -262,7 +262,6 @@ def resolve_project_root(path: str | Path) -> tuple[Path | None, str]:
     except (OSError, RuntimeError):
         home = None
 
-    found: Path | None = None
     current = start
     for _ in range(64):
         # Never adopt the user's home directory (or a volume root) as the
@@ -270,10 +269,8 @@ def resolve_project_root(path: str | Path) -> tuple[Path | None, str]:
         if current == home or current.parent == current:
             break
         if any((current / marker).exists() for marker in _PROJECT_MARKERS):
-            found = current
+            return current, "ok"
         current = current.parent
-    if found is not None:
-        return found, "ok"
     if home is not None and start == home:
         # A README in the home directory does not make home a project: scanning
         # it would read unrelated files and blow the scan budget.

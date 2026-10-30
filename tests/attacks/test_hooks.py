@@ -249,7 +249,7 @@ def test_settings_path_validates_scope() -> None:
 def test_hook_command_quotes_the_interpreter() -> None:
     command = hook_command("a", "/opt/Python 3/python")
     assert command.startswith('"/opt/Python 3/python"')
-    assert command.endswith("hooks gate-a")
+    assert command.endswith("hooks gate-a --user-config")
 
 
 def test_cli_bypass(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

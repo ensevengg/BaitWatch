@@ -13,6 +13,7 @@ into a deny by :func:`hooks.guard.error_decision`.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import queue
@@ -73,8 +74,60 @@ def _run_with_deadline(function, seconds: float):
     raise value
 
 
-def _hook_disabled() -> bool:
-    return os.environ.get("BAITWATCH_HOOK", "").strip().lower() in ("off", "0", "false")
+_USER_HOOK_ENV_KEYS = (
+    "BAITWATCH_HOOK",
+    "BAITWATCH_HOOK_SCANNER",
+    "BAITWATCH_ON_ERROR",
+    "BAITWATCH_REPO",
+)
+
+
+def _user_hook_env() -> dict[str, str]:
+    """Security-sensitive hook settings from the user's own Claude settings.
+
+    A shared checkout can put values in its project ``env`` block, and the
+    host may merge those into the environment inherited by this process.  The
+    installer-generated gate command therefore asks for this mode explicitly:
+    inherited values for the keys above are discarded, and only string values
+    from the ``env`` object in ``~/.claude/settings.json`` are used.
+    """
+    try:
+        data = json.loads(settings_path("user").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    env = data.get("env")
+    if not isinstance(env, dict):
+        return {}
+    return {key: env[key] for key in _USER_HOOK_ENV_KEYS if isinstance(env.get(key), str)}
+
+
+def _hook_disabled(*, user_config: bool = False) -> bool:
+    if user_config:
+        value = _user_hook_env().get("BAITWATCH_HOOK", "")
+    else:
+        value = os.environ.get("BAITWATCH_HOOK", "")
+    return value.strip().lower() in ("off", "0", "false")
+
+
+@contextlib.contextmanager
+def _applied_user_hook_env():
+    original = {key: os.environ.get(key) for key in _USER_HOOK_ENV_KEYS}
+    trusted = _user_hook_env()
+    try:
+        for key in _USER_HOOK_ENV_KEYS:
+            if key in trusted:
+                os.environ[key] = trusted[key]
+            else:
+                os.environ.pop(key, None)
+        yield
+    finally:
+        for key, value in original.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def approve_command(interpreter: str | None = None, minutes: float = 15.0) -> str:
@@ -253,24 +306,31 @@ def selftest() -> int:
     return 0 if passed == len(checks) else 1
 
 
-def _run_gate(gate: str, host: str) -> int:
+def _run_gate(gate: str, host: str, *, user_config: bool = False) -> int:
     started = time.perf_counter()
-    if _hook_disabled():
-        emit(Decision(gate, "allow", "hook disabled by BAITWATCH_HOOK=off", source="off"), host)
-        return 0
-    deadline = _deadline_seconds()
-    try:
-        payload = read_payload()
-        decision = _run_with_deadline(lambda: run_gate(gate, payload, cache=ScanCache()), deadline)
-        if decision is None:
-            decision = error_decision(
-                gate,
-                TimeoutError(f"internal deadline of {deadline:.0f}s expired"),
-                (time.perf_counter() - started) * 1000,
+    context = _applied_user_hook_env() if user_config else contextlib.nullcontext()
+    with context:
+        if _hook_disabled():
+            emit(
+                Decision(gate, "allow", "hook disabled by BAITWATCH_HOOK=off", source="off"),
+                host,
             )
-            decision.reason += "; blocked before the host timeout"
-    except Exception as exc:  # noqa: BLE001 - fail closed
-        decision = error_decision(gate, exc, (time.perf_counter() - started) * 1000)
+            return 0
+        deadline = _deadline_seconds()
+        try:
+            payload = read_payload()
+            decision = _run_with_deadline(
+                lambda: run_gate(gate, payload, cache=ScanCache()), deadline
+            )
+            if decision is None:
+                decision = error_decision(
+                    gate,
+                    TimeoutError(f"internal deadline of {deadline:.0f}s expired"),
+                    (time.perf_counter() - started) * 1000,
+                )
+                decision.reason += "; blocked before the host timeout"
+        except Exception as exc:  # noqa: BLE001 - fail closed
+            decision = error_decision(gate, exc, (time.perf_counter() - started) * 1000)
     emit(decision, host)
     return 0
 
@@ -362,6 +422,11 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("gate-a", "gate-b"):
         gate_parser = sub.add_parser(name)
         gate_parser.add_argument("--host", choices=("claude", "generic"), default="claude")
+        gate_parser.add_argument(
+            "--user-config",
+            action="store_true",
+            help="take security-sensitive settings only from the user's Claude settings",
+        )
 
     sub.add_parser("selftest")
     sub.add_parser("status")
@@ -393,9 +458,9 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command == "gate-a":
-        return _run_gate("a", args.host)
+        return _run_gate("a", args.host, user_config=args.user_config)
     if args.command == "gate-b":
-        return _run_gate("b", args.host)
+        return _run_gate("b", args.host, user_config=args.user_config)
     if args.command == "selftest":
         return selftest()
     if args.command == "status":

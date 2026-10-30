@@ -231,6 +231,15 @@ def _bidi_decode(text: str) -> list[str]:
                 # seed still comes back exactly once.
                 inner = "".join(ch for ch in inner if ch not in BIDI_CONTROLS)
                 found.append(inner[::-1])
+    if depth:
+        # A paragraph ends an override in rendered text even when PDF was
+        # omitted, so an unclosed span can still be recovered from the
+        # remainder of its own paragraph without reversing later paragraphs.
+        remainder = text[start:]
+        remainder = re.split(r"\r?\n[ \t]*(?:\r?\n|$)|\u2029", remainder, maxsplit=1)[0]
+        remainder = "".join(ch for ch in remainder if ch not in BIDI_CONTROLS)
+        if remainder:
+            found.append(remainder[::-1])
     stripped = "".join(ch for ch in text if ch not in BIDI_CONTROLS)
     if stripped != text:
         found.append(stripped)
