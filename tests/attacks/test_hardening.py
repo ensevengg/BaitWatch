@@ -61,14 +61,18 @@ def _repo(path: Path) -> Path:
 
 
 def _symlink(link: Path, target: str, *, directory: bool = True) -> None:
-    """Create a relative symlink, or skip when the OS forbids it.
+    """Create a symlink, or skip when the OS forbids it.
 
+    Windows stores the target verbatim, and its reparse-point resolution only
+    understands backslashes: a relative target like ``../dist/rules`` reads
+    back fine but the link is broken to the OS (``WinError 123``).  Normalize to
+    the host separator so the same fixture is a real link on both platforms.
     Windows without Developer Mode cannot create symlinks; the behaviour is
     still covered on POSIX CI.
     """
     link.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.symlink(target, link, target_is_directory=directory)
+        os.symlink(os.path.normpath(target), link, target_is_directory=directory)
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"symlinks are unavailable: {exc}")
 
@@ -202,6 +206,19 @@ def test_fingerprint_does_not_follow_links_outside_the_repo(tmp_path: Path) -> N
     assert before is not None
     (outside / "notes.md").write_text("changed elsewhere\n", encoding="utf-8")
     assert repo_fingerprint(repo) == before
+
+
+def test_fingerprint_refuses_a_broken_link_instead_of_ignoring_it(tmp_path: Path) -> None:
+    """An unresolvable link hides content: refuse rather than return a key.
+
+    A dangling link is a link whose target cannot be read, so neither the old
+    target nor a new one behind it can be hashed.  Returning ``None`` makes the
+    caller rescan and makes approval refuse the tree.
+    """
+    repo = _repo(tmp_path / "repo")
+    _symlink(repo / "dangling", str(tmp_path / "missing"))
+    assert not (tmp_path / "missing").exists()
+    assert repo_fingerprint(repo) is None
 
 
 # -- finding 3: fail-closed install, version gate, internal deadline -----------

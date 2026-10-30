@@ -7,11 +7,11 @@
 **Report date:** 2026-10-29
 **Local commits:** `843282c`, `334df98`, `78e3ad5`, `cb2d012`, `0bd106c`,
 `c30cab9`, `3a029a5`, `228a1ae`, `52c3e32`, `acea601`, `9e4ce3e`, `72b2af6`,
-`b5622c8`, `6d9a59e`, `ace52f7` (round-2 review fixes), plus the round-3
-review-fix commit described in §18.3, which is local and not yet pushed. The
-tree was rebased onto `origin/main` twice (first onto `f9f7083`, then onto
-`1b8d7b8` after PR #10 merged), so the hashes differ from the pre-rebase
-report.
+`b5622c8`, `6d9a59e`, `ace52f7` (round-2 review fixes), the round-3 review-fix
+commit (see §18.3), and a merge of `origin/main` after PR #12 landed. These are
+local and not yet pushed. The tree was rebased onto `origin/main` twice (first
+onto `f9f7083`, then onto `1b8d7b8` after PR #10 merged), so the hashes differ
+from the pre-rebase report.
 
 This report is the audit trail for the ATTACK side: every file, every contract,
 every command, and the exact verification result. Open it in Cursor with
@@ -48,12 +48,11 @@ require the fine-tuned READ checkpoint or the training corpus.
 | De-Caffeinator credit without external URLs | root README + `attacks/README.md` | `test_attack_readme_names_prior_work_without_a_url` |
 
 **Test result on this machine:** `python -m pytest tests/attacks -q` →
-`226 passed, 4 skipped`, `0 failed` (230 collected). The four skips are the
-symlink tests: this Windows account cannot create symlinks
-(`WinError 1314`), so they run on POSIX CI; the same logic was additionally
-executed under WSL Ubuntu against freshly built symlink fixtures. Node 22 is
-present, so the runtime-execution test ran; on a machine without `node` those
-three tests skip by design.
+`231 passed`, `0 failed`, `0 skipped` (231 collected). Symlink privilege was
+granted on this Windows host, so the four symlink tests now execute here
+instead of skipping; they passed. Node 22 is present, so the
+runtime-execution test ran; on a machine without `node` those three tests
+skip by design.
 
 The former skip (`test_read_scanner_is_lazy_without_torch`) is gone. It was
 rewritten as `test_read_scanner_reports_a_missing_dependency`, which blocks
@@ -184,7 +183,7 @@ Generated tree size: **57 files** (`build.build_tree()`), of which
 | `test_cli.py` | 2 | `--help` reaches the subcommand, top-level help |
 | `test_decoders.py` | 14 | plugin registration, each channel, budget exhaustion, builtin drift |
 | `test_docs.py` | 5 | docs exist, demo under 3:00, hook docs, credit |
-| `test_hardening.py` | 41 | the PR #13 review findings, one test group per comment |
+| `test_hardening.py` | 42 | the PR #13 review findings, one test group per comment |
 | `test_harness.py` | 13 | staging, recall, extras, incomplete, recovery, CLI |
 | `test_hooks.py` | 38 | tool policy, gates, cache, installer, CLI, timing |
 | `test_leakage.py` | 16 | exact/embedded/fuzzy, skip, parquet, incomplete, exit 2 |
@@ -194,7 +193,7 @@ Generated tree size: **57 files** (`build.build_tree()`), of which
 | `test_repos.py` | 13 | 5 repos, markers, recovery, layers, encodings |
 | `test_runtime_payloads.py` | 3 | Node executes the JS eval chain; every generated `.js` parses |
 | `test_transforms.py` | 36 | round trip per transform, invisibility, bidi, escapes, budgets |
-| **Total** | **230** | |
+| **Total** | **231** | |
 
 ### 4.4 Other new paths
 
@@ -631,13 +630,13 @@ selftest: 11/11
 
 ```text
 $ python -m pytest tests/attacks -q
-226 passed, 4 skipped
+231 passed
 ```
 
-No test is skipped on a machine with Node 22 except the four symlink tests on
-Windows without symlink privilege; the runtime-eval tests execute the generated
-JavaScript with stubbed `https`/`fs`. Without `node`, those three tests skip.
-The per-file split is in §4.3.
+No test skips on this machine: Node 22 is present and symlink privilege is
+granted, so the runtime-eval and symlink tests all run. The runtime-eval tests
+execute the generated JavaScript with stubbed `https`/`fs`; without `node`,
+those three skip. The per-file split is in §4.3.
 
 READ-side tests that the change touches:
 
@@ -992,10 +991,11 @@ Exit codes:
 
 | Check | Result |
 |---|---|
-| `git status` | clean after the round-3 review fixes (local commit) |
-| branch | `main` = `origin/aditya/attack-slice`; PR #13 open |
+| `git status` | clean after the round-3 fixes and the `origin/main` merge (local commits) |
+| branch | `main` = `origin/aditya/attack-slice` + local commits; PR #13 open |
 | CI | `ace52f7` green: runs `40789984001` and `40789987188`, both jobs `pass` |
-| round-2 commit | local; not pushed at the time of writing, so it has no CI run yet |
+| round-3 + merge commits | local; not pushed at the time of writing, so they have no CI run yet |
+| merge with `origin/main` | PR #12 merged upstream; the three `run/*.md` conflicts resolved by taking main's version |
 | ruff check | pass |
 | ruff format check | 61 files formatted |
 | generated tree | 57 files, no drift |
@@ -1003,14 +1003,15 @@ Exit codes:
 | publication check | clean |
 | READ gate | 5/5 repos, 20/20 payloads recovered |
 | RUN coverage gate | 5/5 repos |
-| tests | 230 collected: 226 passed, 4 symlink tests skipped on this Windows host |
+| tests | 231 collected: 231 passed, 0 skipped (symlink privilege granted on this host) |
 | READ judge/config | 32 passed |
 | READ decoders | 27 passed |
-| Windows ledger test | 3 ledger tests pass (`msvcrt` sidecar lock, 58 s) |
+| Windows ledger test | 3 ledger tests pass (`msvcrt` sidecar lock) |
 | hook selftest | 11/11 |
-| demo | all beats, ~4 s |
+| demo | all beats, exit 0 |
 | packaging | wheel 57/57 corpus files, 6 manifests, 5 markers, no `__pycache__` |
 | `pip check` | clean |
+| `tests/run` | not run here: the `docker` extra is absent in this interpreter |
 
 Everything above was executed after the review fixes on this machine. The
 fine-tuned checkpoint and the training corpus remain unverifiable here. The
@@ -1085,7 +1086,7 @@ row was "fixed in code" but had not actually been executed on Windows.
 
 | # | Severity | Finding | Fix | Regression test |
 |---|---|---|---|---|
-| 1 | high | the cache fingerprint skipped content READ reaches through in-repo symlinks, so editing `.cursor/rules/style.mdc` (-> `dist/rules/`) kept a cached ALLOW and an approval | `hooks/cache.py::_walk_files` is a manual, bounded walk that follows in-repo directory links exactly as READ does (link name decides exclusion, target location does not), hashes the content behind file links, skips links that leave the repo, and cuts loops with a resolved-dir set | `test_cache_key_changes_when_a_linked_file_is_edited`, `test_approval_dies_when_a_linked_file_changes`, `test_fingerprint_survives_a_symlink_loop`, `test_fingerprint_does_not_follow_links_outside_the_repo` |
+| 1 | high | the cache fingerprint skipped content READ reaches through in-repo symlinks, so editing `.cursor/rules/style.mdc` (-> `dist/rules/`) kept a cached ALLOW and an approval | `hooks/cache.py::_walk_files` is a manual, bounded walk that follows in-repo directory links exactly as READ does (link name decides exclusion, target location does not), hashes the content behind file links, skips links that leave the repo, and cuts loops with a resolved-dir set | `test_cache_key_changes_when_a_linked_file_is_edited`, `test_approval_dies_when_a_linked_file_changes`, `test_fingerprint_survives_a_symlink_loop`, `test_fingerprint_does_not_follow_links_outside_the_repo`, `test_fingerprint_refuses_a_broken_link_instead_of_ignoring_it` |
 | 2 | high | the approval command the hook prints dropped `-I`, so following the security advice could import the guarded checkout's own `hooks` package or `json.py` | `hooks/cli.py::approve_command` prints `"<installed python>" -I -m hooks approve --minutes 15`; `docs/HOOKS.md` shows the same | `test_approval_hint_keeps_import_isolation`, `test_cli_turns_gate_a_ask_into_a_block_with_approval_steps` |
 | 3 | high | the README fallback only checked the starting directory, so a session in `src/` of a README-only project was `not_a_repo` and Gate B never scanned the root | `resolve_project_root` now walks parents for a `README.md` too, stopping before home/volume root | `test_readme_only_root_is_found_from_a_subdirectory`, `test_gate_b_scans_the_readme_only_root_from_a_subfolder`, `test_home_is_not_adopted_from_a_subdirectory` |
 | 4 | medium | when Claude Code detection failed, the installer warned and installed with `claude_version=None`, skipping the version gate | `install()` raises `ValueError("... version is unknown ...")`; the CLI prints the reason and exits 2, asking for `--claude-version` or `BAITWATCH_CLAUDE_VERSION` | `test_install_refuses_an_unknown_version`, `test_cli_install_refuses_an_unknown_version` |
@@ -1098,10 +1099,36 @@ Windows, and `python -m pytest tests/read/test_judge.py -k ledger -q` now report
 `3 passed` (58 s), including the two-process test that exercises
 `msvcrt.LK_NBLCK`. The POSIX path is covered by Linux CI.
 
-The symlink tests skip on this Windows account because creating a symlink needs
-Developer Mode (`WinError 1314`). To avoid shipping an unexecuted branch, the
-same three properties were run under WSL Ubuntu directly against
-`hooks.cache.repo_fingerprint`:
+**Windows symlink evidence.** The four symlink tests originally skipped on this
+host (`WinError 1314`). Symlink privilege is now granted, and they execute and
+pass here:
+
+```text
+$ python -m pytest tests/attacks/test_hardening.py -q -k "linked or symlink or outside or broken"
+5 passed
+```
+
+Running them surfaced one real portability bug in the fixture, not in the
+product: Windows resolves a reparse-point target with backslashes only, so a
+fixture link written as `../dist/rules` is broken to the OS (`WinError 123`)
+even though `readlink` returns it. The fixture now normalizes the target with
+`os.path.normpath`; the product already failed closed on that link, because an
+unresolvable link is treated as broken. A new test pins that:
+`test_fingerprint_refuses_a_broken_link_instead_of_ignoring_it`.
+
+The reviewer's exact scenario, executed end to end with the keyword scanner and
+the real cache (`.cursor/rules` -> `../dist/rules`):
+
+```text
+first:  verdict=allow  scanner_calls=1
+second: verdict=allow  scanner_calls=1   # cache hit, no rescan
+edit dist/rules/style.mdc through the link
+third:  verdict=block  scanner_calls=2   # key changed, scanner re-ran
+READ sees: ['.cursor\\rules\\style.mdc', 'README.md']
+```
+
+The same three properties were also run under WSL Ubuntu directly against
+`hooks.cache.repo_fingerprint` before the privilege was granted:
 
 ```text
 linked edit changes fingerprint: True
@@ -1117,23 +1144,26 @@ outside link ignored: True
 
 | Ref | State |
 |---|---|
-| `origin/main` | `1b8d7b8`; PR #10 (sinks) merged after the first rebase |
-| local `main` | this report plus the PR #13 review fixes; the round-3 fixes are committed locally and **not pushed yet** |
+| `origin/main` | `1d3a314`; PR #10 (sinks) and PR #12 (decoy) merged |
+| local `main` | this report plus the PR #13 review fixes and a merge of `origin/main`; the round-3 fixes and the merge are committed locally and **not pushed yet** |
 | backup | `backup/pre-rebase-<timestamp>` points at the pre-rebase tree |
 | **PR #13** | **`aditya/attack-slice` → `main`; open, 18 review findings closed, CI green at `ace52f7`, round-3 CI pending push** |
-| PR #12 | `ashutosh/d3-decoy` — decoy agent loop, tool calls inside the cage (open; updated to `482e9e8`) |
+| PR #12 | `ashutosh/d3-decoy` — decoy agent loop, tool calls inside the cage (**merged** as `1d3a314`) |
 | PR #10 | `ashutosh/d2-sinks` — DNS/HTTP/TLS sinks and file trace (**merged**) |
-| merged upstream | `#7 uv-torch-extras`, `#8 sweep-scan-resources`, `#9 per-scan-subnet`, `#10 d2-sinks` |
+| merged upstream | `#7 uv-torch-extras`, `#8 sweep-scan-resources`, `#9 per-scan-subnet`, `#10 d2-sinks`, `#12 d3-decoy` |
 | other remote | `read/core-fixes` |
 
-PR #12 adds one more commit after the first snapshot:
-`482e9e8 Fail the decoy closed on timeouts, cage expiry and cut-off replies`.
+PR #12 merged as `1d3a314` and moved `origin/main` past the base this branch was
+rebased onto, so GitHub reports PR #13 as `CONFLICTING`. The three conflicts
+are `run/CONTRACT.md`, `run/README.md` and `run/SANDBOX.md`; they are resolved
+locally by taking main's version, as the reviewer asked. `docs/decoy-trial/`
+still carries the measured 0/10 result.
 
 The ATTACK branch was rebased, not merged, so the five original commits were
 rewritten (`843282c` … `cb2d012`) and the review fixes were stacked on top.
 PR #13 was opened on `aditya/attack-slice`; the first CI run passed both jobs,
-and the review-fix commit was pushed on top of it. The round-3 fixes stay
-local until the reviewer is told they are ready.
+and the review-fix commit was pushed on top of it. The round-3 fixes and the
+merge stay local until the reviewer is told they are ready.
 
 ### 19.2 Muse Spark decoy trial
 

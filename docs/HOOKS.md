@@ -224,13 +224,21 @@ resolved repo path + git HEAD + model tag
 
 so a new commit, an edited `AGENTS.md`, a newly added instruction file, or a
 changed decoder invalidates it. The fingerprint walks the tree with a file-count
-and byte cap; if it cannot finish, `key()` returns `None` and the gate rescans
-rather than trusting an old ALLOW. The default TTL is 600 seconds. The first
+and byte cap, follows in-repo directory links the same way READ does (including
+into excluded build directories), and hashes the content behind file links, so
+an edit to `.cursor/rules/style.mdc` through a link changes the key. A link that
+resolves outside the repository is skipped, a resolved-directory set cuts
+loops, and a link that cannot be resolved makes `key()` return `None`: the tree
+is not fingerprinted, so the gate rescans and an approval refuses it. If the
+walk cannot finish within the caps, `key()` also returns `None` rather than
+trusting an old ALLOW. The default TTL is 600 seconds. The first
 scan can exceed three seconds on a cold model; warm calls and cache hits are
 milliseconds. With the CPU stand-in (`BAITWATCH_HOOK_SCANNER=keyword`) the whole
 gate is well under one second.
 
-Measured in `tests/attacks/test_hooks.py::test_hook_under_three_seconds`.
+Measured in `tests/attacks/test_hooks.py::test_hook_under_three_seconds`: the
+first call in a fresh process (imports plus the first walk) must stay under
+10 s, and the steady-state call must stay under 3 s.
 
 ## Environment variables
 
