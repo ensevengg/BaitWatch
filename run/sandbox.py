@@ -12,9 +12,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import docker
-from docker.errors import APIError, DockerException, NotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount, Ulimit
 
+from run.cage import DEFAULT_IMAGE
 from run.capture import capture_attached, capture_exec
 from run.evidence import (
     CommandResult,
@@ -109,7 +110,7 @@ class SandboxError(RuntimeError):
 
 @dataclass(frozen=True)
 class SandboxConfig:
-    image: str = "alpine:3.20"
+    image: str = DEFAULT_IMAGE
     sink_image: str = "python:3.12-alpine"
     # None tries DEFAULT_SUBNET, then other 10.13.X.0/24 pools on overlap.
     # An explicit subnet never falls back.
@@ -339,7 +340,13 @@ class Sandbox:
             self._client.ping()
             if self._client.info().get("OSType") != "linux":
                 raise SandboxError("Linux containers are required")
-            self._client.images.get(self.config.image)
+            try:
+                self._client.images.get(self.config.image)
+            except ImageNotFound as exc:
+                raise SandboxError(
+                    f"trusted cage image {self.config.image!r} is missing; "
+                    "build the default with python -m run.cage build"
+                ) from exc
             self._temporary = Path(tempfile.mkdtemp(prefix="bw-stage-"))
             self.evidence.staging_exclusions = [
                 safe_text(path)

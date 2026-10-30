@@ -8,7 +8,7 @@ from run.evidence import RunEvidence
 from run.sandbox import SCAN_LABEL, Sandbox, detonate
 
 RUN_TESTS = Path(__file__).parent
-IMAGES = ("alpine:3.20", "python:3.12-alpine")
+IMAGES = ("baitwatch-cage:1", "alpine:3.20", "python:3.12-alpine")
 
 
 def pytest_collection_modifyitems(config, items):

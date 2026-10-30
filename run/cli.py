@@ -4,6 +4,7 @@ from typing import Annotated
 
 import typer
 
+from run.cage import DEFAULT_IMAGE
 from run.sandbox import SandboxConfig, detonate
 
 app = typer.Typer(help="BaitWatch RUN foundation. Sandbox execution is not a full scan.")
@@ -17,7 +18,7 @@ def sandbox(
     ],
     image: Annotated[
         str, typer.Option(help="Trusted image; must already exist locally.")
-    ] = "alpine:3.20",
+    ] = DEFAULT_IMAGE,
     timeout: Annotated[
         float, typer.Option(help="Execution deadline in seconds (at least 0.1).")
     ] = 20,
@@ -49,7 +50,7 @@ def decoy(
     ],
     image: Annotated[
         str, typer.Option(help="Trusted image; must already exist locally.")
-    ] = "alpine:3.20",
+    ] = DEFAULT_IMAGE,
     max_steps: Annotated[int, typer.Option(help="Maximum model turns and total tool calls.")] = 20,
 ) -> None:
     """Run the decoy agent; its tool calls execute only inside the cage."""

@@ -12,10 +12,22 @@ Install Python 3.12 or later, uv, Docker Engine 28 or later and the Docker CLI. 
 uv sync --frozen --extra dev --extra cpu
 docker pull alpine:3.20
 docker pull python:3.12-alpine
+uv run --no-sync python -m run.cage build
 uv run --no-sync ruff check run tests/run tests/e2e
 uv run --no-sync ruff format --check run tests/run tests/e2e
 uv run --no-sync pytest -m "not gpu" tests/run tests/e2e
 ```
+
+The default cage is `baitwatch-cage:1`, built only from the trusted
+`run/cage/Dockerfile`. Build from a trusted BaitWatch checkout, never from a
+repository being scanned. The build context contains only `run/cage`; it copies
+no repository files into the image. The Python 3.12 Alpine base is pinned by
+digest. APK resolves bash, ca-certificates, curl, git, make, nodejs and npm at
+build time; Python and pip come from the base. Rebuild deliberately to update
+APK packages. The build needs host network access; scans never build or pull
+images and the cage keeps its existing network and resource restrictions.
+A missing cage image fails closed with a build instruction. Explicit trusted
+`--image` overrides still work, including the smaller test images above.
 
 Plain `uv sync` or pip installs the default torch, which is CUDA-capable on Linux; `--extra cpu` keeps the CPU build for CI and machines without a GPU.
 
