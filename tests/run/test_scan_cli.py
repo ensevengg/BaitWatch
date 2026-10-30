@@ -1,4 +1,5 @@
 import json
+import re
 
 import jsonschema
 from typer.testing import CliRunner
@@ -98,7 +99,8 @@ def test_a_usage_error_exits_two_without_a_verdict(monkeypatch, tmp_path):
     result = runner.invoke(app, ["scan", str(tmp_path)])
     assert result.exit_code == 2, result.output
     assert '"verdict"' not in result.stdout
-    assert "--llm" in result.output
+    # Typer colours its usage panel when it detects CI.
+    assert "--llm" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
 
 
 def test_repo_control_characters_are_escaped_in_the_human_report(monkeypatch, tmp_path):
