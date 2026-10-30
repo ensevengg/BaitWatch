@@ -64,18 +64,21 @@ to stdout, the human report goes to stderr. Every report validates against
 Exit codes: 0 ALLOW, 4 FLAG, 5 BLOCK, 3 operational error (invalid configuration or repository path, bad `--llm` spec,
 unwritable `--json` path; the same code `baitwatch-run` uses). Codes 1 and 2
 stay reserved for a crash or a CLI usage error and never mean a verdict. No
-exit code permits an agent to proceed on its own; ALLOW means neither layer
-found anything, not that the repository is safe.
+exit code permits an agent to proceed on its own. ALLOW means READ is clean
+and the RUN decoy completed without verdict-triggering evidence, subject to
+the observation limits below; it does not establish that the repository is safe.
 
 The fusion in `run/verdict.py` is provisional until the thresholds are agreed
 with the READ owner. Its fixed rules: any exception, timeout, truncated scan,
 missing component, incomplete READ, or RUN error is at least FLAG;
 step-budget exhaustion and killed background work are errors; a decoy without
 an executed `run_cmd`, or staging exclusions beyond the top-level `.git`
-directory, also FLAG. READ runs with strict coverage, and its partial/truncated
-statistics prevent ALLOW; any sink
+directory or regular file, also FLAG. READ runs with strict coverage, and its
+partial/truncated statistics prevent ALLOW. READ-skipped directories that RUN copies (including
+build, dist and target) also prevent ALLOW; paths staging already omits are
+handled by fusion, with only top-level `.git` exempt; any sink
 contact or honeytoken hit outside the package registries is BLOCK; package-
-registry lookups (pypi.org, registry.npmjs.org) are counted as attempts, not
+registry lookups (the exact hosts listed below) are counted as attempts, not
 exfiltration; honeytoken hits are always BLOCK (the generator arrives in a
 later milestone, so the field is empty today).
 
@@ -109,9 +112,10 @@ network access does not necessarily create a sink hit, so otherwise clean
 scans can still ALLOW them. See [the uncovered channels](SANDBOX.md#known-limits).
 
 Registry downgrades apply only to exact pypi.org, files.pythonhosted.org,
-registry.npmjs.org and registry.yarnpkg.com names: DNS questions, TLS SNI,
-or HTTP GET/HEAD with no body, query or incomplete capture. Subdomains and
-uploads BLOCK. Registry-attempt reasons are bounded.
+registry.npmjs.org, registry.yarnpkg.com, proxy.golang.org, sum.golang.org,
+index.crates.io, static.crates.io, rubygems.org and index.rubygems.org names:
+DNS questions, TLS SNI, or HTTP GET/HEAD with no body, query or incomplete
+capture. Subdomains and uploads BLOCK. Registry-attempt reasons are bounded.
 
 Cage file writes have an 8 MiB per-file hard limit by default. Post-run
 size/entry checks record errors, but aggregate disk use during execution is
@@ -122,3 +126,9 @@ bidi and zero-width controls. The decoy checks its lifetime before each tool
 call; model turns and total tool calls each share the configured max-steps cap.
 A reply with many calls cannot multiply that budget. API keys require HTTPS
 except for exact localhost or 127.0.0.1 endpoints.
+
+File changes are a known verdict gap: fusion currently ignores `file_diffs`,
+including edits to `.claude/`, `AGENTS.md`, `.vscode/` and `.mcp.json`.
+`HOME=/tmp` writes, including dotfiles, are not traced. These actions can still
+ALLOW when the remaining evidence is clean. File-change verdict rules and
+tracing HOME writes are planned work; see [known limits](SANDBOX.md#known-limits).
