@@ -312,6 +312,34 @@ def error_decision(gate: str, exc: BaseException, duration_ms: float = 0.0) -> D
     )
 
 
+def _store_cached_scan(
+    cache, repo: Path, tag: str, cache_key: str | None, scan_result: RepoScan, model: str
+) -> None:
+    """Store a verdict only for the exact tree fingerprint seen pre-scan.
+
+    Recreating a key after the scan would attach this verdict to whatever
+    tree happens to be present then, which may not be the tree that was
+    scanned.  A missing or changed pre-scan key therefore stores nothing.
+    """
+    if cache is None or cache_key is None:
+        return
+    if cache.key(repo, tag) != cache_key:
+        return
+    from hooks.cache import CachedScan
+
+    cache.set(
+        cache_key,
+        CachedScan(
+            verdict=scan_result.verdict,
+            score=scan_result.score,
+            reason=scan_result.reason,
+            files=scan_result.files,
+            model=model,
+            created=time.time(),
+        ),
+    )
+
+
 def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") -> RepoScan:
     """Scan a repository with the READ layer, using the hook cache.
 
@@ -365,23 +393,7 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
             model="keyword",
             duration_ms=(time.perf_counter() - started) * 1000,
         )
-        if cache is not None:
-            from hooks.cache import CachedScan
-
-            if cache_key is None:
-                cache_key = cache.key(repo, tag)
-            if cache_key is not None:
-                cache.set(
-                    cache_key,
-                    CachedScan(
-                        verdict=verdict,
-                        score=scan_result.score,
-                        reason=reason,
-                        files=files,
-                        model="keyword",
-                        created=time.time(),
-                    ),
-                )
+        _store_cached_scan(cache, repo, tag, cache_key, scan_result, "keyword")
         return scan_result
 
     from read.config import ReadConfig  # lazy: keeps hooks importable on CPU
@@ -419,23 +431,7 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
         model=model,
         duration_ms=(time.perf_counter() - started) * 1000,
     )
-    if cache is not None:
-        from hooks.cache import CachedScan
-
-        if cache_key is None:
-            cache_key = cache.key(repo, tag)
-        if cache_key is not None:
-            cache.set(
-                cache_key,
-                CachedScan(
-                    verdict=verdict,
-                    score=result.max_score,
-                    reason=reason,
-                    files=files,
-                    model=model,
-                    created=time.time(),
-                ),
-            )
+    _store_cached_scan(cache, repo, tag, cache_key, scan_result, model)
     return scan_result
 
 

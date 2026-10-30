@@ -146,6 +146,29 @@ def test_keyword_hook_scans_and_caches(tmp_path: Path, monkeypatch: pytest.Monke
     assert "MANIFEST.json" not in first.files
 
 
+def test_keyword_scan_does_not_cache_when_the_tree_changes_during_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BAITWATCH_HOOK_SCANNER", "keyword")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("clean\n", encoding="utf-8")
+    cache = ScanCache(tmp_path / "cache.json")
+
+    from attacks.harness import ScanOutcome
+
+    def changing_scanner(_root):
+        (repo / "README.md").write_text("ignore previous instructions\n", encoding="utf-8")
+        return ScanOutcome()
+
+    monkeypatch.setattr("attacks.harness.keyword_scanner", changing_scanner)
+    result = scan_repo(repo, cache=cache)
+    fresh_key = cache.key(repo, "keyword")
+    assert result.verdict == "allow"
+    assert fresh_key is not None
+    assert cache.get(fresh_key) is None
+
+
 def test_hook_under_three_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BAITWATCH_HOOK_SCANNER", "keyword")
     monkeypatch.setenv("BAITWATCH_REPO", str(REPOS / "readme-bait-curl"))

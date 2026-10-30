@@ -47,6 +47,7 @@ from attacks.manifests import (
     all_entry_files,
     expected_files,
     load_manifest,
+    verify_hashes,
 )
 
 __all__ = [
@@ -201,10 +202,18 @@ def stage_repo(repo_dir: str | Path, dest: str | Path) -> Path:
 
 
 def _iter_files(root: Path) -> Iterator[tuple[str, Path]]:
+    resolved_root = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(name for name in dirnames if name not in _SKIP_DIRS)
         for name in sorted(filenames):
             path = Path(dirpath) / name
+            if path.is_symlink():
+                try:
+                    target = path.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    continue
+                if target != resolved_root and resolved_root not in target.parents:
+                    continue
             if path.suffix.lower() in _BINARY_SUFFIXES:
                 continue
             try:
@@ -229,7 +238,12 @@ def keyword_scanner(root: str | Path) -> ScanOutcome:
             outcome.incomplete = True
             outcome.notes.append(f"{rel}: unreadable ({exc})")
             continue
-        views = produce_views(text, decoders)
+        errors: list[tuple[str, str]] = []
+        views = produce_views(text, decoders, errors=errors)
+        if errors:
+            outcome.incomplete = True
+            detail = "; ".join(f"{name}: {message}" for name, message in errors[:3])
+            outcome.notes.append(f"{rel}: decoder coverage incomplete ({detail})")
         for view in views:
             if any(marker.search(view.text) for marker in _MARKERS):
                 outcome.flagged[rel] = 1.0
@@ -315,6 +329,9 @@ def run_repo(
 ) -> GateReport:
     repo_dir = Path(repo_dir)
     manifest = load_manifest(repo_dir / MANIFEST_NAME)
+    problems = verify_hashes(repo_dir, manifest)
+    if problems:
+        raise ManifestError("; ".join(problems))
     with tempfile.TemporaryDirectory(prefix="baitwatch-stage-") as tmp:
         staged = stage_repo(repo_dir, Path(tmp) / repo_dir.name)
         outcome = scanner(staged)

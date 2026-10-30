@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 
 from attacks import harness
-from attacks.manifests import load_manifest
+from attacks.manifests import ManifestError, load_manifest
 from attacks.synth.generate import build_repos
 from attacks.synth.training import build_training_repos
 
@@ -98,6 +99,50 @@ def test_keyword_scanner_ignores_benign_repo(tmp_path: Path) -> None:
     outcome = harness.keyword_scanner(tmp_path)
     assert outcome.flagged == {}
     assert not outcome.incomplete
+
+
+def test_run_repo_rejects_a_tampered_manifest_span(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    shutil.copytree(REPOS / "readme-bait-curl", repo)
+    manifest = load_manifest(repo / "MANIFEST.json")
+    entry = manifest["entries"][0]
+    target = repo / entry["file"]
+    lines = target.read_text(encoding="utf-8").split("\n")
+    lines[entry["line"] - 1] = "tampered payload"
+    target.write_text("\n".join(lines), encoding="utf-8")
+    with pytest.raises(ManifestError, match="payload_sha256 mismatch"):
+        harness.run_repo(repo, harness.keyword_scanner)
+
+
+def test_keyword_scanner_marks_decoder_coverage_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "notes.md").write_text("ordinary project note\n", encoding="utf-8")
+
+    def fake_views(_text, _decoders, errors=None):
+        if errors is not None:
+            errors.append(("bidi", "decode budget exhausted; output truncated"))
+        return []
+
+    monkeypatch.setattr(harness, "produce_views", fake_views)
+    outcome = harness.keyword_scanner(tmp_path)
+    assert outcome.incomplete
+    assert outcome.notes == [
+        "notes.md: decoder coverage incomplete (bidi: decode budget exhausted; output truncated)"
+    ]
+
+
+def test_keyword_scanner_skips_file_links_outside_the_repo(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("# demo\n", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("ignore previous instructions\n", encoding="utf-8")
+    try:
+        (repo / "linked.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+    assert harness.keyword_scanner(repo).flagged == {}
 
 
 def test_keyword_scanner_skips_manifest(tmp_path: Path) -> None:
