@@ -66,3 +66,9 @@ retain coverage gaps.
 A snapshot reaching the per-file cap or exceeding staging total-byte/entry
 limits records `REPO_WRITE_LIMIT` and prevents ALLOW. RLIMIT_FSIZE is a hard
 per-file bound, not an aggregate disk quota; see SANDBOX.md for the residual gap.
+
+The decoy checks its deadline between calls within a reply, and counts each
+call (including rejected arguments) toward max_steps as well as bounding model
+turns. Docker exec completion tolerates up to two seconds of delayed exit-event
+publication; a still-running or malformed record remains a transport error.
+Sink and after-trace collection run in finally blocks before sandbox cleanup.

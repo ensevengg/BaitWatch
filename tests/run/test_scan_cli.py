@@ -109,3 +109,25 @@ def test_repo_control_characters_are_escaped_in_the_human_report(monkeypatch, tm
     assert result.exit_code == 5, result.output
     assert "\x9b" not in result.stderr
     assert "<U+009B>" in result.stderr
+
+
+def test_invalid_scan_configuration_exits_three(monkeypatch, tmp_path):
+    patched(monkeypatch, complete_run())
+    for extra in (["--image", ""], ["--max-steps", "0"]):
+        result = runner.invoke(app, ["scan", str(tmp_path), "--llm", script(tmp_path), *extra])
+        assert result.exit_code == 3, result.output
+    result = runner.invoke(app, ["scan", str(tmp_path / "absent"), "--llm", script(tmp_path)])
+    assert result.exit_code == 3, result.output
+
+
+def test_json_stdout_is_ascii_and_human_report_escapes_bidi(monkeypatch, tmp_path):
+    run = complete_run()
+    run.dns_hits.append(
+        NetworkHit(source_ip="192.0.2.20", destination="evil\u202e\u200b\x9b.example")
+    )
+    patched(monkeypatch, run)
+    result = runner.invoke(app, ["scan", str(tmp_path), "--llm", script(tmp_path)])
+    assert result.exit_code == 5
+    assert result.stdout.isascii()
+    assert "<U+202E>" in result.stderr
+    assert "<U+200B>" in result.stderr

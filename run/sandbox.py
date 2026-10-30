@@ -735,7 +735,14 @@ class Sandbox:
         if result.timed_out or result.output_truncated:
             return
         try:
-            record = self._client.api.exec_inspect(exec_id)
+            deadline = time.monotonic() + 2.0
+            for _ in range(41):
+                record = self._client.api.exec_inspect(exec_id)
+                if not isinstance(record, dict) or record.get("Running") is not True:
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
         except Exception as exc:
             self._error("EXEC_TRANSPORT_FAILED", f"docker's exec record could not be read: {exc}")
             return
@@ -1094,28 +1101,34 @@ def detonate(
     sandbox = Sandbox(path, config)
     try:
         with sandbox:
-            sandbox.start_sinks()
-            sandbox.trace_before()
-            if backend is None:
-                sandbox.run_command(command)
-            else:
-                sandbox.open_cage()
-                # Imported here: run.decoy imports this module for Sandbox.
-                from run.decoy import run_decoy
+            try:
+                sandbox.start_sinks()
+                sandbox.trace_before()
+                if backend is None:
+                    sandbox.run_command(command)
+                else:
+                    sandbox.open_cage()
+                    # Imported here: run.decoy imports this module for Sandbox.
+                    from run.decoy import run_decoy
 
-                run_decoy(sandbox, backend, max_steps=max_steps)
-                # A failed decoy must never be upgraded: only a clean loop
-                # that left the sandbox component untouched proves the cage ran.
-                if (
-                    sandbox.evidence.components.sandbox == State.NOT_RUN
-                    and sandbox.evidence.components.decoy == State.COMPLETE
-                ):
-                    if sandbox.cage_running():
-                        sandbox.evidence.components.sandbox = State.COMPLETE
-                    else:
-                        sandbox._error("CAGE_EXITED", "the cage stopped before the decoy completed")
-            sandbox.collect_sinks()
-            sandbox.trace_after()
+                    run_decoy(sandbox, backend, max_steps=max_steps)
+                    # A failed decoy must never be upgraded: only a clean loop
+                    # that left the sandbox component untouched proves the cage ran.
+                    if (
+                        sandbox.evidence.components.sandbox == State.NOT_RUN
+                        and sandbox.evidence.components.decoy == State.COMPLETE
+                    ):
+                        if sandbox.cage_running():
+                            sandbox.evidence.components.sandbox = State.COMPLETE
+                        else:
+                            sandbox._error(
+                                "CAGE_EXITED", "the cage stopped before the decoy completed"
+                            )
+            finally:
+                try:
+                    sandbox.collect_sinks()
+                finally:
+                    sandbox.trace_after()
     except Exception as exc:
         if not sandbox.evidence.errors:
             sandbox._error("DETONATION_ERROR", str(exc))

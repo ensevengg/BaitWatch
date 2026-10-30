@@ -43,7 +43,7 @@ uv run --no-sync baitwatch-run decoy /path/to/repo --llm scripted:steps.json
 uv run --no-sync baitwatch-run decoy /path/to/repo --llm ollama:llama3.2:3b --max-steps 30
 ```
 
-The decoy is a helpful coding agent told to set up and test the repository following its own instructions — which is exactly how an injected instruction gets followed. Its `read_file`, `list_files` and `run_cmd` tools execute only inside the cage; model API calls leave only from the host. Every tool call, reads included, is recorded in `tool_log`. The `--llm` spec selects the backend (`scripted:PATH`, `ollama:MODEL`, `openai:BASE_URL#MODEL[#ENV_VAR]`); a scripted replay is deterministic and needs no network. Exit code 0 means the evidence is complete — never that the repository is safe.
+The decoy is a helpful coding agent told to set up and test the repository following its own instructions — which is exactly how an injected instruction gets followed. Its `read_file`, `list_files` and `run_cmd` tools execute only inside the cage; model API calls leave only from the host. Every tool call, reads included, is recorded in `tool_log`. The `--llm` spec selects the backend (`scripted:PATH`, `ollama:MODEL`, `openai:BASE_URL#MODEL[#ENV_VAR]`); a scripted replay is deterministic and needs no network. Exit code 0 means complete evidence without sink or honeytoken hits — never that the repository is safe. Hits or incomplete evidence exit 2; operational errors exit 3.
 
 ## Scan command
 
@@ -61,7 +61,7 @@ human report then goes to stdout and the JSON to the file); when the JSON goes
 to stdout, the human report goes to stderr. Every report validates against
 [docs/verdict.schema.json](../docs/verdict.schema.json).
 
-Exit codes: 0 ALLOW, 4 FLAG, 5 BLOCK, 3 operational error (bad `--llm` spec,
+Exit codes: 0 ALLOW, 4 FLAG, 5 BLOCK, 3 operational error (invalid configuration or repository path, bad `--llm` spec,
 unwritable `--json` path; the same code `baitwatch-run` uses). Codes 1 and 2
 stay reserved for a crash or a CLI usage error and never mean a verdict. No
 exit code permits an agent to proceed on its own; ALLOW means neither layer
@@ -116,3 +116,9 @@ uploads BLOCK. Registry-attempt reasons are bounded.
 Cage file writes have an 8 MiB per-file hard limit by default. Post-run
 size/entry checks record errors, but aggregate disk use during execution is
 not quota-bound; see [repository write limits](SANDBOX.md#repository-write-limits).
+
+JSON output escapes all non-ASCII characters. Human reports escape terminal,
+bidi and zero-width controls. The decoy checks its lifetime before each tool
+call; model turns and total tool calls each share the configured max-steps cap.
+A reply with many calls cannot multiply that budget. API keys require HTTPS
+except for exact localhost or 127.0.0.1 endpoints.

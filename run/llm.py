@@ -164,6 +164,13 @@ class OpenAICompatBackend:
             raise LLMError(f"LLM call budget of {self.max_calls} is exhausted")
         self._calls += 1
         api_key = self._api_key()
+        endpoint = urllib.parse.urlsplit(self.base_url)
+        if (
+            api_key is not None
+            and endpoint.scheme == "http"
+            and endpoint.hostname not in {"localhost", "127.0.0.1"}
+        ):
+            raise LLMError("API keys require HTTPS except on localhost or 127.0.0.1")
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,

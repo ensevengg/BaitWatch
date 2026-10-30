@@ -5,6 +5,7 @@ reserved for a crash or a usage error and never mean a verdict. No code
 permits an agent to proceed on its own.
 """
 
+import json
 import re
 from pathlib import Path
 from typing import Annotated
@@ -36,7 +37,7 @@ _VERDICT_STYLES = {"ALLOW": "green", "FLAG": "yellow", "BLOCK": "red"}
 # control characters are printed as code points so a repo cannot repaint
 # the terminal report. C1 controls (U+0080-U+009F) are included: some
 # terminals honor them as CSI/OSC introducers even in UTF-8 mode.
-_CONTROL = re.compile(r"[\x00-\x1f\x7f\x80-\x9f]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f\x80-\x9f\u202a-\u202e\u2066-\u2069\u200b-\u200f\ufeff]")
 
 
 def _safe(text: str) -> str:
@@ -85,19 +86,24 @@ def scan(
     image: Annotated[
         str, typer.Option(help="Trusted image; must already exist locally.")
     ] = "alpine:3.20",
-    max_steps: Annotated[int, typer.Option(min=1, help="Maximum model turns.")] = 20,
+    max_steps: Annotated[int, typer.Option(help="Maximum model turns and total tool calls.")] = 20,
     json_path: Annotated[
         Path | None, typer.Option("--json", help="Write the verdict JSON here instead of stdout.")
     ] = None,
 ) -> None:
     """Scan a repository; print the verdict JSON and a human report."""
     try:
+        if not repo.is_dir():
+            raise ValueError("repository must be an existing directory")
+        if max_steps < 1:
+            raise ValueError("max-steps must be positive")
+        config = SandboxConfig(image=image)
         backend = make_backend(llm)
     except (LLMError, ValueError) as exc:
         typer.echo(f"scan: {exc}", err=True)
         raise typer.Exit(ERROR_EXIT) from exc
-    report = run_scan(repo, config=SandboxConfig(image=image), backend=backend, max_steps=max_steps)
-    payload = report.model_dump_json(indent=2)
+    report = run_scan(repo, config=config, backend=backend, max_steps=max_steps)
+    payload = json.dumps(report.model_dump(mode="json"), ensure_ascii=True, indent=2)
     if json_path is None:
         typer.echo(payload)
         _human_report(report, Console(stderr=True, markup=False, highlight=False))

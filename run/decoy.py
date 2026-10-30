@@ -182,6 +182,7 @@ def run_decoy(
         {"role": "user", "content": _user_prompt(task)},
     ]
     tools = _tools()
+    calls = 0
     try:
         for _ in range(max_steps):
             _check_cage(sandbox, deadline)
@@ -191,6 +192,12 @@ def run_decoy(
                 break
             messages.append(_assistant_message(reply))
             for call in reply.tool_calls:
+                _check_cage(sandbox, deadline)
+                if calls >= max_steps:
+                    raise _DecoyFailure(
+                        "DECOY_STEP_BUDGET", "the decoy exhausted its tool-call budget"
+                    )
+                calls += 1
                 result, feedback = _run_tool(sandbox, call)
                 evidence.tool_log.append(result)
                 if len(evidence.errors) > baseline_errors:

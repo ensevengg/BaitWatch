@@ -449,3 +449,28 @@ def test_run_decoy_ends_complete_or_fails_closed_for_arbitrary_model_behaviour()
             assert not evidence.errors and evidence.status != "error"
         for entry in evidence.tool_log:
             assert entry.command
+
+
+def test_tool_calls_in_one_reply_share_the_step_budget():
+    sandbox = FakeSandbox()
+    calls = [ToolCall(id=str(i), name="run_cmd", arguments={"command": "true"}) for i in range(50)]
+    run_decoy(sandbox, FakeBackend(LLMReply(tool_calls=calls), LLMReply()), max_steps=3)
+    assert len(sandbox.argv) == 3
+    assert sandbox.evidence.errors[-1].code == "DECOY_STEP_BUDGET"
+
+
+def test_deadline_is_checked_between_calls_in_one_reply(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr("run.decoy.time.monotonic", lambda: clock[0])
+
+    class SlowTool(FakeSandbox):
+        def exec(self, argv):
+            result = super().exec(argv)
+            clock[0] += 121
+            return result
+
+    sandbox = SlowTool()
+    calls = [ToolCall(id=str(i), name="run_cmd", arguments={"command": "true"}) for i in range(3)]
+    run_decoy(sandbox, FakeBackend(LLMReply(tool_calls=calls)))
+    assert len(sandbox.argv) == 1
+    assert sandbox.evidence.errors[-1].code == "DECOY_DEADLINE"

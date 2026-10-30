@@ -763,3 +763,16 @@ def test_make_backend_rejects_hostile_scripted_files(tmp_path):
     huge.write_text("[9" + "9" * 5000 + "]")
     with pytest.raises(LLMError):
         make_backend(f"scripted:{huge}")
+
+
+@pytest.mark.parametrize(
+    "url", ["http://api.example/v1", "http://localhost.evil.example/v1", "http://127.0.0.2/v1"]
+)
+def test_api_keys_are_not_sent_to_remote_plain_http(monkeypatch, url):
+    monkeypatch.setenv(ENV, SECRET)
+    backend = OpenAICompatBackend(url, "fixture", api_key_env=ENV)
+    sent = []
+    monkeypatch.setattr(backend, "_post", lambda request: sent.append(request) or b"{}")
+    with pytest.raises(LLMError, match="HTTPS"):
+        backend.chat([], [])
+    assert not sent

@@ -740,7 +740,9 @@ def test_trace_after_is_complete_when_no_marker_exists(repo: Path, monkeypatch):
     assert sandbox.evidence.components.trace == State.COMPLETE
 
 
-def test_staging_leak_stays_visible_when_the_unlock_helper_survives(repo: Path, monkeypatch):
+def test_staging_leak_stays_visible_when_the_unlock_helper_survives(
+    repo: Path, monkeypatch, request
+):
     client = fake_client()
     cage = MagicMock()
     cage.id = "cage"
@@ -754,10 +756,12 @@ def test_staging_leak_stays_visible_when_the_unlock_helper_survives(repo: Path, 
         "run.sandbox.capture_attached",
         lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
     )
+    real_rmtree = shutil.rmtree
     rmtree = MagicMock(side_effect=[OSError("locked"), None])
     monkeypatch.setattr("run.sandbox.shutil.rmtree", rmtree)
     sandbox = Sandbox(repo, client_factory=lambda: client)
     with sandbox:
+        request.addfinalizer(lambda: real_rmtree(sandbox.staged_path.parent))
         assert sandbox.run_command(["true"]).exit_code == 0
     assert [error.code for error in sandbox.evidence.errors] == [
         "CONTAINER_CLEANUP",
@@ -767,7 +771,9 @@ def test_staging_leak_stays_visible_when_the_unlock_helper_survives(repo: Path, 
     assert rmtree.call_count == 1  # no retry while the helper may still hold the tree
 
 
-def test_unlock_helper_with_a_lost_create_reply_is_swept_after_staging(repo: Path, monkeypatch):
+def test_unlock_helper_with_a_lost_create_reply_is_swept_after_staging(
+    repo: Path, monkeypatch, request
+):
     client = fake_client()
     cage = MagicMock()
     cage.id = "cage"
@@ -780,10 +786,12 @@ def test_unlock_helper_with_a_lost_create_reply_is_swept_after_staging(repo: Pat
         "run.sandbox.capture_attached",
         lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
     )
+    real_rmtree = shutil.rmtree
     rmtree = MagicMock(side_effect=OSError("locked"))
     monkeypatch.setattr("run.sandbox.shutil.rmtree", rmtree)
     sandbox = Sandbox(repo, client_factory=lambda: client)
     with sandbox:
+        request.addfinalizer(lambda: real_rmtree(sandbox.staged_path.parent))
         assert sandbox.run_command(["true"]).exit_code == 0
     assert [error.code for error in sandbox.evidence.errors] == ["STAGING_CLEANUP"]
     assert rmtree.call_count == 1
@@ -1174,3 +1182,41 @@ def test_the_kill_sweep_skips_only_zombies():
     assert '"Z"' in KILL_LINGERING
     assert "cmdline" not in KILL_LINGERING
     assert '"1"' in KILL_LINGERING and '"$$"' in KILL_LINGERING
+
+
+def test_exec_waits_for_the_daemon_exit_event(repo: Path, monkeypatch):
+    sandbox, result = _exec_with_results(
+        repo,
+        monkeypatch,
+        (CommandResult(command=["sh"], stderr=f"{EXEC_START_MARKER}\n"), None),
+        inspect_failure=[{"Running": True, "ExitCode": None}, {"Running": False, "ExitCode": 0}],
+    )
+    assert not sandbox.evidence.errors
+    assert result.exit_code == 0
+
+
+def test_detonate_collects_evidence_after_a_late_exception(repo: Path, monkeypatch):
+    from run.evidence import NetworkHit
+
+    monkeypatch.setattr("run.sandbox.docker.DockerClient", lambda **kwargs: fake_client())
+    monkeypatch.setattr(Sandbox, "start_sinks", lambda self: None)
+    monkeypatch.setattr(Sandbox, "trace_before", lambda self: True)
+
+    def broken(self, command):
+        raise RuntimeError("late failure")
+
+    def collect(self):
+        self.evidence.dns_hits.append(
+            NetworkHit(source_ip="192.0.2.20", destination="evil.example")
+        )
+
+    def trace(self):
+        self.evidence.components.trace = State.COMPLETE
+
+    monkeypatch.setattr(Sandbox, "run_command", broken)
+    monkeypatch.setattr(Sandbox, "collect_sinks", collect)
+    monkeypatch.setattr(Sandbox, "trace_after", trace)
+    evidence = detonate(repo)
+    assert evidence.status == "error"
+    assert evidence.dns_hits[0].destination == "evil.example"
+    assert evidence.components.trace == State.COMPLETE
