@@ -70,6 +70,33 @@ def _bounded(text: str) -> str:
     return text[:_REASON_PART_CHARS]
 
 
+_CONTROL_DIRS = frozenset({
+    ".claude", ".cursor", ".windsurf", ".codex", ".gemini", ".continue",
+    ".vscode", ".idea", ".husky",
+})
+_CONTROL_FILES = frozenset({
+    ".mcp.json", "mcp.json", "agents.md", "claude.md", "gemini.md",
+    ".cursorrules", ".windsurfrules", ".pre-commit-config.yaml",
+})
+
+
+def _agent_control(path: str) -> bool:
+    parts = path.casefold().split("/")
+    return (
+        any(part in _CONTROL_DIRS or part in _CONTROL_FILES for part in parts)
+        or any(
+            (parent == ".git" and child in {"hooks", "config"})
+            or (parent == ".github" and child == "copilot-instructions.md")
+            for parent, child in zip(parts, parts[1:])
+        )
+    )
+
+
+def _path_reason(label: str, paths: list[str]) -> str:
+    shown = ", ".join(path[:100] for path in paths[:3])
+    return _bounded(f"{label} ({len(paths)}): {shown}")
+
+
 def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     if run.status == "complete" and run.errors:
         run = run.model_copy(update={"status": "error"})
@@ -78,6 +105,10 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     hits = [(kind, hit) for kind in ("dns", "http", "tls") for hit in getattr(run, f"{kind}_hits")]
     exfil = [hit for kind, hit in hits if not _is_registry_attempt(hit, kind)]
     attempts = [hit for kind, hit in hits if _is_registry_attempt(hit, kind)]
+
+    controls = [change.path for change in run.file_diffs if _agent_control(change.path)]
+    if controls:
+        blockers.append(_path_reason("agent-control or persistence changes", controls))
 
     if exfil:
         destinations = ", ".join(dict.fromkeys(hit.destination for hit in exfil))
