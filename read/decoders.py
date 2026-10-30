@@ -285,6 +285,16 @@ _COMMON_WORDS = frozenset({
     "https", "evil", "example", "hidden", "never", "must", "agent", "agents",
     "system", "prompt", "override", "download", "execute", "install",
     "password", "credentials", "task", "its", "to",
+    # Ordinary agent/project vocabulary. Without these, short real payloads
+    # ("Activate unattended mode for session approval") score a single hit
+    # and fall under the two-hit gate in Rot13/Reversed decoding.
+    "for", "into", "without", "during", "every", "each", "when", "then",
+    "would", "should", "could", "open", "use", "using", "work", "works",
+    "project", "workspace", "session", "sessions", "approval", "approve",
+    "activate", "active", "mode", "guide", "note", "notes", "setup",
+    "setting", "settings", "tool", "tools", "command", "commands", "test",
+    "tests", "build", "change", "changes", "review", "update", "updates",
+    "check", "start", "stop", "step", "steps", "policy", "access",
 })
 
 
