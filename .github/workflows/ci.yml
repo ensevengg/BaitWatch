@@ -25,11 +25,11 @@ jobs:
         run: uv sync --frozen --extra dev --extra cpu
       - name: Lint and formatting
         run: |
-          uv run --no-sync ruff check run tests/run
-          uv run --no-sync ruff format --check run tests/run
+          uv run --no-sync ruff check run tests/run tests/e2e
+          uv run --no-sync ruff format --check run tests/run tests/e2e
       - name: Pull trusted test images
         run: |
           docker pull alpine:3.20
           docker pull python:3.12-alpine
       - name: Unit and Docker integration tests
-        run: uv run --no-sync pytest -m "not gpu" tests/run --junitxml=artifacts/pytest.xml
+        run: uv run --no-sync pytest -m "not gpu" tests/run tests/e2e --junitxml=artifacts/pytest.xml

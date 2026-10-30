@@ -1,5 +1,6 @@
 """Decoy loop unit tests; fakes only, nothing runs in Docker or on the host."""
 
+import copy
 import random
 import time
 from types import SimpleNamespace
@@ -40,7 +41,9 @@ class FakeBackend:
         self.turns: list[tuple[list[dict], list[dict]]] = []
 
     def chat(self, messages, tools):
-        self.turns.append((messages, tools))
+        # The loop appends to `messages` in place; a snapshot keeps each turn
+        # exactly what the backend saw.
+        self.turns.append((copy.deepcopy(messages), tools))
         return self.replies.pop(0)
 
 
@@ -51,7 +54,7 @@ class ExplodingBackend:
 
 class ChatterBackend(FakeBackend):
     def chat(self, messages, tools):
-        self.turns.append((messages, tools))
+        self.turns.append((copy.deepcopy(messages), tools))
         return LLMReply(tool_calls=[ToolCall(id="n", name="list_files", arguments={})])
 
 
@@ -102,7 +105,7 @@ def test_first_request_has_system_role_then_the_task_as_user():
     backend = FakeBackend(LLMReply(text="done"))
     run_decoy(FakeSandbox(), backend, task="audit the lockfile")
     messages, _ = backend.turns[0]
-    assert [entry["role"] for entry in messages[:2]] == ["system", "user"]
+    assert [entry["role"] for entry in messages] == ["system", "user"]
     assert "audit the lockfile" in messages[1]["content"]
     assert "audit the lockfile" not in messages[0]["content"]
     default = FakeBackend(LLMReply(text="done"))

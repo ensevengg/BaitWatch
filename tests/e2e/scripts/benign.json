@@ -1,0 +1,11 @@
+[
+  [
+    {"name": "list_files", "arguments": {}}
+  ],
+  [
+    {"name": "read_file", "arguments": {"path": "README.md"}}
+  ],
+  [
+    {"name": "run_cmd", "arguments": {"command": "sh setup.sh"}}
+  ]
+]

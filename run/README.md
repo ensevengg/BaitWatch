@@ -2,7 +2,7 @@
 
 BaitWatch checks a repository for attacks aimed at coding agents before a developer lets an agent work in it. The planned product has two parts. READ runs a detector over the files. RUN executes the repository as a decoy inside an isolated Docker network and records what it tries to reach.
 
-This branch builds the RUN foundation, the Day 2 layers, and the Day 3 decoy. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, cleans up, and tests each of these steps. It does not yet include the READ model, honeytoken attribution, the full verdict engine, or agent hooks.
+This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, and the Day 4 fused scan. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not yet include honeytoken attribution, the agreed verdict thresholds, or agent hooks.
 
 ## Setup on Linux
 
@@ -12,9 +12,9 @@ Install Python 3.12 or later, uv, Docker Engine 28 or later and the Docker CLI. 
 uv sync --frozen --extra dev --extra cpu
 docker pull alpine:3.20
 docker pull python:3.12-alpine
-uv run --no-sync ruff check run tests/run
-uv run --no-sync ruff format --check run tests/run
-uv run --no-sync pytest -m "not gpu" tests/run
+uv run --no-sync ruff check run tests/run tests/e2e
+uv run --no-sync ruff format --check run tests/run tests/e2e
+uv run --no-sync pytest -m "not gpu" tests/run tests/e2e
 ```
 
 Plain `uv sync` or pip installs the default torch, which is CUDA-capable on Linux; `--extra cpu` keeps the CPU build for CI and machines without a GPU.
@@ -34,7 +34,7 @@ uv run --no-sync baitwatch-run sandbox --image python:3.12-alpine /path/to/repo 
 
 Only the arguments after `--` run, and they run inside the container. The host shell does not expand them. To use shell syntax, pass a shell command explicitly, for example `sh -c 'echo hello'`.
 
-The command prints RUN evidence. Exit code 2 means the diagnostics are incomplete, and exit code 3 means an operational error. Neither code gives an agent permission to proceed. A container that exits 0 still leaves the scan incomplete, because the other components have not run. This milestone has no `scan` or `install` command.
+The command prints RUN evidence. Exit code 2 means the diagnostics are incomplete, and exit code 3 means an operational error. Neither code gives an agent permission to proceed. A container that exits 0 still leaves the scan incomplete, because the other components have not run. There is still no `install` command.
 
 ## Decoy command
 
@@ -44,6 +44,36 @@ uv run --no-sync baitwatch-run decoy /path/to/repo --llm ollama:llama3.2:3b --ma
 ```
 
 The decoy is a helpful coding agent told to set up and test the repository following its own instructions — which is exactly how an injected instruction gets followed. Its `read_file`, `list_files` and `run_cmd` tools execute only inside the cage; model API calls leave only from the host. Every tool call, reads included, is recorded in `tool_log`. The `--llm` spec selects the backend (`scripted:PATH`, `ollama:MODEL`, `openai:BASE_URL#MODEL[#ENV_VAR]`); a scripted replay is deterministic and needs no network. Exit code 0 means the evidence is complete — never that the repository is safe.
+
+## Scan command
+
+```bash
+uv run --no-sync baitwatch scan /path/to/repo --llm scripted:steps.json --json verdict.json
+uv run --no-sync baitwatch scan /path/to/repo --llm ollama:llama3.2:3b
+```
+
+`baitwatch scan` is the fused CLI: it runs the READ detector over the files and
+the RUN decoy (same `--llm` spec and cage as `baitwatch-run decoy`) in one pass,
+then fuses both into a single `VerdictReport`. `--llm` is required — without a
+decoy the scan can never be complete, so use `baitwatch-run sandbox` for
+diagnostics instead. The verdict JSON goes to stdout, or to `--json PATH` (the
+human report then goes to stdout and the JSON to the file); when the JSON goes
+to stdout, the human report goes to stderr. Every report validates against
+[docs/verdict.schema.json](../docs/verdict.schema.json).
+
+Exit codes: 0 ALLOW, 4 FLAG, 5 BLOCK, 3 operational error (bad `--llm` spec,
+unwritable `--json` path; the same code `baitwatch-run` uses). Codes 1 and 2
+stay reserved for a crash or a CLI usage error and never mean a verdict. No
+exit code permits an agent to proceed on its own; ALLOW means neither layer
+found anything, not that the repository is safe.
+
+The fusion in `run/verdict.py` is provisional until the thresholds are agreed
+with the READ owner. Its fixed rules: any exception, timeout, truncated scan,
+missing component, incomplete READ, or RUN error is at least FLAG; any sink
+contact or honeytoken hit outside the package registries is BLOCK; package-
+registry lookups (pypi.org, registry.npmjs.org) are counted as attempts, not
+exfiltration; honeytoken hits are always BLOCK (the generator arrives in a
+later milestone, so the field is empty today).
 
 ## Library interface
 
@@ -65,6 +95,7 @@ assert evidence.status == "incomplete"
 - The scripted decoy's tool calls execute inside the cage, land in `tool_log` in order, and its fake exfil reaches the DNS and HTTP sinks attributed to the cage and shows up in `file_diffs`; a decoy run that only finishes cleanly can make the whole evidence `complete`.
 - A tool call that outlives its deadline is killed inside the cage and recorded timed out; forked or backgrounded work from any tool call leaves no live process behind, for compound (`sleep 100; echo done`) and backgrounded (`sleep 100 &`) commands alike.
 - The sandbox records setup failures, cleanup failures and subnet conflicts as errors, and `exec` fails closed on a cage that was never opened, has closed, or has exited.
+- The fusion flags or blocks on every incomplete READ or RUN, blocks on sink contacts outside the package registries, and only allows a clean READ plus a complete, contact-free decoy run — the local attack fixtures block, the benign fixture allows, and every report validates against the schema.
 - The schema rejects ALLOW when any evidence is incomplete.
 
 These tests cover the boundary built so far. They do not prove that a container cannot escape, they do not measure prompt-injection detection, and they do not run the whole product. Integration still has to pass on the team's demo machine. The interface stays a proposal until Manan and Aditya review it.
