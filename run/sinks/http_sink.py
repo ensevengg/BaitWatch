@@ -161,16 +161,20 @@ def parse_sni(buf):
 
 
 def read_head(conn):
-    """(head, None) once a request head arrives, else (None, raw bytes seen)."""
+    """(head, None, False) once a request head arrives, else (None, raw, truncated).
+
+    truncated marks a head cut at HEAD_LIMIT — bytes the sink never received —
+    not a peer that merely stalled: a stall keeps everything that was sent.
+    """
     buffer = bytearray()
     while True:
         head, separator, rest = bytes(buffer).partition(b"\r\n\r\n")
         if separator:
             if len(head) + len(separator) > HEAD_LIMIT:
-                return None, bytes(buffer)
-            return (head, separator, rest), None
+                return None, bytes(buffer), True
+            return (head, separator, rest), None, False
         if len(buffer) > HEAD_LIMIT:
-            return None, bytes(buffer)
+            return None, bytes(buffer), True
         try:
             chunk = conn.recv(4096)
         except OSError:
@@ -178,7 +182,7 @@ def read_head(conn):
         if not chunk:
             break
         buffer.extend(chunk)
-    return None, bytes(buffer)
+    return None, bytes(buffer), False
 
 
 def raw_preview(data: bytes) -> str:
@@ -194,7 +198,7 @@ def raw_preview(data: bytes) -> str:
 
 def handle_http(conn, addr, log):
     conn.settimeout(CONNECTION_TIMEOUT)
-    head, raw = read_head(conn)
+    head, raw, head_truncated = read_head(conn)
     if head is not None:
         lines = head[0].split(b"\r\n")
         parts = lines[0].split()
@@ -212,7 +216,7 @@ def handle_http(conn, addr, log):
             "path": "",
             "host": "",
             "headers": {},
-            "headers_truncated": False,
+            "headers_truncated": head_truncated,
             "body": "",
             "body_truncated": False,
             "raw": raw_preview(raw or b""),

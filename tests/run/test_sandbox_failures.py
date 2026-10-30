@@ -1,5 +1,7 @@
 import ipaddress
 import shutil
+import socket
+import struct
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -8,6 +10,8 @@ from docker.errors import APIError, NotFound
 
 from run.evidence import CommandResult, State
 from run.sandbox import (
+    EXEC_START_MARKER,
+    KILL_LINGERING,
     SCAN_LABEL,
     SUBNET_ATTEMPTS,
     Sandbox,
@@ -16,6 +20,7 @@ from run.sandbox import (
     detonate,
 )
 from run.staging import StagingLimits
+from run.trace import Entry
 
 OVERLAP = "Pool overlaps with other one on this address space"
 
@@ -57,6 +62,15 @@ def stoppable_client(exit_code: int = 0, stops: bool = True):
         containers.append(container)
     client.containers.create.side_effect = containers
     return client
+
+
+def exec_api(client, *, exit_code=0, running=False, inspect_failure=None):
+    client.api.exec_create.return_value = {"Id": "exec-1"}
+    if inspect_failure is not None:
+        client.api.exec_inspect.side_effect = inspect_failure
+    else:
+        client.api.exec_inspect.return_value = {"Running": running, "ExitCode": exit_code}
+    return client.api
 
 
 def test_default_subnet_and_addresses_are_preserved_when_free(repo: Path):
@@ -520,7 +534,8 @@ def test_sink_without_a_stopped_record_fails_closed(repo: Path, monkeypatch):
         sandbox.collect_sinks()
     assert [error.code for error in sandbox.evidence.errors] == ["SINK_LOG", "SINK_LOG"]
     assert "no stopped record" in sandbox.evidence.errors[0].message
-    assert not sandbox.evidence.dns_hits
+    # The parsed hit stays evidence even though the component failed.
+    assert [hit.destination for hit in sandbox.evidence.dns_hits] == ["a.evil.example"]
     assert sandbox.evidence.components.dns_sink == State.ERROR
 
 
@@ -570,6 +585,75 @@ def test_sink_that_died_before_collection_fails_closed(repo: Path, monkeypatch):
     assert not sandbox.evidence.tls_hits
 
 
+def test_dead_sink_with_a_partial_log_keeps_its_hits(repo: Path, monkeypatch):
+    monkeypatch.setattr(Sandbox, "_wait_ready", lambda self, container, log, role: None)
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "exited", "ExitCode": 137}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.start_sinks()
+        sandbox._sink_logs["dns"].write_text(
+            '{"kind":"ready","sink":"dns"}\n'
+            '{"kind":"dns","ts":1.0,"source_ip":"10.13.37.20","qname":"dead.evil.example",'
+            '"qtype":"A","decoded":[]}\n',
+            encoding="utf-8",
+        )
+        sandbox._sink_logs["http"].write_text('{"kind":"ready","sink":"http"}\n', encoding="utf-8")
+        sandbox.collect_sinks()
+    assert [hit.destination for hit in sandbox.evidence.dns_hits] == ["dead.evil.example"]
+    assert sandbox.evidence.errors[0].code == "SINK_FAILED"
+    assert sandbox.evidence.components.dns_sink == State.ERROR
+
+
+def test_log_cap_flood_keeps_the_exfil_hit_and_marks_the_log(repo: Path, monkeypatch):
+    monkeypatch.setattr(Sandbox, "_wait_ready", lambda self, container, log, role: None)
+    client = stoppable_client()
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.start_sinks()
+        sandbox._sink_logs["dns"].write_text(
+            '{"kind":"ready","sink":"dns"}\n'
+            '{"kind":"dns","ts":1.0,"source_ip":"10.13.37.20","qname":"exfil.evil.example",'
+            '"qtype":"A","decoded":[]}\n'
+            '{"kind":"log_truncated","ts":2.0}\n',
+            encoding="utf-8",
+        )
+        sandbox._sink_logs["http"].write_text(
+            '{"kind":"ready","sink":"http"}\n{"kind":"stopped","sink":"http"}\n',
+            encoding="utf-8",
+        )
+        sandbox.collect_sinks()
+    assert [hit.destination for hit in sandbox.evidence.dns_hits] == ["exfil.evil.example"]
+    assert sandbox.evidence.errors[0].code == "SINK_LOG"
+    assert "size cap" in sandbox.evidence.errors[0].message
+    assert sandbox.evidence.components.dns_sink == State.ERROR
+    assert sandbox.evidence.components.http_sink == State.COMPLETE
+
+
+def test_collecting_twice_does_not_duplicate_hits(repo: Path, monkeypatch):
+    monkeypatch.setattr(Sandbox, "_wait_ready", lambda self, container, log, role: None)
+    client = stoppable_client()
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.start_sinks()
+        sandbox._sink_logs["dns"].write_text(
+            '{"kind":"ready","sink":"dns"}\n'
+            '{"kind":"dns","ts":1.0,"source_ip":"10.13.37.20","qname":"once.evil.example",'
+            '"qtype":"A","decoded":[]}\n'
+            '{"kind":"stopped","sink":"dns"}\n',
+            encoding="utf-8",
+        )
+        sandbox._sink_logs["http"].write_text(
+            '{"kind":"ready","sink":"http"}\n{"kind":"stopped","sink":"http"}\n',
+            encoding="utf-8",
+        )
+        sandbox.collect_sinks()
+        sandbox.collect_sinks()
+    assert [hit.destination for hit in sandbox.evidence.dns_hits] == ["once.evil.example"]
+    assert not sandbox.evidence.errors
+    assert sandbox.evidence.components.dns_sink == State.COMPLETE
+
+
 def test_pre_command_trace_error_does_not_block_the_sandbox_state(repo: Path, monkeypatch):
     client = fake_client()
     cage = client.containers.create.return_value
@@ -587,6 +671,73 @@ def test_pre_command_trace_error_does_not_block_the_sandbox_state(repo: Path, mo
     assert [error.code for error in sandbox.evidence.errors] == ["TRACE_FAILED"]
     assert sandbox.evidence.components.trace == State.ERROR
     assert sandbox.evidence.components.sandbox == State.COMPLETE
+
+
+def test_trace_after_keeps_diffs_but_errors_on_after_snapshot_markers(repo: Path, monkeypatch):
+    before = {"README.md": Entry(kind="file", mode=0o644, sha256="0" * 64)}
+    after = {
+        "README.md": Entry(kind="file", mode=0o644, sha256="1" * 64),
+        "locked": Entry(kind="dir", mode=0, error="EACCES"),
+    }
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, client_factory=lambda: fake_client())
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert [(item.path, item.change) for item in sandbox.evidence.file_diffs] == [
+        ("README.md", "modified"),
+        ("locked", "added"),
+    ]
+    assert [error.code for error in sandbox.evidence.errors] == ["TRACE_INCOMPLETE"]
+    assert "locked" in sandbox.evidence.errors[0].message
+    assert sandbox.evidence.components.trace == State.ERROR
+
+
+def test_trace_after_errors_on_before_snapshot_markers(repo: Path, monkeypatch):
+    before = {
+        "README.md": Entry(kind="file", mode=0o644, sha256="0" * 64),
+        "secret": Entry(kind="file", mode=0o600, error="EACCES"),
+    }
+    manifests = iter([before, dict(before)])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, client_factory=lambda: fake_client())
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert sandbox.evidence.file_diffs == []
+    assert [error.code for error in sandbox.evidence.errors] == ["TRACE_INCOMPLETE"]
+    assert "secret" in sandbox.evidence.errors[0].message
+    assert sandbox.evidence.components.trace == State.ERROR
+
+
+def test_trace_incomplete_names_a_bounded_set_of_paths(repo: Path, monkeypatch):
+    after = {f"locked{i}": Entry(kind="dir", mode=0, error="EACCES") for i in range(9)}
+    manifests = iter([{}, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, client_factory=lambda: fake_client())
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    message = sandbox.evidence.errors[0].message
+    assert message.count("locked") == 5
+    assert "(+4 more)" in message
+    assert len(message) <= 1000
+
+
+def test_trace_after_is_complete_when_no_marker_exists(repo: Path, monkeypatch):
+    after = {
+        "README.md": Entry(kind="file", mode=0o644, sha256="0" * 64),
+        "other": Entry(kind="symlink", mode=0o777, target="README.md"),
+    }
+    manifests = iter([{}, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, client_factory=lambda: fake_client())
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert not sandbox.evidence.errors
+    assert sandbox.evidence.components.trace == State.COMPLETE
 
 
 def test_staging_leak_stays_visible_when_the_unlock_helper_survives(repo: Path, monkeypatch):
@@ -638,3 +789,388 @@ def test_unlock_helper_with_a_lost_create_reply_is_swept_after_staging(repo: Pat
     assert rmtree.call_count == 1
     stray.remove.assert_called_once()
     assert client.containers.list.call_count == 2
+
+
+def test_decoy_time_limits_are_validated():
+    assert SandboxConfig(decoy_seconds=0.5, tool_timeout_seconds=2).decoy_seconds == 0.5
+    with pytest.raises(ValueError, match="finite int or float"):
+        SandboxConfig(decoy_seconds=True)
+    with pytest.raises(ValueError, match="finite int or float"):
+        SandboxConfig(decoy_seconds="90")
+    with pytest.raises(ValueError, match="finite int or float"):
+        SandboxConfig(tool_timeout_seconds="10")
+    with pytest.raises(ValueError, match="positive"):
+        SandboxConfig(decoy_seconds=0)
+    with pytest.raises(ValueError, match="positive"):
+        SandboxConfig(tool_timeout_seconds=-1)
+
+
+def test_cage_that_exits_at_startup_fails_closed(repo: Path):
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "exited", "ExitCode": 1}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with pytest.raises(SandboxError, match="exited during startup"), sandbox:
+        sandbox.open_cage()
+    assert sandbox.evidence.errors[0].code == "CAGE_START"
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert not sandbox.staged_path.parent.exists()
+
+
+def test_open_cage_and_run_command_are_mutually_exclusive(repo: Path, monkeypatch):
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        with pytest.raises(SandboxError, match="one command per sandbox"):
+            sandbox.run_command(["true"])
+    other = Sandbox(repo, client_factory=lambda: client)
+    with other:
+        other.run_command(["true"])
+        with pytest.raises(SandboxError, match="one cage per sandbox"):
+            other.open_cage()
+
+
+def test_exec_requires_an_open_cage(repo: Path):
+    client = fake_client()
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox, pytest.raises(SandboxError, match="open_cage"):
+        sandbox.exec(["true"])
+    assert sandbox.evidence.errors[0].code == "EXEC_ERROR"
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
+
+
+def test_exec_on_a_closed_cage_fails_closed(repo: Path, monkeypatch):
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+    with pytest.raises(SandboxError, match="open_cage"):
+        sandbox.exec(["true"])
+
+
+def test_exec_is_rejected_after_run_command(repo: Path, monkeypatch):
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.run_command(["true"])
+        with pytest.raises(SandboxError, match="not running"):
+            sandbox.exec(["true"])
+
+
+def test_exec_rejects_shell_strings_and_nul(repo: Path):
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        with pytest.raises(ValueError, match="never a shell string"):
+            sandbox.exec("echo hi")
+        with pytest.raises(ValueError, match="never a shell string"):
+            sandbox.exec(["true", "a\0b"])
+        with pytest.raises(ValueError, match="never a shell string"):
+            sandbox.exec([])
+
+
+def test_exec_timeout_kills_lingering_cage_processes(repo: Path, monkeypatch):
+    sweep_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "run.sandbox.capture_exec",
+        lambda api, exec_id, command, **kwargs: (
+            CommandResult(command=list(command), stderr=f"{EXEC_START_MARKER}\n"),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda attach_command, container_command, **kwargs: (
+            sweep_calls.append(list(attach_command)),
+            CommandResult(command=list(container_command), exit_code=0),
+        )[1],
+    )
+    client = fake_client()
+    exec_api(client, exit_code=137)
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sh", "-c", "sleep 100; echo done"])
+    assert result.timed_out
+    assert result.exit_code == 137
+    assert result.command == ["sh", "-c", "sleep 100; echo done"]
+    assert result.stderr == ""
+    wrapped = client.api.exec_create.call_args.args[1]
+    assert wrapped[-4:] == ["baitwatch-exec", "sh", "-c", "sleep 100; echo done"]
+    assert "timeout -s KILL" in wrapped[2]
+    options = client.api.exec_create.call_args.kwargs
+    assert options["user"] == "65532:65532" and options["workdir"] == "/repo"
+    assert options["privileged"] is False and options["stdin"] is False
+    assert len(sweep_calls) == 1
+    assert "/proc/[0-9]*" in sweep_calls[0][-1]
+    assert 'cat "$entry/stat"' in sweep_calls[0][-1]
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TIMEOUT"]
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
+
+
+def test_exec_kills_backgrounded_processes_after_a_clean_exit(repo: Path, monkeypatch):
+    sweep_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "run.sandbox.capture_exec",
+        lambda api, exec_id, command, **kwargs: (
+            CommandResult(command=list(command), stdout="started\n", stderr=EXEC_START_MARKER),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda attach_command, container_command, **kwargs: (
+            sweep_calls.append(list(attach_command)),
+            CommandResult(command=list(container_command), exit_code=0),
+        )[1],
+    )
+    client = fake_client()
+    exec_api(client, exit_code=0)
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sh", "-c", "sleep 100 & echo started"])
+    assert not result.timed_out
+    assert result.exit_code == 0
+    assert result.stderr == ""
+    assert len(sweep_calls) == 1
+    assert "/proc/[0-9]*" in sweep_calls[0][-1]
+    assert not sandbox.evidence.errors
+
+
+def _exec_with_results(
+    repo: Path,
+    monkeypatch,
+    capture: tuple,
+    *,
+    exit_code: int | None = 0,
+    running: bool = False,
+    inspect_failure=None,
+):
+    monkeypatch.setattr("run.sandbox.capture_exec", lambda *args, **kwargs: capture)
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["sh"], exit_code=0),
+    )
+    client = fake_client()
+    exec_api(client, exit_code=exit_code, running=running, inspect_failure=inspect_failure)
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sh", "-c", "echo hi"])
+    return sandbox, result
+
+
+def test_exec_output_truncation_fails_closed(repo: Path, monkeypatch):
+    sandbox, result = _exec_with_results(
+        repo,
+        monkeypatch,
+        (
+            CommandResult(
+                command=["sh"],
+                stdout="flood",
+                stderr=f"{EXEC_START_MARKER}\n",
+                output_truncated=True,
+            ),
+            None,
+        ),
+    )
+    assert result.output_truncated
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_OUTPUT_TRUNCATED"]
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
+    sandbox._client.api.exec_inspect.assert_not_called()
+
+
+def test_exec_stream_break_after_the_marker_is_a_transport_failure(repo: Path, monkeypatch):
+    sandbox, result = _exec_with_results(
+        repo,
+        monkeypatch,
+        (
+            CommandResult(command=["sh"], stdout="partial", stderr=f"{EXEC_START_MARKER}\n"),
+            RuntimeError("connection reset"),
+        ),
+        exit_code=0,
+    )
+    assert result.exit_code == 0  # docker's record survives the broken client
+    assert result.stdout == "partial"
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TRANSPORT_FAILED"]
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
+
+
+def test_exec_frame_cut_mid_payload_with_a_clean_record_is_a_transport_failure(
+    repo: Path,
+    monkeypatch,
+):
+    """The transport probe: a clean exec record must not pass for a delivered stream."""
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["sh"], exit_code=0),
+    )
+    client = fake_client()
+    exec_api(client, exit_code=0)
+    peer, end = socket.socketpair()
+    marker = f"{EXEC_START_MARKER}\n".encode()
+    peer.sendall(struct.pack(">BxxxL", 2, len(marker)) + marker)
+    peer.sendall(struct.pack(">BxxxL", 1, 12) + b"abc")  # declares 12 bytes, delivers 3
+    peer.close()
+    monkeypatch.setattr("run.capture._start_exec", lambda *args: end)
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sh", "-c", "echo hi"])
+    assert end.fileno() == -1
+    assert result.stdout == "abc"
+    assert result.exit_code == 0
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TRANSPORT_FAILED"]
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
+
+
+def test_exec_inspect_failure_is_a_transport_failure(repo: Path, monkeypatch):
+    sandbox, _ = _exec_with_results(
+        repo,
+        monkeypatch,
+        (CommandResult(command=["sh"], stderr=f"{EXEC_START_MARKER}\n"), None),
+        inspect_failure=APIError("exec record gone"),
+    )
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TRANSPORT_FAILED"]
+    assert sandbox.evidence.components.sandbox == State.ERROR
+
+
+def test_exec_still_running_after_the_stream_ends_is_a_transport_failure(repo: Path, monkeypatch):
+    sandbox, _ = _exec_with_results(
+        repo,
+        monkeypatch,
+        (CommandResult(command=["sh"], stderr=f"{EXEC_START_MARKER}\n"), None),
+        running=True,
+        exit_code=None,
+    )
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TRANSPORT_FAILED"]
+
+
+def test_exec_record_without_an_exit_code_is_a_transport_failure(repo: Path, monkeypatch):
+    sandbox, result = _exec_with_results(
+        repo,
+        monkeypatch,
+        (CommandResult(command=["sh"], stderr=f"{EXEC_START_MARKER}\n"), None),
+        exit_code=None,
+    )
+    assert result.exit_code is None
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TRANSPORT_FAILED"]
+
+
+def test_exec_without_the_start_marker_is_a_transport_failure(repo: Path, monkeypatch):
+    sandbox, _ = _exec_with_results(repo, monkeypatch, (CommandResult(command=["sh"]), None))
+    assert [error.code for error in sandbox.evidence.errors] == ["EXEC_TRANSPORT_FAILED"]
+    assert "did not reach the cage" in sandbox.evidence.errors[0].message
+
+
+def test_exec_create_failure_fails_closed(repo: Path):
+    client = fake_client()
+    client.api.exec_create.side_effect = APIError("daemon refused the exec")
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        with pytest.raises(SandboxError, match="daemon refused"):
+            sandbox.exec(["true"])
+    assert sandbox.evidence.errors[0].code == "EXEC_ERROR"
+    assert sandbox.evidence.components.sandbox == State.ERROR
+
+
+@pytest.mark.parametrize("exit_code", [1, 125, 126, 127])
+def test_exec_tool_exit_codes_are_not_transport_failures(repo: Path, monkeypatch, exit_code):
+    sandbox, result = _exec_with_results(
+        repo,
+        monkeypatch,
+        (CommandResult(command=["sh"], stderr=f"{EXEC_START_MARKER}\ntool boom\n"), None),
+        exit_code=exit_code,
+    )
+    assert result.exit_code == exit_code
+    assert result.stderr == "tool boom\n"
+    assert not sandbox.evidence.errors
+
+
+def test_cage_that_dies_during_a_tool_call_fails_closed(repo: Path, monkeypatch):
+    client = fake_client()
+    exec_api(client, exit_code=137)
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+
+    def fake_capture_exec(api, exec_id, command, **kwargs):
+        client.containers.create.return_value.attrs = {
+            "State": {"Status": "exited", "ExitCode": 137}
+        }
+        return CommandResult(command=["sleep"], stderr=f"{EXEC_START_MARKER}\n"), None
+
+    monkeypatch.setattr("run.sandbox.capture_exec", fake_capture_exec)
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        result = sandbox.exec(["sleep", "100"])
+    assert result.timed_out
+    assert sandbox.evidence.errors[0].code == "CAGE_EXITED"
+    assert sandbox.evidence.components.sandbox == State.ERROR
+    assert sandbox.evidence.status == "error"
+
+
+def test_failed_cleanup_after_a_timeout_fails_closed(repo: Path, monkeypatch):
+    monkeypatch.setattr(
+        "run.sandbox.capture_exec",
+        lambda api, exec_id, command, **kwargs: (
+            CommandResult(command=list(command), stderr=EXEC_START_MARKER),
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["sh"], exit_code=1, stderr="cannot kill"),
+    )
+    client = fake_client()
+    exec_api(client, exit_code=137)
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        sandbox.exec(["sleep", "100"])
+    assert [error.code for error in sandbox.evidence.errors] == [
+        "EXEC_KILL_FAILED",
+        "EXEC_TIMEOUT",
+    ]
+    assert sandbox.evidence.components.sandbox == State.ERROR
+
+
+def test_the_kill_sweep_skips_only_zombies():
+    # A live process can have an empty cmdline (execve with no argv), so liveness
+    # is decided by the state field in /proc/<pid>/stat, never by cmdline. The
+    # whole stat record is read: a single-line read would stop inside a comm
+    # containing a newline and could mistake a live process for a zombie.
+    assert 'cat "$entry/stat"' in KILL_LINGERING
+    assert "read -r stat" not in KILL_LINGERING
+    assert '"Z"' in KILL_LINGERING
+    assert "cmdline" not in KILL_LINGERING
+    assert '"1"' in KILL_LINGERING and '"$$"' in KILL_LINGERING

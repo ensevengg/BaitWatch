@@ -377,9 +377,28 @@ def test_http_headers_truncated_is_surfaced_in_detail(tmp_path):
         tmp_path / "sink.jsonl", [http_record(headers_truncated=True, body="", raw="GET /x EXTRA")]
     )
     log = read_sink_log(path)
-    assert not log.problems
+    assert len(log.problems) == 1
+    assert "http capture is incomplete" in log.problems[0]
     assert "headers_truncated" in log.http_hits[0].detail
     assert "raw=GET /x EXTRA" in log.http_hits[0].detail
+
+
+@pytest.mark.parametrize("overrides", [{"body_truncated": True}, {"headers_truncated": True}])
+def test_http_truncation_flags_keep_the_hit_and_add_a_problem(tmp_path, overrides):
+    path = write_log(tmp_path / "sink.jsonl", [http_record(**overrides)])
+    log = read_sink_log(path)
+    assert len(log.http_hits) == 1
+    assert log.http_hits[0].destination == "exfil.evil.example/collect"
+    assert len(log.problems) == 1
+    assert log.problems[0].startswith("line 1: http capture is incomplete")
+
+
+def test_http_record_without_any_truncation_flag_is_no_problem(tmp_path):
+    path = write_log(
+        tmp_path / "sink.jsonl", [http_record(body_truncated=False, headers_truncated=False)]
+    )
+    log = read_sink_log(path)
+    assert not log.problems and len(log.http_hits) == 1
 
 
 def test_http_record_without_headers_truncated_is_a_problem(tmp_path):

@@ -204,59 +204,67 @@ def label_text(label):
     return label.decode("utf-8", errors="backslashreplace")
 
 
-def log_query(log, source_ip, packet, parsed):
+def log_query(log, source_ip, packet, parsed, *, capture_incomplete=False):
     question, labels, qtype = parsed
     decoded = []
     for label in labels:
         decoded.extend(decode_label(label_text(label)))
         if len(decoded) >= DECODED_LIMIT:
             break
-    log.write(
-        {
-            "kind": "dns",
-            "ts": time.time(),
-            "source_ip": source_ip,
-            "qname": ".".join(label_text(label) for label in labels)[:500],
-            "qtype": QTYPE_NAMES.get(qtype, qtype),
-            "decoded": decoded[:DECODED_LIMIT],
-        }
-    )
+    record = {
+        "kind": "dns",
+        "ts": time.time(),
+        "source_ip": source_ip,
+        "qname": ".".join(label_text(label) for label in labels)[:500],
+        "qtype": QTYPE_NAMES.get(qtype, qtype),
+        "decoded": decoded[:DECODED_LIMIT],
+    }
+    if capture_incomplete:
+        record["capture_incomplete"] = True
+    log.write(record)
 
 
-def handle_query(log, sock, answer, packet, source):
+def handle_query(log, sock, answer, packet, source, *, capture_incomplete=False):
     logged = False
     try:
         parsed = parse_query(packet)
         if parsed is None:
-            log_unparsed(log, source[0], packet)
+            log_unparsed(log, source[0], packet, capture_incomplete=capture_incomplete)
             return
-        log_query(log, source[0], packet, parsed)
+        log_query(log, source[0], packet, parsed, capture_incomplete=capture_incomplete)
         logged = True
         sock.sendto(build_response(packet[:2], parsed[0], parsed[2], answer), source)
     except Exception:
         # Attacker-controlled input must never stop the sink or vanish unlogged.
         if not logged:
             with contextlib.suppress(Exception):
-                log_unparsed(log, source[0], packet)
+                log_unparsed(log, source[0], packet, capture_incomplete=capture_incomplete)
+
+
+def receive(sock):
+    """(packet, source, truncated): truncated is the kernel's MSG_TRUNC, i.e.
+    bytes the sink never received, not a peer that merely sent a short query."""
+    packet, _ancillary, flags, source = sock.recvmsg(PACKET_LIMIT)
+    return packet, source, bool(flags & socket.MSG_TRUNC)
 
 
 def serve(log, sock, answer, stopping):
     while not stopping.is_set():
         try:
-            packet, source = sock.recvfrom(PACKET_LIMIT)
+            packet, source, truncated = receive(sock)
         except TimeoutError:
             continue
         except OSError:
             os._exit(1)  # a dead socket must not look like a clean stop
-        handle_query(log, sock, answer, packet, source)
+        handle_query(log, sock, answer, packet, source, capture_incomplete=truncated)
     # Datagrams queued when the stop arrived are contacts too; drain them.
     sock.setblocking(False)
     while True:
         try:
-            packet, source = sock.recvfrom(PACKET_LIMIT)
+            packet, source, truncated = receive(sock)
         except OSError:
             break
-        handle_query(log, sock, answer, packet, source)
+        handle_query(log, sock, answer, packet, source, capture_incomplete=truncated)
 
 
 def read_exact(conn, count):

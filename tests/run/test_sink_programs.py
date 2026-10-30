@@ -1,6 +1,7 @@
 """The sink programs run as real subprocesses here; Docker integration is separate."""
 
 import base64
+import contextlib
 import http.client
 import importlib.util
 import json
@@ -411,6 +412,8 @@ def test_http_contact_that_stalls_mid_head_is_still_logged(http_sink):
     assert hits, "a stalled partial request was never logged"
     assert hits[-1]["method"] == "" and hits[-1]["path"] == ""
     assert hits[-1]["raw"].startswith("GET /stalled HTTP/1.1")
+    # Everything the peer sent was captured, so the head is not flagged incomplete.
+    assert hits[-1]["headers_truncated"] is False
 
 
 def test_tls_contact_that_stalls_mid_clienthello_is_still_logged(http_sink):
@@ -570,9 +573,10 @@ def test_read_head_applies_the_limit_to_the_head_not_coalesced_body_bytes():
     full = padded_head(32_000)
     body = b"B" * 5000
     conn = SegmentedConn([full[:31_000], full[31_000:] + body])
-    head, raw = module.read_head(conn)
+    head, raw, truncated = module.read_head(conn)
     assert raw is None
     assert head is not None
+    assert truncated is False
     assert len(head[0]) + len(head[1]) == 32_000
     assert head[0].startswith(b"POST /big HTTP/1.1\r\nHost: big.evil.example\r\n")
     assert head[2] == body[: len(head[2])]
@@ -583,11 +587,34 @@ def test_read_head_stays_bounded_when_the_head_exceeds_the_limit():
     module = load_sink_module("http_sink.py")
     full = padded_head(module.HEAD_LIMIT + 1000)
     conn = SegmentedConn([full + b"B" * 5000])
-    head, raw = module.read_head(conn)
+    head, raw, truncated = module.read_head(conn)
     assert head is None
     assert raw is not None
+    assert truncated is True
     assert len(raw) <= module.HEAD_LIMIT + 4096
     assert conn.consumed <= module.HEAD_LIMIT + 4096
+
+
+def test_read_head_reports_a_stalled_head_as_not_truncated():
+    module = load_sink_module("http_sink.py")
+    conn = SegmentedConn([b"GET /stalled HTTP/1.1\r\nHost: x"])  # peer stops mid-head
+    head, raw, truncated = module.read_head(conn)
+    assert head is None and raw is not None and truncated is False
+
+
+def test_http_head_past_the_limit_sets_an_incomplete_flag(http_sink):
+    module = load_sink_module("http_sink.py")
+    raw_http_exchange(
+        http_sink["http_port"],
+        b"POST /jumbo HTTP/1.1\r\nHost: jumbo.evil.example\r\nX-Pad: "
+        + b"x" * (module.HEAD_LIMIT + 4096)
+        + b"\r\n\r\n",
+    )
+    hit = next(record for record in read_records(http_sink["log"], "http") if record["path"] == "")
+    assert hit["method"] == ""
+    assert hit["headers_truncated"] is True
+    assert hit["body_truncated"] is False
+    assert hit["raw"].startswith("POST /jumbo")
 
 
 def test_decode_label_recovers_lower_and_mixed_case_base32():
@@ -640,8 +667,11 @@ def test_dns_decodes_lowercase_base32_label(dns_sink):
 def raw_http_exchange(port: int, payload: bytes) -> None:
     with socket.create_connection(("127.0.0.1", port), timeout=SINK_TIMEOUT) as sock:
         sock.sendall(payload)
-        while sock.recv(4096):
-            pass
+        # A head past the capture limit leaves unread bytes, so the sink's close
+        # resets the connection; the probe only needs the bytes delivered.
+        with contextlib.suppress(OSError):
+            while sock.recv(4096):
+                pass
 
 
 def test_raw_preview_limits_raw_bytes_before_escaping():
@@ -851,6 +881,77 @@ def test_dns_udp_question_truncated_before_qclass_is_logged_as_unparsed(dns_sink
     assert hits[0]["source_ip"] == "127.0.0.1"
     assert hits[0]["qtype"] == "unknown"
     assert "truncated-secret" in hits[0]["raw"]
+
+
+def test_dns_udp_datagram_larger_than_the_receive_buffer_flags_incomplete(dns_sink):
+    module = load_sink_module("dns_sink.py")
+    query = build_dns_query(b"\x77\x88", "jumbo.evil.example")
+    packet = query + b"\x00" * (module.PACKET_LIMIT + 512)
+    assert len(packet) > module.PACKET_LIMIT
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(SINK_TIMEOUT)
+        sock.sendto(packet, ("127.0.0.1", dns_sink["port"]))
+        response, _ = sock.recvfrom(4096)
+    assert response[:2] == b"\x77\x88"  # the captured prefix still gets its answer
+    hit = next(
+        record
+        for record in read_records(dns_sink["log"], "dns")
+        if record["qname"] == "jumbo.evil.example"
+    )
+    assert hit["qtype"] == "A"
+    assert hit["capture_incomplete"] is True
+
+
+def test_dns_udp_truncated_garbage_datagram_flags_incomplete(dns_sink):
+    module = load_sink_module("dns_sink.py")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.sendto(b"\x99" * (module.PACKET_LIMIT + 64), ("127.0.0.1", dns_sink["port"]))
+    hits = wait_for_unparsed_dns(dns_sink["log"])
+    assert hits, "a truncated garbage datagram was never logged"
+    assert hits[-1]["capture_incomplete"] is True
+    assert hits[-1]["raw"].startswith("\\x99")
+
+
+def test_serve_marks_datagrams_the_kernel_truncated():
+    module = load_sink_module("dns_sink.py")
+    records = []
+    answers = []
+
+    class Log:
+        def write(self, record):
+            records.append(record)
+
+    class FakeUdpSock:
+        def __init__(self, packet, flags):
+            self._packet = packet
+            self._flags = flags
+            self.nonblocking = False
+
+        def recvmsg(self, size):
+            if self.nonblocking:
+                raise BlockingIOError  # a drained nonblocking socket has no datagram
+            return self._packet[:size], [], self._flags, ("127.0.0.1", 5353)
+
+        def setblocking(self, blocking):
+            self.nonblocking = not blocking
+
+        def sendto(self, payload, destination):
+            answers.append(payload)
+
+    stopping = threading.Event()
+
+    class StopAfterOne(FakeUdpSock):
+        def recvmsg(self, size):
+            stopping.set()
+            return super().recvmsg(size)
+
+    query = build_dns_query(b"\x01\x02", "jumbo.evil.example")
+    sock = StopAfterOne(query + b"\x00" * 5000, socket.MSG_TRUNC)
+    module.serve(Log(), sock, socket.inet_aton(SINK_ANSWER), stopping)
+    assert len(records) == 1
+    assert records[0]["qname"] == "jumbo.evil.example"
+    assert records[0]["capture_incomplete"] is True
+    assert answers and answers[0][:2] == b"\x01\x02"
 
 
 def test_dns_udp_random_garbage_is_logged_as_unparsed(dns_sink):
