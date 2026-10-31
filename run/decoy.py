@@ -138,7 +138,9 @@ def _run_tool(sandbox: Sandbox, call: ToolCall) -> tuple[CommandResult, str]:
         return _failed_call(name, f"{name} argument must not contain NUL")
     result = sandbox.exec(_argv(name, value))
     # tool_log records what the decoy asked for; the exec kept the cage-side argv.
-    return result.model_copy(update={"command": [name, value]}), _feedback(result)
+    return CommandResult.model_validate(
+        {**result.model_dump(), "command": [name, value]}
+    ), _feedback(result)
 
 
 def _assistant_message(reply: LLMReply) -> dict[str, Any]:
@@ -165,8 +167,8 @@ def run_decoy(
 ) -> None:
     """Drive the model loop; runtime failures are recorded fail-closed.
 
-    COMPLETE means the loop ended without a model or cage error, whether the
-    model finished or spent its step budget. Invalid arguments raise ValueError
+    COMPLETE requires the model to finish within its step budget without a
+    model or cage error. Invalid arguments raise ValueError
     before anything runs. The decoy alone never makes a run ALLOW; it only
     fills the evidence.
     """
@@ -182,6 +184,7 @@ def run_decoy(
         {"role": "user", "content": _user_prompt(task)},
     ]
     tools = _tools()
+    calls = 0
     try:
         for _ in range(max_steps):
             _check_cage(sandbox, deadline)
@@ -191,6 +194,12 @@ def run_decoy(
                 break
             messages.append(_assistant_message(reply))
             for call in reply.tool_calls:
+                _check_cage(sandbox, deadline)
+                if calls >= max_steps:
+                    raise _DecoyFailure(
+                        "DECOY_STEP_BUDGET", "the decoy exhausted its tool-call budget"
+                    )
+                calls += 1
                 result, feedback = _run_tool(sandbox, call)
                 evidence.tool_log.append(result)
                 if len(evidence.errors) > baseline_errors:
@@ -198,6 +207,8 @@ def run_decoy(
                     # continuing would let the loop end COMPLETE over it.
                     raise RuntimeError("the sandbox recorded an error during a tool call")
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": feedback})
+        else:
+            raise _DecoyFailure("DECOY_STEP_BUDGET", "the decoy exhausted its step budget")
         _check_cage(sandbox, deadline)
     except Exception as exc:
         evidence.components.decoy = State.ERROR

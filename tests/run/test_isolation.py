@@ -293,3 +293,21 @@ def test_detonate_success_is_still_incomplete(repo: Path, engine):
     # Plain JSON consumers must see that remaining components have not run.
     data = json.loads(evidence.model_dump_json())
     assert data["components"]["decoy"] == "not_run"
+
+
+def test_repository_file_growth_is_bounded_and_recorded(repo: Path, engine):
+    from run.staging import StagingLimits
+
+    config = SandboxConfig(image=PYTHON_IMAGE, staging=StagingLimits(max_file_bytes=4096))
+    sandbox = Sandbox(repo, config)
+    with sandbox:
+        sandbox.trace_before()
+        result = sandbox.run_command(
+            ["sh", "-c", "dd if=/dev/zero of=/repo/flood bs=1024 count=32 2>/dev/null; true"]
+        )
+        assert result.exit_code == 0
+        assert (sandbox.staged_path / "flood").stat().st_size <= 4096
+        sandbox.trace_after()
+    assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
+    assert sandbox.evidence.status == "error"
+    assert_resources_removed(engine, sandbox)

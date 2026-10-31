@@ -30,7 +30,8 @@ cuda = ["torch"]
 conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
 
 [project.scripts]
-# `baitwatch` itself is reserved for the fused READ + RUN CLI.
+# `baitwatch` is the fused READ + RUN CLI; its scan command lives in run/.
+baitwatch = "run.scan_cli:app"
 baitwatch-read = "read.cli:main"
 baitwatch-run = "run.cli:app"
 baitwatch-hook = "hooks.cli:main"

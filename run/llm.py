@@ -143,6 +143,13 @@ class OpenAICompatBackend:
             raise ValueError("api_key_env must be a nonempty environment variable name")
         if seed is not None and (type(seed) is not int or seed < 0):
             raise ValueError("seed must be a non-negative integer or None")
+        endpoint = urllib.parse.urlsplit(self.base_url)
+        if (
+            api_key_env is not None
+            and endpoint.scheme == "http"
+            and endpoint.hostname not in {"localhost", "127.0.0.1"}
+        ):
+            raise ValueError("API keys require HTTPS except on localhost or 127.0.0.1")
         self.model = model
         self.api_key_env = api_key_env
         self.temperature = _finite_number("temperature", temperature, allow_zero=True)
@@ -151,7 +158,13 @@ class OpenAICompatBackend:
         self.max_calls = _positive_int("max_calls", max_calls)
         self.max_response_bytes = _positive_int("max_response_bytes", max_response_bytes)
         self._calls = 0
-        self._opener = urllib.request.build_opener(_NoRedirects())
+        if api_key_env is not None and endpoint.scheme == "http":
+            # The localhost HTTP exception must not send credentials through a proxy.
+            self._opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), _NoRedirects()
+            )
+        else:
+            self._opener = urllib.request.build_opener(_NoRedirects())
 
     def __repr__(self) -> str:
         return (
@@ -164,6 +177,13 @@ class OpenAICompatBackend:
             raise LLMError(f"LLM call budget of {self.max_calls} is exhausted")
         self._calls += 1
         api_key = self._api_key()
+        endpoint = urllib.parse.urlsplit(self.base_url)
+        if (
+            api_key is not None
+            and endpoint.scheme == "http"
+            and endpoint.hostname not in {"localhost", "127.0.0.1"}
+        ):
+            raise LLMError("API keys require HTTPS except on localhost or 127.0.0.1")
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,

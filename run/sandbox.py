@@ -13,10 +13,10 @@ from pathlib import Path
 
 import docker
 from docker.errors import APIError, DockerException, NotFound
-from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount
+from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount, Ulimit
 
 from run.capture import capture_attached, capture_exec
-from run.evidence import CommandResult, FileDiff, RunError, RunEvidence, State
+from run.evidence import CommandResult, FileDiff, RunError, RunEvidence, State, safe_text
 from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
@@ -40,17 +40,29 @@ SINK_POLL_SECONDS = 0.05
 # sits after the last ')' of comm, which may itself contain parens or a
 # newline, so the whole record is read at once; an unreadable or malformed
 # record yields no Z and is killed like a live process.
+# Busybox's timeout watchdog notices a finished parent on its next 1s tick.
 KILL_LINGERING = (
-    "round=0; "
+    "poll=0; "
+    "while [ $poll -lt 25 ]; do alive=0; "
+    "for entry in /proc/[0-9]*; do pid=${entry#/proc/}; "
+    'if [ "$pid" != "1" ] && [ "$pid" != "$$" ]; then '
+    'stat=$(cat "$entry/stat" 2>/dev/null); '
+    "state=${stat##*) }; state=${state%% *}; "
+    'if [ "$state" != "Z" ]; then alive=1; fi; fi; '
+    "done; "
+    'if [ "$alive" -eq 0 ]; then exit 0; fi; '
+    "poll=$((poll + 1)); sleep 0.1; done; "
+    "round=0; killed=0; "
     "while [ $round -lt 3 ]; do "
     "alive=0; "
     "for entry in /proc/[0-9]*; do pid=${entry#/proc/}; "
     'if [ "$pid" != "1" ] && [ "$pid" != "$$" ]; then '
     'stat=$(cat "$entry/stat" 2>/dev/null); '
     "state=${stat##*) }; state=${state%% *}; "
-    'if [ "$state" != "Z" ]; then alive=1; kill -KILL "$pid" 2>/dev/null; fi; fi; '
+    'if [ "$state" != "Z" ]; then alive=1; '
+    'if kill -KILL "$pid" 2>/dev/null; then killed=2; fi; fi; fi; '
     "done; "
-    'if [ "$alive" -eq 0 ]; then exit 0; fi; '
+    'if [ "$alive" -eq 0 ]; then exit "$killed"; fi; '
     "round=$((round + 1)); sleep 1; "
     "done; exit 1"
 )
@@ -293,9 +305,10 @@ class Sandbox:
                 raise SandboxError("Linux containers are required")
             self._client.images.get(self.config.image)
             self._temporary = Path(tempfile.mkdtemp(prefix="bw-stage-"))
-            self.evidence.staging_exclusions = stage_repository(
-                self.path, self.staged_path, self.config.staging
-            )
+            self.evidence.staging_exclusions = [
+                safe_text(path)
+                for path in stage_repository(self.path, self.staged_path, self.config.staging)
+            ]
             self._subnet = self._create_network()
             self._open = True
             return self
@@ -355,6 +368,15 @@ class Sandbox:
             memswap_limit=config.memory_bytes,
             nano_cpus=config.nano_cpus,
             pids_limit=config.pids_limit,
+            ulimits=[
+                Ulimit(
+                    name="fsize",
+                    soft=config.staging.max_file_bytes,
+                    hard=config.staging.max_file_bytes,
+                )
+            ]
+            if role == "cage"
+            else None,
             tmpfs={"/tmp": f"rw,noexec,nosuid,nodev,size={config.tmpfs_bytes},mode=1777"},
             log_config=LogConfig(type="json-file", config={"max-size": "1m", "max-file": "1"}),
             restart_policy={"Name": "no"},
@@ -617,6 +639,21 @@ class Sandbox:
         self.evidence.file_diffs = [
             FileDiff(path=path, change=change) for path, change in diff(self._trace_before, after)
         ]
+        limits = self.config.staging
+        if (
+            len(after) > limits.max_entries
+            or sum(entry.size for entry in after.values() if entry.kind == "file")
+            > limits.max_bytes
+            or any(
+                entry.kind == "file"
+                and entry.size >= limits.max_file_bytes
+                and self._trace_before.get(path) != entry
+                for path, entry in after.items()
+            )
+        ):
+            self._error(
+                "REPO_WRITE_LIMIT", "staged repository reached a file, total byte or entry limit"
+            )
         marked = sorted(set(error_paths(self._trace_before)) | set(error_paths(after)))
         if marked:
             # The diffs are still evidence, but a snapshot that could not read
@@ -694,8 +731,10 @@ class Sandbox:
         except Exception as exc:
             self._error("EXEC_KILL_FAILED", str(exc))
             return
-        if result.timed_out or result.output_truncated or result.exit_code != 0:
+        if result.timed_out or result.output_truncated or result.exit_code not in (0, 2):
             self._error("EXEC_KILL_FAILED", "could not kill lingering processes inside the cage")
+        elif result.exit_code == 2:
+            self._error("EXEC_LINGERING_KILLED", "tool call left live background processes to kill")
 
     def _confirm_exec(self, exec_id, result: CommandResult, reached: bool, failure) -> None:
         """Docker's own exec record is the only proof a stream end was the exit.
@@ -709,7 +748,14 @@ class Sandbox:
         if result.timed_out or result.output_truncated:
             return
         try:
-            record = self._client.api.exec_inspect(exec_id)
+            deadline = time.monotonic() + 2.0
+            for _ in range(41):
+                record = self._client.api.exec_inspect(exec_id)
+                if not isinstance(record, dict) or record.get("Running") is not True:
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.05)
         except Exception as exc:
             self._error("EXEC_TRANSPORT_FAILED", f"docker's exec record could not be read: {exc}")
             return
@@ -1068,28 +1114,34 @@ def detonate(
     sandbox = Sandbox(path, config)
     try:
         with sandbox:
-            sandbox.start_sinks()
-            sandbox.trace_before()
-            if backend is None:
-                sandbox.run_command(command)
-            else:
-                sandbox.open_cage()
-                # Imported here: run.decoy imports this module for Sandbox.
-                from run.decoy import run_decoy
+            try:
+                sandbox.start_sinks()
+                sandbox.trace_before()
+                if backend is None:
+                    sandbox.run_command(command)
+                else:
+                    sandbox.open_cage()
+                    # Imported here: run.decoy imports this module for Sandbox.
+                    from run.decoy import run_decoy
 
-                run_decoy(sandbox, backend, max_steps=max_steps)
-                # A failed decoy must never be upgraded: only a clean loop
-                # that left the sandbox component untouched proves the cage ran.
-                if (
-                    sandbox.evidence.components.sandbox == State.NOT_RUN
-                    and sandbox.evidence.components.decoy == State.COMPLETE
-                ):
-                    if sandbox.cage_running():
-                        sandbox.evidence.components.sandbox = State.COMPLETE
-                    else:
-                        sandbox._error("CAGE_EXITED", "the cage stopped before the decoy completed")
-            sandbox.collect_sinks()
-            sandbox.trace_after()
+                    run_decoy(sandbox, backend, max_steps=max_steps)
+                    # A failed decoy must never be upgraded: only a clean loop
+                    # that left the sandbox component untouched proves the cage ran.
+                    if (
+                        sandbox.evidence.components.sandbox == State.NOT_RUN
+                        and sandbox.evidence.components.decoy == State.COMPLETE
+                    ):
+                        if sandbox.cage_running():
+                            sandbox.evidence.components.sandbox = State.COMPLETE
+                        else:
+                            sandbox._error(
+                                "CAGE_EXITED", "the cage stopped before the decoy completed"
+                            )
+            finally:
+                try:
+                    sandbox.collect_sinks()
+                finally:
+                    sandbox.trace_after()
     except Exception as exc:
         if not sandbox.evidence.errors:
             sandbox._error("DETONATION_ERROR", str(exc))
