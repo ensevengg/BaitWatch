@@ -63,29 +63,35 @@ GET/HEAD shape; uploads, queries and incomplete captures still BLOCK).
 A registry TLS contact is likewise exempt only with an exact registry SNI, a
 complete capture, and trusted hello-only evidence. The TLS sink records the
 first record length (`hello_record_length`), the total bytes received before
-it closed the connection (`total_bytes`, after a drain window of at most one
-second and 16 KiB past the hello), the count and a bounded hex prefix of any
-bytes after that record, a hex copy of every received byte (`capture_hex`,
-bounded by the 64 KiB read limit and the drain limit, and marked
-`capture_incomplete` when either limit is hit), and `hello_only`.
-`hello_only` is true only when the received bytes are exactly one TLS record
-holding a single complete ClientHello, the record version is `0x0301` or
-`0x0303`, the record payload is at most 2^14 bytes, the whole record is at
-most 2048 bytes, and the ClientHello body validates: legacy version
-`0x0301`–`0x0303`, a session id of at most 32 bytes, a non-empty even-length
-cipher-suite list, a compression list containing the null method, and an
-extensions block whose lengths exactly consume the body with zero-filled
-padding. Extra records, coalesced or trailing bytes, a hello split across
-records, and unparseable, truncated or oversize captures are false. TLS hits
-carry this as `NetworkHit.hello_only` (also in the JSON schema); records
-without it are never exempt. Registry TLS without that proof remains an
-attempt (FLAG); missing/mismatched SNI and incomplete captures still BLOCK.
-Known limit: within the 2048-byte record cap, a crafted ClientHello could
-still carry data to an exact registry host in its 32-byte random, a session
-id of up to 32 bytes, its cipher/compression lists and its extension bytes
-(including unknown or GREASE extensions and key shares); all of those fields
-together are bounded by that cap, and the whole capture is searched for
-honeytokens.
+it closed the connection (`total_bytes`, after the sink answers a validated
+hello with a fatal `handshake_failure` alert and then drains for at most one
+second and 16 KiB past the hello, until the peer closes or the window
+expires), the count and a bounded hex prefix of any bytes after that record,
+a hex copy of every received byte (`capture_hex`, bounded by the 64 KiB read
+limit and the drain limit, and marked `capture_incomplete` when either limit
+is hit), and `hello_only`. `hello_only` is true only when the received bytes
+are exactly one TLS record holding a single complete ClientHello, the record
+version is `0x0301` or `0x0303`, the record payload is at most 2^14 bytes,
+the whole record is at most 2048 bytes, the ClientHello body validates:
+legacy version `0x0301`–`0x0303`, a session id of at most 32 bytes, a
+non-empty even-length cipher-suite list, a compression list containing the
+null method, and an extensions block whose lengths exactly consume the body
+with zero-filled padding, and the peer reached EOF or reset inside that
+window. Extra records, coalesced or trailing bytes, a hello split across
+records, unparseable, truncated or oversize captures, and a peer still
+connected when the window expires are all false. TLS hits carry this as
+`NetworkHit.hello_only` (also in the JSON schema); records without it are
+never exempt. Registry TLS without that proof remains an attempt (FLAG);
+missing/mismatched SNI and incomplete captures still BLOCK.
+Known limit: a validated hello-only ClientHello can still carry up to about
+2 KB of client-chosen bytes to an exact registry host, spread across its
+32-byte random, a session id of up to 32 bytes, the cipher and compression
+lists and the extension bytes (including unknown or GREASE extensions and key
+shares); all of those fields together are bounded by that cap. The capture is
+searched for honeytokens in plain, URL-encoded, base64, base32 and hex forms;
+XOR or other custom encodings and a token split across two separate
+connections are not detected. In a real environment those bytes reach only
+the registry host.
 
 Non-registry contacts and network honeytoken hits always BLOCK. A honeytoken
 hit over DNS, HTTP or TLS takes precedence over any registry exemption.

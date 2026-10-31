@@ -141,17 +141,25 @@ GET/HEAD shape; uploads, queries and incomplete captures still BLOCK).
 A registry TLS contact is likewise exempt only with an exact registry SNI, a
 complete capture, and trusted hello-only evidence. The TLS sink records the
 first record length (`hello_record_length`), the total bytes received before
-it closed the connection (`total_bytes`, after a drain window of at most one
-second and 16 KiB past the hello), the count and a bounded hex prefix of any
-bytes after that record, and `hello_only`. `hello_only` is true only when the
-received bytes are exactly one TLS record holding a single complete
-ClientHello; extra records, coalesced or trailing bytes, a hello split across
-records, and unparseable, truncated or oversize captures are false. TLS hits
-carry this as `NetworkHit.hello_only` (also in the JSON schema); records
-without it are never exempt. Registry TLS without that proof remains an
-attempt (FLAG); missing/mismatched SNI and incomplete captures still BLOCK.
-Known limit: a crafted ClientHello random or session field could carry a few
-bytes to an exact registry host even in a hello-only contact.
+it closed the connection (`total_bytes`, after the sink answers a validated
+hello with a fatal alert and then drains for at most one second and 16 KiB
+past the hello, until the peer closes or the window expires), the count and a
+bounded hex prefix of any bytes after that record, and `hello_only`.
+`hello_only` is true only when the received bytes are exactly one TLS record
+holding a single complete ClientHello and the peer reached EOF or reset
+inside that window; extra records, coalesced or trailing bytes, a hello split
+across records, unparseable, truncated or oversize captures, and a peer still
+connected when the window expires are all false. TLS hits carry this as
+`NetworkHit.hello_only` (also in the JSON schema); records without it are
+never exempt. Registry TLS without that proof remains an attempt (FLAG);
+missing/mismatched SNI and incomplete captures still BLOCK.
+Known limit: a validated hello-only ClientHello can still carry up to about
+2 KB of client-chosen bytes to an exact registry host, across its random,
+session id, cipher and compression lists and extension bytes. The honeytoken
+search finds those bytes in plain, URL-encoded, base64, base32 and hex forms;
+XOR or other custom encodings and a token split across two separate
+connections are not detected. In a real environment those bytes reach only
+the registry host.
 
 Non-registry contacts and network honeytoken hits always BLOCK. A honeytoken
 hit over DNS, HTTP or TLS takes precedence over any registry exemption.

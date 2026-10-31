@@ -26,6 +26,10 @@ BODY_LIMIT = 64 * 1024
 TLS_READ_LIMIT = 64 * 1024
 TLS_DRAIN_SECONDS = 1.0
 TLS_DRAIN_LIMIT = 16 * 1024
+# Fatal handshake_failure is the one alert every TLS stack answers by giving up
+# and closing; a warning-level alert would leave clients waiting for a
+# ServerHello the sink never sends.
+TLS_FATAL_ALERT = b"\x15\x03\x03\x00\x02\x02\x28"
 MAX_RECORD_PAYLOAD = 16 * 1024
 MAX_HELLO_ONLY_RECORD = 2048
 EXTRA_PREFIX_BYTES = 16
@@ -389,7 +393,14 @@ def handle_tls(conn, addr, log):
         if client_hello_done(bytes(buffer)):
             break
     single_length = _single_hello_record_length(bytes(buffer))
+    peer_finished = False
     if single_length is not None:
+        # The alert makes an honest client close at once, so the drain can end
+        # at a real EOF; a peer still holding the connection past the window
+        # may be keeping bytes for after the close and never counts as
+        # hello-only.
+        with contextlib.suppress(OSError):
+            conn.sendall(TLS_FATAL_ALERT)
         deadline = time.monotonic() + TLS_DRAIN_SECONDS
         while len(buffer) < TLS_READ_LIMIT and len(buffer) - single_length < TLS_DRAIN_LIMIT:
             remaining = deadline - time.monotonic()
@@ -398,9 +409,13 @@ def handle_tls(conn, addr, log):
             conn.settimeout(remaining)
             try:
                 chunk = conn.recv(min(4096, TLS_DRAIN_LIMIT - (len(buffer) - single_length)))
-            except OSError:
+            except ConnectionResetError:
+                peer_finished = True  # an RST discards everything still in flight
                 break
+            except OSError:
+                break  # the window expired; the peer may still be holding bytes
             if not chunk:
+                peer_finished = True
                 break
             buffer.extend(chunk)
     data = bytes(buffer)
@@ -411,7 +426,7 @@ def handle_tls(conn, addr, log):
         "ts": time.time(),
         "source_ip": addr[0],
         "sni": parse_sni(data),
-        "hello_only": single_length is not None and len(data) == single_length,
+        "hello_only": single_length is not None and len(data) == single_length and peer_finished,
         "hello_record_length": record_length,
         "total_bytes": len(data),
         "extra_bytes": len(extra),
