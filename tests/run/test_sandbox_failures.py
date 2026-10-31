@@ -725,6 +725,65 @@ def test_trace_incomplete_names_a_bounded_set_of_paths(repo: Path, monkeypatch):
     assert len(message) <= 1000
 
 
+def _planted_manifest() -> dict:
+    return {
+        ".env": Entry(kind="file", mode=0o666, size=64, sha256="1" * 64),
+        ".env.local": Entry(kind="file", mode=0o666, size=64, sha256="2" * 64),
+        "config": Entry(kind="dir", mode=0o777),
+        "config/credentials": Entry(kind="file", mode=0o666, size=64, sha256="3" * 64),
+    }
+
+
+def test_trace_after_does_not_charge_planted_files_to_the_write_limit(repo: Path, monkeypatch):
+    manifests = iter([_planted_manifest(), _planted_manifest()])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(
+        repo,
+        SandboxConfig(staging=StagingLimits(max_entries=1)),
+        client_factory=lambda: fake_client(),
+    )
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert not sandbox.evidence.errors
+    assert sandbox.evidence.components.trace == State.COMPLETE
+
+
+def test_trace_after_charges_planted_files_the_cage_rewrote(repo: Path, monkeypatch):
+    before = _planted_manifest()
+    after = dict(before)
+    after[".env"] = Entry(kind="file", mode=0o666, size=4096, sha256="5" * 64)
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(
+        repo,
+        SandboxConfig(staging=StagingLimits(max_bytes=1024)),
+        client_factory=lambda: fake_client(),
+    )
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
+
+
+def test_trace_after_still_charges_cage_entries_past_the_write_limit(repo: Path, monkeypatch):
+    before = _planted_manifest()
+    before["README.md"] = Entry(kind="file", mode=0o644, size=64, sha256="0" * 64)
+    after = dict(before)
+    after["flood"] = Entry(kind="file", mode=0o666, size=64, sha256="4" * 64)
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(
+        repo,
+        SandboxConfig(staging=StagingLimits(max_entries=1)),
+        client_factory=lambda: fake_client(),
+    )
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
+
+
 def test_trace_after_is_complete_when_no_marker_exists(repo: Path, monkeypatch):
     after = {
         "README.md": Entry(kind="file", mode=0o644, sha256="0" * 64),
@@ -865,6 +924,42 @@ def test_exec_on_a_closed_cage_fails_closed(repo: Path, monkeypatch):
         sandbox.open_cage()
     with pytest.raises(SandboxError, match="open_cage"):
         sandbox.exec(["true"])
+
+
+def test_exec_is_rejected_after_the_sinks_are_collected(repo: Path, monkeypatch):
+    # Collection ends the evidence; output after it would skip the
+    # honeytoken search, so exec must refuse instead.
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "running"}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.open_cage()
+        sandbox.collect_sinks()
+        with pytest.raises(SandboxError, match="after the sinks"):
+            sandbox.exec(["true"])
+    assert any(error.code == "EXEC_ERROR" for error in sandbox.evidence.errors)
+    assert sandbox.evidence.status == "error"
+
+
+def test_run_command_is_rejected_after_the_sinks_are_collected(repo: Path, monkeypatch):
+    monkeypatch.setattr(
+        "run.sandbox.capture_attached",
+        lambda *args, **kwargs: CommandResult(command=["true"], exit_code=0),
+    )
+    client = fake_client()
+    client.containers.create.return_value.attrs = {"State": {"Status": "exited", "ExitCode": 0}}
+    sandbox = Sandbox(repo, client_factory=lambda: client)
+    with sandbox:
+        sandbox.collect_sinks()
+        with pytest.raises(SandboxError, match="after the sinks"):
+            sandbox.run_command(["true"])
+    assert sandbox.evidence.tool_log == []
+    assert any(error.code == "COMMAND_ERROR" for error in sandbox.evidence.errors)
+    assert sandbox.evidence.status == "error"
 
 
 def test_exec_is_rejected_after_run_command(repo: Path, monkeypatch):
@@ -1255,3 +1350,21 @@ def test_only_added_or_modified_files_at_the_cap_trigger_write_limit(repo, monke
     assert any(e.code == "REPO_WRITE_LIMIT" for e in sandbox.evidence.errors) is (
         change != "unchanged"
     )
+
+
+@pytest.mark.parametrize("path", ["extra", ".env"])
+def test_trace_charges_oversize_new_files_and_rewritten_bait(repo: Path, monkeypatch, path):
+    before = _planted_manifest()
+    before[".env"] = Entry(kind="file", mode=0o666, size=128, sha256="1" * 64)
+    after = dict(before)
+    after[path] = Entry(kind="file", mode=0o666, size=65, sha256="4" * 64)
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(
+        repo, SandboxConfig(staging=StagingLimits(max_file_bytes=64)), client_factory=fake_client
+    )
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert "REPO_WRITE_LIMIT" in {error.code for error in sandbox.evidence.errors}
+    assert sandbox.evidence.status == "error"

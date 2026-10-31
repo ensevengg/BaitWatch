@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import docker
@@ -16,11 +16,26 @@ from docker.errors import APIError, DockerException, NotFound
 from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount, Ulimit
 
 from run.capture import capture_attached, capture_exec
-from run.evidence import CommandResult, FileDiff, RunError, RunEvidence, State, safe_text
+from run.evidence import (
+    CommandResult,
+    FileDiff,
+    HoneytokenHit,
+    RunError,
+    RunEvidence,
+    State,
+    safe_text,
+)
+from run.honeytokens import (
+    Honeytoken,
+    generate_tokens,
+    plant_tokens,
+    scan_sink_log,
+    scan_tool_results,
+)
 from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
-from run.trace import TraceError, diff, error_paths, manifest_from_json
+from run.trace import TraceError, TraceLimits, diff, error_paths, manifest_from_json
 
 SCAN_LABEL = "org.baitwatch.scan-id"
 DEFAULT_SUBNET = "10.13.37.0/24"
@@ -205,6 +220,11 @@ class Sandbox:
         self._sinks: dict[str, object] = {}
         self._sink_logs: dict[str, Path] = {}
         self._sinks_collected: set[str] = set()
+        self._honeytokens: tuple[Honeytoken, ...] = ()
+        self._planted_paths: frozenset[str] = frozenset()
+        self._planted_bytes = 0
+        self._planted_max_file_bytes = 0
+        self._honeytoken_scanned = False
         self._trace_before: dict | None = None
 
     @property
@@ -220,6 +240,11 @@ class Sandbox:
         if self._temporary is None:
             raise SandboxError("repository has not been staged")
         return self._temporary / "repo"
+
+    @property
+    def honeytokens(self) -> tuple[Honeytoken, ...]:
+        """The tokens planted for this scan; memory only, never persisted."""
+        return self._honeytokens
 
     def _network_subnet(self) -> ipaddress.IPv4Network:
         if self._subnet is None:
@@ -309,6 +334,31 @@ class Sandbox:
                 safe_text(path)
                 for path in stage_repository(self.path, self.staged_path, self.config.staging)
             ]
+            # Planted before the first trace snapshot, so the bait never shows
+            # up as one of the repository's own file diffs.
+            token_set = generate_tokens()
+            planned = {file.path for file in token_set.files}
+            planned.update(path.rpartition("/")[0] for path in tuple(planned) if "/" in path)
+            existing = {path for path in planned if os.path.lexists(self.staged_path / path)}
+            self._honeytokens = plant_tokens(self.staged_path, token_set)
+            # Only paths planting actually created are exempt from the write
+            # limits; a path the repository already had stays charged.
+            self._planted_paths = frozenset(
+                path for path in planned - existing if os.path.lexists(self.staged_path / path)
+            )
+            self._planted_bytes = sum(
+                len(file.content.encode("utf-8"))
+                for file in token_set.files
+                if file.path in self._planted_paths
+            )
+            self._planted_max_file_bytes = max(
+                (
+                    len(file.content.encode("utf-8"))
+                    for file in token_set.files
+                    if file.path in self._planted_paths
+                ),
+                default=0,
+            )
             self._subnet = self._create_network()
             self._open = True
             return self
@@ -540,6 +590,33 @@ class Sandbox:
             return f"{role} sink log has no stopped record", "SINK_LOG"
         return None, None
 
+    def _scan_honeytokens(self) -> None:
+        """After the sinks stop, search every sink record and every tool output
+        for planted token values. A bound hit is an error, never a clean pass;
+        the hits themselves never change the RUN status."""
+        if self._honeytoken_scanned or not self._honeytokens:
+            return
+        self._honeytoken_scanned = True
+        hits: list[HoneytokenHit] = []
+        incomplete = False
+        for role in ("dns", "http"):
+            log = self._sink_logs.get(role)
+            if log is None:
+                continue  # a sink that never started has already failed closed
+            scan = scan_sink_log(log, self._honeytokens)
+            hits.extend(scan.hits)
+            incomplete = incomplete or scan.incomplete
+        tool_scan = scan_tool_results(self.evidence.tool_log, self._honeytokens)
+        hits.extend(tool_scan.hits)
+        incomplete = incomplete or tool_scan.incomplete
+        self.evidence.honeytoken_hits.extend(hits)
+        if incomplete:
+            self._error(
+                "HONEYTOKEN_SCAN_INCOMPLETE",
+                "honeytoken detection hit a size bound; records past it were not scanned",
+                component=None,
+            )
+
     def collect_sinks(self) -> None:
         """Stop each sink, then read its log. A component is complete only when
         the sink acknowledged the stop after draining everything it accepted;
@@ -575,9 +652,36 @@ class Sandbox:
                 setattr(self.evidence.components, component, State.ERROR)
             self.evidence.errors.append(RunError(code=code, message=f"{role}: {problem}"[:1000]))
             self.evidence.status = "error"
+        self._scan_honeytokens()
+
+    def _trace_limits(self, *, cleanup: bool = False) -> dict:
+        limits = self.config.staging
+        adjusted = TraceLimits(
+            max_entries=limits.max_entries + len(self._planted_paths),
+            max_bytes=limits.max_bytes + self._planted_bytes,
+            max_file_bytes=max(limits.max_file_bytes, self._planted_max_file_bytes),
+            max_depth=max(
+                limits.max_depth, max((p.count("/") for p in self._planted_paths), default=0)
+            ),
+            timeout_seconds=limits.timeout_seconds,
+        )
+        values = asdict(adjusted)
+        if cleanup:
+            # Cleanup must reach cage growth even when the snapshot rejected it.
+            values["max_entries"] += 1_000_000
+            values["max_depth"] = max(values["max_depth"], 512)
+        return values
 
     def _run_trace_helper(self, role: str) -> dict:
-        command = ["python", "-I", "/trace/trace.py", "snapshot", "/repo"]
+        command = [
+            "python",
+            "-I",
+            "/trace/trace.py",
+            "snapshot",
+            "/repo",
+            "--limits",
+            json.dumps(self._trace_limits()),
+        ]
         container = self._create(
             self.config.sink_image,
             command,
@@ -640,10 +744,23 @@ class Sandbox:
             FileDiff(path=path, change=change) for path, change in diff(self._trace_before, after)
         ]
         limits = self.config.staging
+        # Bait the cage left untouched is ours, not the repository's growth.
+        planted = {
+            path for path in self._planted_paths if after.get(path) == self._trace_before.get(path)
+        }
         if (
-            len(after) > limits.max_entries
-            or sum(entry.size for entry in after.values() if entry.kind == "file")
+            sum(1 for path in after if path not in planted) > limits.max_entries
+            or sum(
+                entry.size
+                for path, entry in after.items()
+                if entry.kind == "file" and path not in planted
+            )
             > limits.max_bytes
+            or any(
+                path.count("/") + (entry.kind == "dir") > limits.max_depth
+                for path, entry in after.items()
+                if path not in planted
+            )
             or any(
                 entry.kind == "file"
                 and entry.size >= limits.max_file_bytes
@@ -652,7 +769,8 @@ class Sandbox:
             )
         ):
             self._error(
-                "REPO_WRITE_LIMIT", "staged repository reached a file, total byte or entry limit"
+                "REPO_WRITE_LIMIT",
+                "staged repository reached a file, total byte, entry or depth limit",
             )
         marked = sorted(set(error_paths(self._trace_before)) | set(error_paths(after)))
         if marked:
@@ -802,6 +920,11 @@ class Sandbox:
             message = "the cage must be started with open_cage before exec"
             self._error("EXEC_ERROR", message)
             raise SandboxError(message)
+        if self._sinks_collected or self._honeytoken_scanned:
+            # Output produced after collection would skip the honeytoken search.
+            message = "exec is not allowed after the sinks are collected"
+            self._error("EXEC_ERROR", message)
+            raise SandboxError(message)
         try:
             running = self._cage_running()
         except Exception as exc:
@@ -881,6 +1004,11 @@ class Sandbox:
             raise ValueError("command must be a nonempty argument sequence, never a shell string")
         if self._command_started:
             raise SandboxError("one command per sandbox; create a new sandbox for another run")
+        if self._sinks_collected or self._honeytoken_scanned:
+            # Output produced after collection would skip the honeytoken search.
+            message = "run_command is not allowed after the sinks are collected"
+            self._error("COMMAND_ERROR", message)
+            raise SandboxError(message)
         self._command_started = True
         result = CommandResult(command=list(command))
         # Sink or trace failures that happened before this command must not
@@ -1009,7 +1137,15 @@ class Sandbox:
         try:
             container = self._create(
                 self.config.sink_image,
-                ["python", "-I", "/trace/trace.py", "unlock", "/repo"],
+                [
+                    "python",
+                    "-I",
+                    "/trace/trace.py",
+                    "unlock",
+                    "/repo",
+                    "--limits",
+                    json.dumps(self._trace_limits(cleanup=True)),
+                ],
                 "unlock-staging",
                 None,
                 networked=False,

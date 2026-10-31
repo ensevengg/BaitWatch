@@ -187,6 +187,36 @@ def test_cli_snapshot_matches_the_in_process_snapshot(repo: Path):
     assert manifest_from_json(completed.stdout) == snapshot(repo)
 
 
+@pytest.mark.parametrize(
+    "limits",
+    ['{"max_entries": 1}', '{"max_bytes": 1}', '{"max_file_bytes": 1}'],
+)
+def test_cli_enforces_supplied_snapshot_limits(repo: Path, limits: str):
+    (repo / "extra").touch()
+    completed = subprocess.run(
+        [sys.executable, str(TRACE_CLI), "snapshot", str(repo), "--limits", limits],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 1
+    assert "limit" in completed.stderr
+    assert completed.stdout == ""
+
+
+@pytest.mark.parametrize("limits", ["{", "[]", '{"max_bytes": 0}', '{"unknown": 1}'])
+def test_cli_rejects_invalid_snapshot_limits(repo: Path, limits: str):
+    completed = subprocess.run(
+        [sys.executable, str(TRACE_CLI), "snapshot", str(repo), "--limits", limits],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 1
+    assert "trace error" in completed.stderr
+    assert completed.stdout == ""
+
+
 def test_cli_reports_failures_on_stderr(tmp_path: Path):
     completed = subprocess.run(
         [sys.executable, str(TRACE_CLI), "snapshot", str(tmp_path / "absent")],
@@ -328,3 +358,56 @@ def test_error_paths_lists_sorted_paths_with_markers():
     }
     assert error_paths(manifest) == ["a/unreadable", "b/locked"]
     assert error_paths({}) == []
+
+
+def test_zero_depth_snapshots_flat_files_and_rejects_nested_files(repo: Path):
+    limits = TraceLimits(max_depth=0)
+    assert "README.md" in snapshot(repo, limits)
+    (repo / "nested").mkdir()
+    (repo / "nested" / "file").touch()
+    with pytest.raises(TraceError, match="nesting"):
+        snapshot(repo, limits)
+
+
+def test_cli_unlock_accepts_limits_beyond_default_entry_cap(tmp_path: Path):
+    root = tmp_path / "locked-tree"
+    root.mkdir()
+    for index in range(10_005):
+        (root / str(index)).mkdir()
+    with os.scandir(root) as entries:
+        ordered = [root / entry.name for entry in entries]
+    early, late = ordered[0], ordered[-1]
+    early.chmod(0)
+    late.chmod(0)
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(TRACE_CLI),
+                "unlock",
+                str(root),
+                "--limits",
+                '{"max_entries":10005,"max_depth":1}',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert early.stat().st_mode & 0o777 == 0o777
+        assert late.stat().st_mode & 0o777 == 0o777
+    finally:
+        early.chmod(0o777)
+        late.chmod(0o777)
+
+
+def test_cli_unlock_keeps_supplied_entry_bound(repo: Path):
+    (repo / "extra").mkdir()
+    completed = subprocess.run(
+        [sys.executable, str(TRACE_CLI), "unlock", str(repo), "--limits", '{"max_entries":1}'],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 1
+    assert "entry limit" in completed.stderr
