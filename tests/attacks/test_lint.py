@@ -187,6 +187,10 @@ def test_realistic_hosts_stay_inside_the_attack_corpus() -> None:
 
     needles = tuple(CORPUS_HOSTS) + tuple(suffix.lstrip(".") for suffix in CORPUS_HOST_SUFFIXES)
     allowed_prefixes = ("attacks/", "docs/", "tests/")
+    # READ's training-data builder fills {host} placeholders in generated
+    # snippets from these pools, so attack rows don't all point at reserved
+    # names. The names are only written into training text; nothing fetches them.
+    allowed_files = {"read/data/v17/snippets.py", "read/data/v17/gold.py"}
     skipped_prefixes = ("build/", "dist/", "artifacts/", ".venv/", ".git/", ".ruff_cache/")
     offenders = []
     for path in REPO_ROOT.rglob("*"):
@@ -194,6 +198,8 @@ def test_realistic_hosts_stay_inside_the_attack_corpus() -> None:
             continue
         rel = path.relative_to(REPO_ROOT).as_posix()
         if rel.startswith(allowed_prefixes) or rel.startswith(skipped_prefixes):
+            continue
+        if rel in allowed_files:
             continue
         if "__pycache__" in path.parts:
             continue
