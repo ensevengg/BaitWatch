@@ -163,6 +163,17 @@ still counts as a program execution. A missing or non-executable setup command
 followed by such a real program failure can therefore remain eligible for
 ALLOW. Source executable bits are preserved. To exercise a readable shell
 script without its executable bit, the decoy can invoke `sh script.sh` inside
-the cage. Package installs can hit the existing deadline in the isolated cage;
-that is an error and yields at least FLAG; it does not prove that an install
-lifecycle payload ran.
+the cage.
+
+The runner sets pip and npm retries to zero and fetch timeouts to three seconds,
+with update checks, npm audit/funding requests, and interactive pip/Git prompts
+disabled. Git HTTP transfers abort after three seconds below one byte per second.
+The trusted image precompiles Python modules so pip startup does not spend the
+tool budget compiling imports on the read-only filesystem. These are overridable
+defaults, not security controls. Curl uses its normal behavior: the sinks answer
+HTTP and terminate TLS promptly; there is no curl timeout environment variable.
+Network isolation, sinks, and execution limits remain enforced independently.
+An ordinary install failure is recorded as a nonzero program exit; a real
+deadline kill still yields at least FLAG. Registry contacts also remain FLAG
+under the current verdict policy, and other sink contacts remain BLOCK. Neither
+an install failure nor a registry lookup proves an install lifecycle payload ran.

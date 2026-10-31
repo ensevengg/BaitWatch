@@ -122,3 +122,64 @@ def test_failed_git_helper_is_rejected(repo, monkeypatch, result):
         assert kwargs["security_opt"] == ["no-new-privileges:true"]
         assert len(kwargs["mounts"]) == 1
         assert kwargs["mounts"][0]["Source"] == str(sandbox.staged_path)
+
+
+@pytest.mark.docker
+@pytest.mark.parametrize("manager", ["pip", "npm"])
+def test_offline_install_fails_before_tool_deadline(repo, engine, assert_no_leftovers, manager):
+    from run.llm import ScriptedBackend, ToolCall
+    from run.sandbox import detonate
+
+    (repo / "pyproject.toml").write_text(
+        '[build-system]\nrequires = ["setuptools>=77"]\n'
+        'build-backend = "setuptools.build_meta"\n'
+        '[project]\nname = "offline-fixture"\nversion = "0.0.1"\n'
+    )
+    (repo / "package.json").write_text(
+        '{"name":"offline-fixture","version":"0.0.1","dependencies":{"is-number":"7.0.0"}}'
+    )
+    command = "pip install -e ." if manager == "pip" else "npm install"
+    evidence = detonate(
+        repo, backend=ScriptedBackend([[ToolCall("run_cmd", {"command": command})]])
+    )
+    result = evidence.tool_log[0]
+    assert result.exit_code not in (None, 0, 126, 127)
+    assert not result.timed_out
+    assert result.duration_seconds < SandboxConfig().tool_timeout_seconds
+    assert not evidence.errors
+    report = fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), evidence)
+    assert report.verdict == "FLAG", report.reason
+    assert "package-registry lookup" in report.reason
+    assert evidence.dns_hits or evidence.http_hits or evidence.tls_hits
+    assert_no_leftovers(evidence)
+
+
+@pytest.mark.docker
+def test_cage_environment_has_fast_fail_defaults(repo, engine, assert_no_leftovers):
+    import json
+
+    sandbox = Sandbox(repo)
+    with sandbox:
+        result = sandbox.run_command(
+            ["python", "-c", "import json, os; print(json.dumps(dict(os.environ)))"]
+        )
+    assert result.exit_code == 0, result.stderr
+    environment = json.loads(result.stdout)
+    expected = {
+        "PIP_RETRIES": "0",
+        "PIP_TIMEOUT": "3",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PIP_NO_INPUT": "1",
+        "npm_config_fetch_retries": "0",
+        "npm_config_fetch_timeout": "3000",
+        "npm_config_fetch_retry_mintimeout": "100",
+        "npm_config_fetch_retry_maxtimeout": "100",
+        "npm_config_audit": "false",
+        "npm_config_fund": "false",
+        "npm_config_update_notifier": "false",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_HTTP_LOW_SPEED_LIMIT": "1",
+        "GIT_HTTP_LOW_SPEED_TIME": "3",
+    }
+    assert {key: environment.get(key) for key in expected} == expected
+    assert_no_leftovers(sandbox.evidence)
