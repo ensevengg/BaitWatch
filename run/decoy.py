@@ -7,11 +7,13 @@ import time
 from typing import Any
 
 from run.evidence import CommandResult, RunError, State
-from run.llm import LLMBackend, LLMReply, ToolCall
+from run.llm import LLMBackend, LLMReply, ToolCall, estimate_messages_tokens, estimate_tokens
 from run.sandbox import Sandbox
 
 DEFAULT_TASK = "Set up and test this repository following its README and instructions."
 MAX_STEPS = 20
+MAX_TOKENS = 100_000
+MAX_SECONDS = 120.0
 READ_BYTES = 16 * 1024
 FEEDBACK_CHARS = 8 * 1024
 
@@ -163,6 +165,8 @@ def run_decoy(
     backend: LLMBackend,
     *,
     max_steps: int = MAX_STEPS,
+    max_tokens: int = MAX_TOKENS,
+    max_seconds: float | None = None,
     task: str = DEFAULT_TASK,
 ) -> None:
     """Drive the model loop; runtime failures are recorded fail-closed.
@@ -174,11 +178,42 @@ def run_decoy(
     """
     if type(max_steps) is not int or max_steps < 1:
         raise ValueError("max_steps must be a positive integer")
+    if type(max_tokens) is not int or max_tokens < 1:
+        raise ValueError("max_tokens must be a positive integer")
+    if max_seconds is not None and (type(max_seconds) not in (int, float) or not max_seconds > 0):
+        raise ValueError("max_seconds must be a positive number")
     evidence = sandbox.evidence
     baseline_errors = len(evidence.errors)
     config = getattr(sandbox, "config", None)
+    cfg_tokens = getattr(config, "decoy_max_tokens", None)
+    if type(cfg_tokens) is int and cfg_tokens > 0 and max_tokens == MAX_TOKENS:
+        max_tokens = cfg_tokens
+    cfg_seconds = getattr(config, "decoy_max_seconds", None)
+    if max_seconds is None and type(cfg_seconds) in (int, float) and cfg_seconds > 0:
+        max_seconds = float(cfg_seconds)
     seconds = getattr(config, "decoy_seconds", None)
+    started = time.monotonic()
     deadline = time.monotonic() + seconds if type(seconds) in (int, float) and seconds > 0 else None
+    wall_deadline = started + max_seconds if max_seconds is not None else None
+    total_prompt = 0
+    total_completion = 0
+    total_tokens = 0
+    tokens_estimated = False
+    last_backend = ""
+
+    def _check_wall() -> None:
+        if wall_deadline is not None and time.monotonic() >= wall_deadline:
+            raise _DecoyFailure("DECOY_TIME_BUDGET", "the decoy exhausted its wall-time budget")
+
+    def _record() -> None:
+        evidence.decoy_prompt_tokens = total_prompt
+        evidence.decoy_completion_tokens = total_completion
+        evidence.decoy_total_tokens = total_tokens
+        evidence.decoy_tokens_estimated = tokens_estimated
+        evidence.decoy_backend = last_backend
+        fc = getattr(backend, "fallback_count", 0)
+        evidence.decoy_fallback_count = fc if type(fc) is int else 0
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _system_prompt()},
         {"role": "user", "content": _user_prompt(task)},
@@ -188,13 +223,39 @@ def run_decoy(
     try:
         for _ in range(max_steps):
             _check_cage(sandbox, deadline)
+            _check_wall()
             reply = backend.chat(messages, tools)
             _check_cage(sandbox, deadline)
+            _check_wall()
+            if reply.total_tokens:
+                total_prompt += reply.prompt_tokens
+                total_completion += reply.completion_tokens
+                total_tokens += reply.total_tokens
+            else:
+                prompt_est = estimate_messages_tokens(messages, tools)
+                completion_est = estimate_tokens(
+                    reply.text + json.dumps([c.name for c in reply.tool_calls])
+                )
+                total_prompt += prompt_est
+                total_completion += completion_est
+                total_tokens += prompt_est + completion_est
+                tokens_estimated = True
+            if reply.usage_estimated:
+                tokens_estimated = True
+            if reply.backend:
+                last_backend = reply.backend
+            elif getattr(backend, "name", None):
+                last_backend = str(backend.name)
+            elif getattr(backend, "last_backend", None):
+                last_backend = str(backend.last_backend)
+            if total_tokens > max_tokens:
+                raise _DecoyFailure("DECOY_TOKEN_BUDGET", "the decoy exhausted its token budget")
             if not reply.tool_calls:
                 break
             messages.append(_assistant_message(reply))
             for call in reply.tool_calls:
                 _check_cage(sandbox, deadline)
+                _check_wall()
                 if calls >= max_steps:
                     raise _DecoyFailure(
                         "DECOY_STEP_BUDGET", "the decoy exhausted its tool-call budget"
@@ -210,7 +271,9 @@ def run_decoy(
         else:
             raise _DecoyFailure("DECOY_STEP_BUDGET", "the decoy exhausted its step budget")
         _check_cage(sandbox, deadline)
+        _check_wall()
     except Exception as exc:
+        _record()
         evidence.components.decoy = State.ERROR
         code = exc.code if isinstance(exc, _DecoyFailure) else "DECOY_FAILED"
         evidence.errors.append(
@@ -218,4 +281,5 @@ def run_decoy(
         )
         evidence.status = "error"
         return
+    _record()
     evidence.components.decoy = State.COMPLETE

@@ -52,18 +52,31 @@ def decoy(
         str, typer.Option(help="Trusted image; must already exist locally.")
     ] = DEFAULT_IMAGE,
     max_steps: Annotated[int, typer.Option(help="Maximum model turns and total tool calls.")] = 20,
+    max_tokens: Annotated[int, typer.Option(help="Maximum total decoy tokens.")] = 100_000,
+    max_seconds: Annotated[float, typer.Option(help="Maximum decoy wall seconds.")] = 120.0,
+    llm_fallback: Annotated[
+        str | None, typer.Option(help="Fallback backend spec if the primary fails.")
+    ] = None,
 ) -> None:
     """Run the decoy agent; its tool calls execute only inside the cage."""
-    # Imported lazily so the sandbox-only path never loads backend machinery.
-    from run.llm import LLMError, make_backend
+    from run.llm import LLMError, make_backend_with_fallback
 
     try:
         if not repo.is_dir():
             raise ValueError("repository must be an existing directory")
         if max_steps < 1:
             raise ValueError("max-steps must be positive")
-        config = SandboxConfig(image=image)
-        backend = make_backend(llm)
+        if max_tokens < 1:
+            raise ValueError("max-tokens must be positive")
+        if max_seconds <= 0:
+            raise ValueError("max-seconds must be positive")
+        config = SandboxConfig(
+            image=image,
+            decoy_seconds=max_seconds,
+            decoy_max_tokens=max_tokens,
+            decoy_max_seconds=max_seconds,
+        )
+        backend = make_backend_with_fallback(llm, llm_fallback)
     except (LLMError, ValueError) as exc:
         typer.echo(f"decoy: {exc}", err=True)
         raise typer.Exit(3) from exc

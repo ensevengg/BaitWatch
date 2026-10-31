@@ -18,7 +18,25 @@ RESPONSE_CHUNK_BYTES = 64 * 1024
 
 
 class LLMError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, kind: str = "other") -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+RETRYABLE_KINDS = frozenset({"http_5xx", "http_429", "timeout", "connection", "missing_key"})
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, (len(text) + 1) // 2) if text else 0
+
+
+def estimate_messages_tokens(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
+    total = 0
+    for item in messages:
+        total += estimate_tokens(json.dumps(item, ensure_ascii=True, default=str))
+    if tools:
+        total += estimate_tokens(json.dumps(tools, ensure_ascii=True, default=str))
+    return total
 
 
 @dataclass(frozen=True)
@@ -32,6 +50,11 @@ class ToolCall:
 class LLMReply:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    prompt_tokens: int = field(default=0, compare=False)
+    completion_tokens: int = field(default=0, compare=False)
+    total_tokens: int = field(default=0, compare=False)
+    usage_estimated: bool = field(default=False, compare=False)
+    backend: str = field(default="", compare=False)
 
 
 class LLMBackend(Protocol):
@@ -59,9 +82,19 @@ class ScriptedBackend:
         self._index = 0
         self._next_id = 0
 
+    name = "scripted"
+
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMReply:
+        prompt = estimate_messages_tokens(messages, tools)
         if self._index >= len(self._steps):
-            return LLMReply(text="done")
+            return LLMReply(
+                text="done",
+                prompt_tokens=prompt,
+                completion_tokens=estimate_tokens("done"),
+                total_tokens=prompt + estimate_tokens("done"),
+                usage_estimated=True,
+                backend=self.name,
+            )
         step = self._steps[self._index]
         self._index += 1
         calls: list[ToolCall] = []
@@ -74,7 +107,15 @@ class ScriptedBackend:
                 )
             )
             self._next_id += 1
-        return LLMReply(tool_calls=calls)
+        completion = estimate_tokens(json.dumps([c.name for c in calls]))
+        return LLMReply(
+            tool_calls=calls,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+            usage_estimated=True,
+            backend=self.name,
+        )
 
     @classmethod
     def from_json(cls, path: str | Path) -> "ScriptedBackend":
@@ -166,6 +207,10 @@ class OpenAICompatBackend:
         else:
             self._opener = urllib.request.build_opener(_NoRedirects())
 
+    @property
+    def name(self) -> str:
+        return f"openai:{self.model}@{self.base_url}"
+
     def __repr__(self) -> str:
         return (
             f"{type(self).__name__}(base_url={self.base_url!r}, model={self.model!r}, "
@@ -202,14 +247,41 @@ class OpenAICompatBackend:
             headers=headers,
             method="POST",
         )
-        return _parse_reply(self._post(request))
+        reply = _parse_reply(self._post(request))
+        if reply.total_tokens:
+            return LLMReply(
+                text=reply.text,
+                tool_calls=reply.tool_calls,
+                prompt_tokens=reply.prompt_tokens,
+                completion_tokens=reply.completion_tokens,
+                total_tokens=reply.total_tokens,
+                usage_estimated=False,
+                backend=self.name,
+            )
+        prompt = estimate_messages_tokens(messages, tools)
+        completion_text = reply.text + json.dumps(
+            [{"name": c.name, "arguments": c.arguments} for c in reply.tool_calls]
+        )
+        completion = estimate_tokens(completion_text)
+        return LLMReply(
+            text=reply.text,
+            tool_calls=reply.tool_calls,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+            usage_estimated=True,
+            backend=self.name,
+        )
 
     def _api_key(self) -> str | None:
         if self.api_key_env is None:
             return None
         key = os.environ.get(self.api_key_env)
         if not key or any(ord(char) < 0x20 or ord(char) == 0x7F for char in key):
-            raise LLMError(f"API key environment variable {self.api_key_env} is missing or invalid")
+            raise LLMError(
+                f"API key environment variable {self.api_key_env} is missing or invalid",
+                kind="missing_key",
+            )
         return key
 
     def _post(self, request: urllib.request.Request) -> bytes:
@@ -221,21 +293,27 @@ class OpenAICompatBackend:
                 raw = _read_bounded(response, self.max_response_bytes, deadline)
         except urllib.error.HTTPError as exc:
             exc.close()
-            raise LLMError(f"LLM endpoint returned HTTP {exc.code}") from None
+            kind = "http_429" if exc.code == 429 else "http_5xx" if exc.code >= 500 else "http_4xx"
+            raise LLMError(f"LLM endpoint returned HTTP {exc.code}", kind=kind) from None
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
-                raise LLMError(f"LLM request timed out after {self.timeout_seconds}s") from None
-            raise LLMError(f"LLM request failed: {_short_reason(exc.reason)}") from None
+                raise LLMError(
+                    f"LLM request timed out after {self.timeout_seconds}s", kind="timeout"
+                ) from None
+            raise LLMError(
+                f"LLM request failed: {_short_reason(exc.reason)}", kind="connection"
+            ) from None
         except TimeoutError:
-            raise LLMError(f"LLM request timed out after {self.timeout_seconds}s") from None
+            raise LLMError(
+                f"LLM request timed out after {self.timeout_seconds}s", kind="timeout"
+            ) from None
         except http.client.HTTPException as exc:
-            raise LLMError(f"LLM request failed: {type(exc).__name__}") from None
+            raise LLMError(f"LLM request failed: {type(exc).__name__}", kind="connection") from None
         except ValueError as exc:
-            # Invalid header values (for example a non-ASCII key) can include the
-            # value in their message, so only the exception type is reported.
             raise LLMError(f"LLM request failed: {type(exc).__name__}") from None
         except OSError as exc:
-            raise LLMError(f"LLM request failed: {_short_reason(exc)}") from None
+            kind = "timeout" if isinstance(exc, TimeoutError) else "connection"
+            raise LLMError(f"LLM request failed: {_short_reason(exc)}", kind=kind) from None
         if len(raw) > self.max_response_bytes:
             raise LLMError(f"LLM response exceeds {self.max_response_bytes} bytes")
         return raw
@@ -297,7 +375,24 @@ def _parse_reply(raw: bytes) -> LLMReply:
     calls = [_parse_tool_call(call) for call in raw_calls]
     if not calls and finish_reason == "tool_calls":
         raise LLMError("LLM response promised tool calls but carried none")
-    return LLMReply(text=text, tool_calls=calls)
+    prompt_tokens = completion_tokens = total_tokens = 0
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+
+        def _int(key: str) -> int:
+            value = usage.get(key)
+            return value if type(value) is int and value >= 0 else 0
+
+        prompt_tokens = _int("prompt_tokens")
+        completion_tokens = _int("completion_tokens")
+        total_tokens = _int("total_tokens") or (prompt_tokens + completion_tokens)
+    return LLMReply(
+        text=text,
+        tool_calls=calls,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
 
 
 def _parse_tool_call(raw: object) -> ToolCall:
@@ -368,6 +463,75 @@ def _positive_int(name: str, value: object) -> int:
 def _short_reason(value: object) -> str:
     text = str(value).strip()
     return text[:ERROR_DETAIL_BYTES] if text else type(value).__name__
+
+
+class FallbackBackend:
+    def __init__(self, primary: LLMBackend, fallback: LLMBackend) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.fallback_count = 0
+        self.last_backend = ""
+        self.primary_name = getattr(primary, "name", type(primary).__name__)
+        self.fallback_name = getattr(fallback, "name", type(fallback).__name__)
+        self.name = f"fallback:{self.primary_name}->{self.fallback_name}"
+
+    def __repr__(self) -> str:
+        return f"FallbackBackend(primary={self.primary!r}, fallback={self.fallback!r})"
+
+    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMReply:
+        try:
+            reply = self.primary.chat(messages, tools)
+        except LLMError as exc:
+            if exc.kind not in RETRYABLE_KINDS:
+                raise
+            try:
+                reply = self.fallback.chat(messages, tools)
+            except LLMError:
+                raise LLMError(
+                    "both primary and fallback LLM backends failed", kind="both_failed"
+                ) from None
+            self.fallback_count += 1
+            self.last_backend = reply.backend or self.fallback_name
+            return LLMReply(
+                text=reply.text,
+                tool_calls=reply.tool_calls,
+                prompt_tokens=reply.prompt_tokens,
+                completion_tokens=reply.completion_tokens,
+                total_tokens=reply.total_tokens,
+                usage_estimated=reply.usage_estimated,
+                backend=self.last_backend,
+            )
+        self.last_backend = reply.backend or self.primary_name
+        return reply
+
+
+def make_backend_with_fallback(primary_spec: str, fallback_spec: str | None = None) -> LLMBackend:
+    primary = make_backend(primary_spec)
+    if not fallback_spec:
+        return primary
+    return FallbackBackend(primary, make_backend(fallback_spec))
+
+
+def backend_from_env(prefix: str = "BAITWATCH_DECOY") -> LLMBackend | None:
+    base_url = os.environ.get(f"{prefix}_BASE_URL")
+    model = os.environ.get(f"{prefix}_MODEL")
+    if not base_url and not model:
+        return None
+    if not base_url or not model:
+        raise ValueError(f"{prefix}_BASE_URL and {prefix}_MODEL must be set together")
+    primary = OpenAICompatBackend(
+        base_url, model, api_key_env=os.environ.get(f"{prefix}_API_KEY_ENV") or None
+    )
+    fb_url = os.environ.get(f"{prefix}_FALLBACK_BASE_URL")
+    fb_model = os.environ.get(f"{prefix}_FALLBACK_MODEL")
+    if not fb_url and not fb_model:
+        return primary
+    if not fb_url or not fb_model:
+        raise ValueError(
+            f"{prefix}_FALLBACK_BASE_URL and {prefix}_FALLBACK_MODEL must be set together"
+        )
+    fallback = OpenAICompatBackend(fb_url, fb_model, temperature=0, seed=0)
+    return FallbackBackend(primary, fallback)
 
 
 def make_backend(spec: str) -> LLMBackend:
