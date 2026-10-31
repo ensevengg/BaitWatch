@@ -7,15 +7,14 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from uuid import uuid4
 
 import docker
 import pytest
 from docker.errors import NotFound
-from docker.types import IPAMConfig, IPAMPool
 
 from run.evidence import State
 from run.sandbox import SCAN_LABEL, Sandbox, SandboxConfig, SandboxError, detonate
+from run.verdict import CAGE_HOME
 
 pytestmark = pytest.mark.docker
 PYTHON_IMAGE = "python:3.12-alpine"
@@ -242,29 +241,27 @@ def test_missing_image_fails_closed_without_implicit_pull(repo: Path, engine):
     assert not engine.networks.list(filters={"label": f"{SCAN_LABEL}={evidence.scan_id}"})
 
 
-def test_subnet_collision_does_not_remove_someone_elses_network(repo: Path, engine):
-    unrelated = engine.networks.create(
-        f"bw-test-unrelated-{uuid4().hex}",
-        internal=True,
-        ipam=IPAMConfig(pool_configs=[IPAMPool(subnet="10.13.37.0/24")]),
-    )
-    try:
+def test_subnet_collision_does_not_remove_someone_elses_network(repo: Path, engine, monkeypatch):
+    owner = Sandbox(repo)
+    with owner:
+        occupied = owner.subnet
+        unrelated = engine.networks.get(owner.network_id)
+        monkeypatch.setattr("run.sandbox.DEFAULT_SUBNET", occupied)
         with Sandbox(repo) as sandbox:
             chosen = ipaddress.IPv4Network(sandbox.subnet)
             assert chosen.subnet_of(ipaddress.IPv4Network("10.13.0.0/16"))
-            assert chosen != ipaddress.IPv4Network("10.13.37.0/24")
+            assert chosen != ipaddress.IPv4Network(occupied)
             result = sandbox.run_command(["true"])
             assert result.exit_code == 0
             assert not sandbox.evidence.errors
         assert engine.networks.get(unrelated.id).id == unrelated.id
-        explicit = Sandbox(repo, SandboxConfig(subnet="10.13.37.0/24"))
+        explicit = Sandbox(repo, SandboxConfig(subnet=occupied))
         with pytest.raises(SandboxError, match="overlaps"), explicit:
             pytest.fail("an explicitly configured overlap must fail closed")
         assert engine.networks.get(unrelated.id).id == unrelated.id
         assert explicit.evidence.status == "error"
         assert not explicit.staged_path.parent.exists()
-    finally:
-        unrelated.remove()
+    assert_resources_removed(engine, owner)
 
 
 def test_two_sandboxes_run_side_by_side(repo: Path, tmp_path: Path, engine):
@@ -311,3 +308,35 @@ def test_repository_file_growth_is_bounded_and_recorded(repo: Path, engine):
     assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
     assert sandbox.evidence.status == "error"
     assert_resources_removed(engine, sandbox)
+
+
+def test_home_writes_are_traced_and_disposable(repo, engine):
+    from run.evidence import State
+    from run.llm import ScriptedBackend, ToolCall
+    from run.scan import run_scan
+    from run.verdict import ReadOutcome, fuse
+
+    report = run_scan(
+        repo,
+        read_scanner=lambda path: ReadOutcome(status=State.COMPLETE, verdict="clean"),
+        backend=ScriptedBackend(
+            [
+                [
+                    ToolCall(
+                        name="run_cmd",
+                        arguments={
+                            "command": 'test "$HOME" = /cage/home && mkdir -p "$HOME/.cache" && '
+                            'echo cache > "$HOME/.cache/tool" && echo bad > "$HOME/.bashrc"'
+                        },
+                    )
+                ]
+            ]
+        ),
+    )
+    assert report.verdict == "BLOCK", report.reason
+    assert report.run.status == "complete", report.run.errors
+    assert {f"{CAGE_HOME}/.bashrc", f"{CAGE_HOME}/.cache/tool"} <= {
+        entry.path for entry in report.run.file_diffs
+    }
+    assert fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), report.run).verdict == "BLOCK"
+    assert not (repo / ".bashrc").exists()

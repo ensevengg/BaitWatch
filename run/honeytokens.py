@@ -240,6 +240,8 @@ def _record_fields(record: dict) -> list[tuple[str, str]]:
     keys = ("method", "path", "host", "body", "raw", "sni")
     if kind == "dns":
         keys = ("qname", "raw")
+    elif kind == "tls":
+        keys = ("sni", "extra_prefix", "capture_hex")
     fields: list[tuple[str, str]] = []
     for key in keys:
         value = record.get(key)
@@ -254,6 +256,15 @@ def _record_fields(record: dict) -> list[tuple[str, str]]:
                         value = entry.get(key)
                         if isinstance(value, str) and value:
                             fields.append((value, "squash"))
+    elif kind == "tls":
+        capture = record.get("capture_hex")
+        if isinstance(capture, str) and capture:
+            try:
+                decoded = bytes.fromhex(capture)
+            except ValueError:
+                decoded = b""
+            if decoded:
+                fields.append((decoded.decode("utf-8", errors="ignore"), "squash"))
     elif kind == "http":
         path = record.get("path")
         if isinstance(path, str) and "%" in path:

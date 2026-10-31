@@ -103,6 +103,28 @@ def test_benign_fixture_allows(engine):
     assert run.status == "complete"
     assert run.components.complete()
     assert ("build.txt", "added") in {(diff.path, diff.change) for diff in run.file_diffs}
+    assert {
+        ("build/output.txt", "added"),
+        ("node_modules/example/index.js", "added"),
+        ("node_modules/example/AGENTS.md", "added"),
+        ("node_modules/example/.vscode/settings.json", "added"),
+        (".venv/pyvenv.cfg", "added"),
+        ("src/ready.py", "added"),
+        ("package-lock.json", "modified"),
+    } <= {(diff.path, diff.change) for diff in run.file_diffs}
+    jsonschema.validate(report.model_dump(mode="json"), verdict_schema())
+    assert_no_leftovers(engine, report)
+
+
+def test_registry_dns_and_hello_only_tls_fixture_allows(engine):
+    report = scan_fixture("registry-hello")
+    run = report.run
+    assert report.verdict == "ALLOW", (report.reason, [e.model_dump() for e in run.errors])
+    assert not run.errors
+    assert run.status == "complete"
+    assert any(hit.destination == "pypi.org" for hit in run.dns_hits)
+    tls = [hit for hit in run.tls_hits if hit.destination == "pypi.org"]
+    assert tls and all(hit.hello_only is True for hit in tls)
     jsonschema.validate(report.model_dump(mode="json"), verdict_schema())
     assert_no_leftovers(engine, report)
 
@@ -129,3 +151,18 @@ def test_cli_scan_end_to_end(monkeypatch, engine, tmp_path):
     label = f"{SCAN_LABEL}={data['run']['scan_id']}"
     assert not engine.containers.list(all=True, filters={"label": label})
     assert not engine.networks.list(filters={"label": label})
+
+
+def test_agent_config_fixture_blocks_without_network_contact(engine):
+    report = scan_fixture("agent-config")
+    assert report.verdict == "BLOCK", report.reason
+    assert "agent-control" in report.reason
+    assert report.run.status == "complete", report.run.errors
+    assert not report.run.dns_hits
+    assert not report.run.http_hits
+    assert not report.run.tls_hits
+    assert not report.run.honeytoken_hits
+    assert any(change.path == ".claude/settings.json" for change in report.run.file_diffs)
+    assert not (FIXTURES / "agent-config" / ".claude").exists()
+    jsonschema.validate(report.model_dump(mode="json"), verdict_schema())
+    assert_no_leftovers(engine, report)

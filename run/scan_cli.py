@@ -13,6 +13,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from run.cage import DEFAULT_IMAGE
 from run.evidence import State, VerdictReport
 from run.llm import LLMError, make_backend
 from run.sandbox import SandboxConfig
@@ -85,7 +86,7 @@ def scan(
     ],
     image: Annotated[
         str, typer.Option(help="Trusted image; must already exist locally.")
-    ] = "alpine:3.20",
+    ] = DEFAULT_IMAGE,
     max_steps: Annotated[int, typer.Option(help="Maximum model turns and total tool calls.")] = 20,
     json_path: Annotated[
         Path | None, typer.Option("--json", help="Write the verdict JSON here instead of stdout.")

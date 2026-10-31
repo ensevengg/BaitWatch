@@ -508,6 +508,96 @@ def test_tls_capture_incomplete_wrong_type_is_a_problem(tmp_path, value):
     assert "capture_incomplete is not a boolean" in log.problems[0]
 
 
+def tls_hello_record(**overrides):
+    record = tls_record(
+        sni="pypi.org",
+        hello_only=True,
+        hello_record_length=517,
+        total_bytes=517,
+        extra_bytes=0,
+    )
+    record.update(overrides)
+    return record
+
+
+def test_tls_hello_only_record_maps_to_typed_hit(tmp_path):
+    path = write_log(tmp_path / "sink.jsonl", [ready("http"), tls_hello_record()])
+    log = read_sink_log(path)
+    assert not log.problems
+    assert log.tls_hits == [
+        NetworkHit(
+            source_ip="10.13.37.20",
+            destination="pypi.org",
+            detail="hello_only=true hello_record_length=517 total_bytes=517 extra_bytes=0",
+            hello_only=True,
+        )
+    ]
+
+
+def test_tls_capture_hex_matching_total_bytes_is_accepted(tmp_path):
+    path = write_log(tmp_path / "sink.jsonl", [tls_hello_record(capture_hex="ab" * 517)])
+    log = read_sink_log(path)
+    assert not log.problems
+    assert log.tls_hits[0].hello_only is True
+
+
+@pytest.mark.parametrize("capture_hex", ["ab", "zz" * 517, "abc" * 345])
+def test_tls_capture_hex_inconsistent_with_total_is_a_problem(tmp_path, capture_hex):
+    path = write_log(tmp_path / "sink.jsonl", [tls_hello_record(capture_hex=capture_hex)])
+    log = read_sink_log(path)
+    assert not log.tls_hits
+    assert any("capture_hex is not a bounded hex string" in entry for entry in log.problems)
+
+
+def test_tls_record_without_hello_facts_stays_unclassified(tmp_path):
+    path = write_log(tmp_path / "sink.jsonl", [ready("http"), tls_record()])
+    log = read_sink_log(path)
+    assert not log.problems
+    assert log.tls_hits[0].hello_only is None
+    assert log.tls_hits[0].detail == ""
+
+
+def test_tls_hello_with_extra_bytes_maps_counts_and_prefix(tmp_path):
+    path = write_log(
+        tmp_path / "sink.jsonl",
+        [
+            tls_hello_record(
+                hello_only=False, total_bytes=525, extra_bytes=8, extra_prefix="6761726261676521"
+            )
+        ],
+    )
+    log = read_sink_log(path)
+    assert not log.problems
+    assert log.tls_hits[0].hello_only is False
+    assert "extra_bytes=8" in log.tls_hits[0].detail
+    assert "extra_prefix=6761726261676521" in log.tls_hits[0].detail
+
+
+@pytest.mark.parametrize(
+    "overrides,problem",
+    [
+        ({"hello_only": "yes"}, "hello_only is not a boolean"),
+        ({"hello_only": 1}, "hello_only is not a boolean"),
+        ({"hello_record_length": "517"}, "hello_record_length is not a positive int or null"),
+        ({"hello_record_length": True}, "hello_record_length is not a positive int or null"),
+        ({"total_bytes": "517"}, "total_bytes is not a non-negative int"),
+        ({"total_bytes": -1}, "total_bytes is not a non-negative int"),
+        ({"extra_bytes": True}, "extra_bytes is not a non-negative int"),
+        ({"extra_prefix": "zz"}, "extra_prefix is not a bounded hex string"),
+        ({"extra_prefix": "abc"}, "extra_prefix is not a bounded hex string"),
+        ({"hello_only": False, "total_bytes": 518}, "tls byte counts are inconsistent"),
+        ({"extra_bytes": 1, "extra_prefix": "aa"}, "tls byte counts are inconsistent"),
+        ({"hello_record_length": None}, "hello_only tls record is inconsistent"),
+        ({"capture_incomplete": True}, "hello_only tls record is inconsistent"),
+    ],
+)
+def test_tls_inconsistent_hello_facts_are_problems(tmp_path, overrides, problem):
+    path = write_log(tmp_path / "sink.jsonl", [tls_hello_record(**overrides)])
+    log = read_sink_log(path)
+    assert not log.tls_hits
+    assert any(problem in entry for entry in log.problems)
+
+
 def test_forged_http_authority_is_not_a_registry_lookup(tmp_path):
     import json
 

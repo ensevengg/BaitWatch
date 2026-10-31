@@ -21,6 +21,7 @@ from run.sandbox import (
 )
 from run.staging import StagingLimits
 from run.trace import Entry
+from run.verdict import CAGE_HOME
 
 OVERLAP = "Pool overlaps with other one on this address space"
 
@@ -858,6 +859,27 @@ def test_unlock_helper_with_a_lost_create_reply_is_swept_after_staging(
     assert client.containers.list.call_count == 2
 
 
+def test_cleanup_unlock_gets_a_floor_timeout_and_a_covering_host_wait(repo: Path):
+    client = fake_client()
+    helper = MagicMock()
+    helper.id = "unlock-helper"
+    helper.wait.return_value = {"StatusCode": 0}
+    client.containers.create.side_effect = [helper]
+    sandbox = Sandbox(
+        repo,
+        SandboxConfig(staging=StagingLimits(timeout_seconds=0.25)),
+        client_factory=lambda: client,
+    )
+    with sandbox:
+        assert sandbox._trace_limits()["timeout_seconds"] == 0.25
+        cleanup = sandbox._trace_limits(cleanup=True)
+        assert sandbox._unlock_staging() == (True, True)
+    assert cleanup["timeout_seconds"] >= 60
+    limits = client.containers.create.call_args.kwargs["command"][-1]
+    assert '"timeout_seconds": 60' in limits or '"timeout_seconds": 60.0' in limits
+    assert helper.wait.call_args.kwargs["timeout"] >= 2 * cleanup["timeout_seconds"]
+
+
 def test_decoy_time_limits_are_validated():
     assert SandboxConfig(decoy_seconds=0.5, tool_timeout_seconds=2).decoy_seconds == 0.5
     with pytest.raises(ValueError, match="finite int or float"):
@@ -1291,6 +1313,7 @@ def test_exec_waits_for_the_daemon_exit_event(repo: Path, monkeypatch):
 
 
 def test_detonate_collects_evidence_after_a_late_exception(repo: Path, monkeypatch):
+    monkeypatch.setattr(Sandbox, "prepare_repository", lambda self: None)
     from run.evidence import NetworkHit
 
     monkeypatch.setattr("run.sandbox.docker.DockerClient", lambda **kwargs: fake_client())
@@ -1368,3 +1391,135 @@ def test_trace_charges_oversize_new_files_and_rewritten_bait(repo: Path, monkeyp
         sandbox.trace_after()
     assert "REPO_WRITE_LIMIT" in {error.code for error in sandbox.evidence.errors}
     assert sandbox.evidence.status == "error"
+
+
+def test_home_snapshot_failure_keeps_repo_changes_and_trace_error(repo, monkeypatch):
+    before = {"README.md": Entry(kind="file", mode=0o666, sha256="0" * 64)}
+    after = {"README.md": Entry(kind="file", mode=0o666, sha256="1" * 64)}
+
+    def snapshot_tree(self, role, root):
+        if root == self.home_path:
+            raise RuntimeError("home snapshot unavailable")
+        return before if "before" in role else after
+
+    monkeypatch.setattr(Sandbox, "_snapshot_tree", snapshot_tree)
+    sandbox = Sandbox(repo, client_factory=fake_client)
+    with sandbox:
+        assert not sandbox.trace_before()
+        sandbox.trace_after()
+    assert sandbox.evidence.components.trace == State.ERROR
+    assert [(entry.path, entry.change) for entry in sandbox.evidence.file_diffs] == [
+        ("README.md", "modified")
+    ]
+    assert any(error.code == "TRACE_FAILED" for error in sandbox.evidence.errors)
+
+
+def test_trace_counts_repo_files_without_bait_cache_or_directories(repo, monkeypatch):
+    manifests = iter(
+        [
+            {
+                "README.md": Entry(kind="file", mode=0o666, sha256="0" * 64),
+                "build/output": Entry(kind="file", mode=0o666, sha256="0" * 64),
+                ".env": Entry(kind="file", mode=0o666, sha256="0" * 64),
+                "src": Entry(kind="dir", mode=0o777),
+            },
+            {},
+        ]
+    )
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, client_factory=fake_client)
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert sandbox.evidence.staged_file_count == 1
+    assert [entry.path for entry in sandbox.evidence.file_diffs if entry.is_repo_file] == [
+        "README.md"
+    ]
+
+
+@pytest.mark.parametrize("bound", ["bytes", "entries", "file"])
+def test_home_writes_share_repository_collection_limits(repo, monkeypatch, bound):
+    from run.staging import StagingLimits
+
+    (repo / "README.md").write_text("x")
+    limits = StagingLimits(max_bytes=10, max_entries=2, max_file_bytes=8)
+    file = Entry(kind="file", mode=0o666, size=6, sha256="0" * 64)
+    if bound == "bytes":
+        after = {"repo.txt": file, f"{CAGE_HOME}/.cache/data": file}
+    elif bound == "entries":
+        after = {f"{CAGE_HOME}/.cache/" + str(i): Entry(kind="dir", mode=0o777) for i in range(3)}
+    else:
+        after = {f"{CAGE_HOME}/data": Entry(kind="file", mode=0o666, size=8, sha256="0" * 64)}
+    manifests = iter([{}, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, SandboxConfig(staging=limits), client_factory=fake_client)
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
+    assert sandbox.evidence.status == "error"
+    assert any(entry.path.startswith(f"{CAGE_HOME}/") for entry in sandbox.evidence.file_diffs)
+
+
+@pytest.mark.parametrize(
+    "changed,total,after_size,expected",
+    [(50, 50, 0, "BLOCK"), (1, 50, 0, "FLAG"), (50, 50, 4, "ALLOW")],
+)
+def test_truncated_repository_files_use_deletion_thresholds(
+    repo, monkeypatch, changed, total, after_size, expected
+):
+    from run.evidence import RunComponents, RunEvidence
+    from run.verdict import ReadOutcome, fuse
+
+    before = {
+        f"src/{i}.py": Entry(kind="file", mode=0o666, size=10, sha256="0" * 64)
+        for i in range(total)
+    }
+    after = dict(before)
+    for i in range(changed):
+        after[f"src/{i}.py"] = Entry(kind="file", mode=0o666, size=after_size, sha256="1" * 64)
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, client_factory=fake_client)
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    run = RunEvidence(
+        status="complete",
+        components=RunComponents(**{key: State.COMPLETE for key in RunComponents.model_fields}),
+        tool_log=[CommandResult(command=["run_cmd", "true"], exit_code=0)],
+        file_diffs=sandbox.evidence.file_diffs,
+        staged_file_count=sandbox.evidence.staged_file_count,
+    )
+    assert fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), run).verdict == expected
+
+
+@pytest.mark.parametrize("replace", [False, True])
+def test_trace_recognizes_empty_file_replacement_and_keeps_exclusions(repo, monkeypatch, replace):
+    from run.trace import snapshot
+
+    paths = ["README.md", ".env", "build/output", "node_modules/pkg/a", "empty"]
+    for path in paths:
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("" if path == "empty" else "original")
+    before = snapshot(repo)
+    for path in paths:
+        target = repo / path
+        if replace:
+            target.unlink()
+        target.write_text("")
+        target.chmod(0o600)
+    after = snapshot(repo)
+    before[f"{CAGE_HOME}/data"] = Entry(kind="file", mode=0o666, size=5, sha256="0" * 64)
+    after[f"{CAGE_HOME}/data"] = Entry(kind="file", mode=0o666, size=0, sha256="1" * 64)
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(repo, client_factory=fake_client)
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert [entry.path for entry in sandbox.evidence.file_diffs if entry.is_truncated] == [
+        "README.md"
+    ]
+    assert sandbox.evidence.staged_file_count == 2

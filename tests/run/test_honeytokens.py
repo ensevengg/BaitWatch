@@ -362,6 +362,30 @@ def test_canary_url_is_detected_by_host_label_and_whole_url():
     assert all(hit.token_id == "ht-fixture" for hit in scan.hits)
 
 
+def test_tls_token_after_sixteen_filler_bytes_is_detected():
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    capture = b"\x16\x03\x01hello" + b"f" * 16 + token.value.encode()
+    scan = scan_records([tls_record(capture_hex=capture.hex())], (token,))
+    assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-fixture", "tls")]
+
+
+def test_tls_token_in_clienthello_session_id_bytes_is_detected():
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    capture = (
+        b"\x16\x03\x01\x00\x40\x01\x00\x00\x3c\x03\x03" + bytes(32) + bytes([len(token.value)])
+    )
+    capture += token.value.encode()
+    scan = scan_records([tls_record(sni="pypi.org", capture_hex=capture.hex())], (token,))
+    assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-fixture", "tls")]
+
+
+def test_tls_base64_token_in_captured_bytes_is_detected():
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    capture = b"prefix" + base64.b64encode(token.value.encode())
+    scan = scan_records([tls_record(capture_hex=capture.hex())], (token,))
+    assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-fixture", "tls")]
+
+
 def test_truncated_records_are_still_searched_and_yield_hits():
     token = _token("BAITWATCH_FAKE_abcd2345")
     scan = scan_records(

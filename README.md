@@ -76,6 +76,7 @@ Needs Linux, Docker Engine 28 or later, and uv.
 uv sync --frozen --extra dev --extra cpu
 docker pull alpine:3.20
 docker pull python:3.12-alpine
+uv run --no-sync python -m run.cage build
 bash run/check.sh                    # lint, format and RUN tests, including Docker isolation
 baitwatch-run sandbox <repo> -- echo hello
 ```

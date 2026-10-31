@@ -32,6 +32,8 @@ jobs:
         run: |
           docker pull alpine:3.20
           docker pull python:3.12-alpine
+      - name: Build trusted cage image
+        run: uv run --no-sync python -m run.cage build
       - name: Unit and Docker integration tests
         run: uv run --no-sync pytest -m "not gpu" tests/run tests/e2e --junitxml=artifacts/pytest.xml
 

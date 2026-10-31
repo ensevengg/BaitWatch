@@ -43,7 +43,7 @@ include = ["read*", "run*", "attacks*", "hooks*"]
 [tool.setuptools.package-data]
 read = ["model_config.json"]
 # Data, not modules: the sink programs run inside their own containers.
-run = ["sinks/*.py"]
+run = ["sinks/*.py", "cage/Dockerfile"]
 # Setuptools globs skip leading dots, so dotfiles and dot-directories need
 # explicit patterns. Without them the wheel loses `.cursorrules`, `.mcp.json`,
 # `.vscode/`, `.claude/`, `.github/`, `.env.example` and the test-data markers.

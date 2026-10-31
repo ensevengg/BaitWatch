@@ -259,10 +259,18 @@ def test_tls_clienthello_sni_is_logged(http_sink):
         pytest.raises((ssl.SSLError, OSError)),
         socket.create_connection(("127.0.0.1", http_sink["tls_port"]), timeout=SINK_TIMEOUT) as raw,
     ):
-        # The sink never answers the handshake, so it must fail.
+        # The sink answers the handshake with a fatal alert, so it must fail.
         tls = context.wrap_socket(raw, server_hostname="exfil.evil.example")
         tls.close()
-    hit = read_records(http_sink["log"], "tls")[-1]
+    hit = None
+    deadline = time.monotonic() + SINK_TIMEOUT
+    while time.monotonic() < deadline:
+        hits = read_records(http_sink["log"], "tls")
+        if hits:
+            hit = hits[-1]
+            break
+        time.sleep(0.05)
+    assert hit is not None, "the ClientHello was never logged"
     assert hit["source_ip"] == "127.0.0.1"
     assert hit["sni"] == "exfil.evil.example"
 
@@ -534,6 +542,7 @@ class SegmentedConn:
     def __init__(self, segments: list[bytes]):
         self._segments = [bytearray(segment) for segment in segments]
         self.consumed = 0
+        self.sent: list[bytes] = []
 
     def recv(self, size: int) -> bytes:
         while self._segments and not self._segments[0]:
@@ -544,6 +553,9 @@ class SegmentedConn:
         del self._segments[0][: len(chunk)]
         self.consumed += len(chunk)
         return chunk
+
+    def sendall(self, payload: bytes) -> None:
+        self.sent.append(payload)
 
 
 def padded_head(target: int) -> bytes:
@@ -1085,6 +1097,26 @@ def run_handle_tls(segments: list[bytes]) -> dict:
     return records[0]
 
 
+def test_tls_read_past_the_limit_stays_within_the_parser_bound(tmp_path):
+    from run.evidence import RunEvidence
+    from run.sink_logs import read_sink_log
+    from run.verdict import ReadOutcome, fuse
+
+    module = load_sink_module("http_sink.py")
+    hello = build_client_hello("big-pq.evil.example", module.TLS_READ_LIMIT + 8192)
+    wire = tls_records(hello, 60_000)
+    first = module.TLS_READ_LIMIT - 1
+    record = run_handle_tls([wire[:first], wire[first : first + 4096]])
+    assert record["total_bytes"] == module.TLS_READ_LIMIT
+    assert record["capture_incomplete"] is True
+    path = tmp_path / "tls.jsonl"
+    path.write_text(json.dumps(record) + "\n")
+    captured = read_sink_log(path)
+    assert all("bounded hex" not in problem for problem in captured.problems)
+    assert [hit.destination for hit in captured.tls_hits] == ["big-pq.evil.example"]
+    assert fuse(ReadOutcome(), RunEvidence(tls_hits=captured.tls_hits)).verdict == "BLOCK"
+
+
 def test_tls_clienthello_cut_short_before_the_record_completes_flags_incomplete():
     record = run_handle_tls([b"\x16\x03\x01\x00\x20\x01"])  # promises 32 bytes, sends 1
     assert record["sni"] is None
@@ -1102,6 +1134,302 @@ def test_tls_complete_clienthello_and_non_tls_contacts_are_not_flagged_incomplet
     empty = run_handle_tls([b""])
     assert empty["sni"] is None
     assert "capture_incomplete" not in empty
+
+
+def real_client_hello(sni: str) -> bytes:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = context.wrap_bio(incoming, outgoing, server_side=False, server_hostname=sni)
+    with pytest.raises(ssl.SSLWantReadError):
+        tls.do_handshake()
+    return outgoing.read()
+
+
+def test_tls_real_clienthello_alone_is_hello_only():
+    wire = real_client_hello("pypi.org")
+    assert wire[0] == 0x16
+    record = run_handle_tls([wire])
+    assert record["sni"] == "pypi.org"
+    assert record["hello_only"] is True
+    assert record["hello_record_length"] == len(wire)
+    assert record["total_bytes"] == len(wire)
+    assert record["extra_bytes"] == 0
+    assert "capture_incomplete" not in record
+
+
+def test_tls_real_clienthello_split_across_tcp_segments_is_hello_only():
+    wire = real_client_hello("pypi.org")
+    record = run_handle_tls([wire[:7], wire[7:100], wire[100:]])
+    assert record["hello_only"] is True
+    assert record["total_bytes"] == len(wire)
+
+
+def test_tls_validated_hello_gets_a_fatal_alert_and_stays_hello_only():
+    wire = real_client_hello("pypi.org")
+    module = load_sink_module("http_sink.py")
+    conn = FakeTlsConn([wire])
+    records = []
+
+    class Log:
+        def write(self, record):
+            records.append(record)
+
+    module.handle_tls(conn, ("127.0.0.1", 40000), Log())
+    assert conn.sent == [module.TLS_FATAL_ALERT]
+    assert records[0]["hello_only"] is True
+
+
+def test_tls_clienthello_with_appended_application_data_is_not_hello_only():
+    wire = real_client_hello("pypi.org")
+    app = b"\x17\x03\x03\x00\x04dead"
+    record = run_handle_tls([wire, app])
+    assert record["hello_only"] is False
+    assert record["hello_record_length"] == len(wire)
+    assert record["total_bytes"] == len(wire) + len(app)
+    assert record["extra_bytes"] == len(app)
+    assert record["extra_prefix"] == app[:16].hex()
+    coalesced = run_handle_tls([wire + app])
+    assert coalesced["hello_only"] is False
+    assert coalesced["extra_bytes"] == len(app)
+
+
+def hello_wire(
+    *,
+    record_version=b"\x03\x01",
+    legacy=b"\x03\x03",
+    session_id=b"",
+    cipher_suites=b"\x13\x01",
+    compression=b"\x00",
+    extensions=(),
+    extension_blob=None,
+    trailing=b"",
+):
+    if extension_blob is None:
+        extension_blob = b"".join(
+            int(kind).to_bytes(2, "big") + len(data).to_bytes(2, "big") + data
+            for kind, data in extensions
+        )
+    body = legacy + bytes(range(32)) + bytes([len(session_id)]) + session_id
+    body += len(cipher_suites).to_bytes(2, "big") + cipher_suites
+    body += bytes([len(compression)]) + compression
+    body += len(extension_blob).to_bytes(2, "big") + extension_blob + trailing
+    handshake = b"\x01" + len(body).to_bytes(3, "big") + body
+    return b"\x16" + record_version + len(handshake).to_bytes(2, "big") + handshake
+
+
+def test_tls_valid_synthetic_clienthello_is_hello_only():
+    wire = hello_wire(extensions=[(43, b"\x02\x03\x04"), (51, b"\x00\x1d\x00\x20" + bytes(32))])
+    record = run_handle_tls([wire])
+    assert record["hello_only"] is True
+    assert record["capture_hex"] == wire.hex()
+
+
+@pytest.mark.parametrize(
+    "wire",
+    [
+        hello_wire(record_version=b"\x03\x00"),
+        hello_wire(record_version=b"\x02\x01"),
+        hello_wire(legacy=b"\x02\x00"),
+        hello_wire(session_id=b"x" * 33),
+        hello_wire(cipher_suites=b"\x13"),
+        hello_wire(cipher_suites=b""),
+        hello_wire(compression=b""),
+        hello_wire(compression=b"\x01"),
+        hello_wire(trailing=b"\x00"),
+        hello_wire(extension_blob=b"\x00\x15\x00\x10\x00"),
+        hello_wire(extensions=[(21, b"A" * 100)]),
+        hello_wire(extensions=[(21, b"\x00" * 3000)]),
+        hello_wire(extensions=[(21, b"\x00" * 17000)]),
+    ],
+)
+def test_tls_malformed_clienthello_is_not_hello_only(wire):
+    record = run_handle_tls([wire])
+    assert record["hello_only"] is False
+
+
+def test_tls_capture_hex_covers_extra_past_sixteen_bytes():
+    wire = real_client_hello("pypi.org")
+    extra = b"f" * 16 + b"BAITWATCH_FAKE_token-after-filler"
+    record = run_handle_tls([wire + extra])
+    assert record["hello_only"] is False
+    assert record["capture_hex"] == (wire + extra).hex()
+    assert record["extra_prefix"] == extra[:16].hex()
+
+
+def test_tls_clienthello_split_across_two_records_is_not_hello_only():
+    wire = real_client_hello("pypi.org")
+    handshake = wire[5:]
+    half = len(handshake) // 2
+    split = (
+        b"\x16\x03\x01"
+        + half.to_bytes(2, "big")
+        + handshake[:half]
+        + b"\x16\x03\x01"
+        + (len(handshake) - half).to_bytes(2, "big")
+        + handshake[half:]
+    )
+    record = run_handle_tls([split])
+    assert record["sni"] == "pypi.org"
+    assert record["hello_only"] is False
+
+
+def test_tls_clienthello_with_trailing_garbage_is_not_hello_only():
+    wire = real_client_hello("pypi.org")
+    record = run_handle_tls([wire + b"garbage!"])
+    assert record["hello_only"] is False
+    assert record["extra_bytes"] == 8
+
+
+class SlowTlsConn(FakeTlsConn):
+    def recv(self, size: int) -> bytes:
+        data = super().recv(size)
+        if data:
+            return data
+        raise TimeoutError("timed out")
+
+
+def test_tls_peer_silent_through_the_drain_window_is_not_hello_only():
+    wire = real_client_hello("pypi.org")
+    module = load_sink_module("http_sink.py")
+    records = []
+
+    class Log:
+        def write(self, record):
+            records.append(record)
+
+    started = time.monotonic()
+    module.handle_tls(SlowTlsConn([wire]), ("127.0.0.1", 40000), Log())
+    assert time.monotonic() - started < 2
+    assert records[0]["hello_only"] is False
+    assert records[0]["extra_bytes"] == 0
+
+
+def test_tls_silent_raw_client_gets_the_fatal_alert_and_is_not_hello_only(http_sink):
+    wire = real_client_hello("pypi.org")
+    module = load_sink_module("http_sink.py")
+    with socket.create_connection(
+        ("127.0.0.1", http_sink["tls_port"]), timeout=SINK_TIMEOUT
+    ) as sock:
+        sock.sendall(wire)
+        started = time.monotonic()
+        hit = None
+        while time.monotonic() - started < 5:
+            hits = read_records(http_sink["log"], "tls")
+            if hits:
+                hit = hits[-1]
+                break
+            time.sleep(0.05)
+        assert hit is not None, "sink waited for a slow client instead of logging"
+        assert time.monotonic() - started < 4
+        assert hit["hello_only"] is False
+        assert hit["sni"] == "pypi.org"
+        assert hit["extra_bytes"] == 0
+        sock.settimeout(SINK_TIMEOUT)
+        assert recv_exact(sock, 7) == module.TLS_FATAL_ALERT
+        assert sock.recv(4096) == b""
+
+
+def test_tls_raw_client_that_closes_after_the_alert_is_hello_only(http_sink):
+    wire = real_client_hello("pypi.org")
+    module = load_sink_module("http_sink.py")
+    sock = socket.create_connection(("127.0.0.1", http_sink["tls_port"]), timeout=SINK_TIMEOUT)
+    sock.sendall(wire)
+    sock.settimeout(SINK_TIMEOUT)
+    assert recv_exact(sock, 7) == module.TLS_FATAL_ALERT
+    sock.close()  # an honest client gives up when the fatal alert arrives
+    started = time.monotonic()
+    hit = None
+    while time.monotonic() - started < 5:
+        hits = read_records(http_sink["log"], "tls")
+        if hits:
+            hit = hits[-1]
+            break
+        time.sleep(0.05)
+    assert hit is not None, "the client contact was never logged"
+    assert hit["hello_only"] is True
+    assert hit["sni"] == "pypi.org"
+    assert hit["total_bytes"] == len(wire)
+    assert hit["extra_bytes"] == 0
+
+
+def test_tls_real_ssl_client_handshake_failure_is_hello_only(http_sink):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    with (
+        pytest.raises(ssl.SSLError),
+        socket.create_connection(
+            ("127.0.0.1", http_sink["tls_port"]), timeout=SINK_TIMEOUT
+        ) as sock,
+    ):
+        context.wrap_socket(sock, server_hostname="pypi.org")
+    started = time.monotonic()
+    hit = None
+    while time.monotonic() - started < 5:
+        found = [
+            item for item in read_records(http_sink["log"], "tls") if item["sni"] == "pypi.org"
+        ]
+        if found:
+            hit = found[-1]
+            break
+        time.sleep(0.05)
+    assert hit is not None, "the ssl client contact was never logged"
+    assert hit["hello_only"] is True
+    assert hit["extra_bytes"] == 0
+
+
+def test_tls_late_bytes_inside_the_drain_window_are_captured_and_not_hello_only(http_sink):
+    wire = real_client_hello("pypi.org")
+    module = load_sink_module("http_sink.py")
+    late = b"\x17\x03\x03\x00\x04BAITWATCH_FAKE_late-tls-token"
+    with socket.create_connection(
+        ("127.0.0.1", http_sink["tls_port"]), timeout=SINK_TIMEOUT
+    ) as sock:
+        sock.sendall(wire)
+        sock.settimeout(SINK_TIMEOUT)
+        assert recv_exact(sock, 7) == module.TLS_FATAL_ALERT
+        time.sleep(0.3)  # still inside the one second drain window
+        sock.sendall(late)
+        started = time.monotonic()
+        hit = None
+        while time.monotonic() - started < 5:
+            hits = read_records(http_sink["log"], "tls")
+            if hits:
+                hit = hits[-1]
+                break
+            time.sleep(0.05)
+    assert hit is not None, "the late sender was never logged"
+    assert hit["hello_only"] is False
+    assert hit["extra_bytes"] == len(late)
+    assert late.hex() in hit["capture_hex"]
+
+
+def test_tls_bytes_sent_after_the_drain_window_cannot_rescue_hello_only(http_sink):
+    wire = real_client_hello("pypi.org")
+    module = load_sink_module("http_sink.py")
+    with socket.create_connection(
+        ("127.0.0.1", http_sink["tls_port"]), timeout=SINK_TIMEOUT
+    ) as sock:
+        sock.sendall(wire)
+        sock.settimeout(SINK_TIMEOUT)
+        assert recv_exact(sock, 7) == module.TLS_FATAL_ALERT
+        started = time.monotonic()
+        hit = None
+        while time.monotonic() - started < 5:
+            hits = read_records(http_sink["log"], "tls")
+            if hits:
+                hit = hits[-1]
+                break
+            time.sleep(0.05)
+        assert hit is not None, "the sink never closed the drain window"
+        assert hit["hello_only"] is False
+        # The window has closed; whatever is sent now is past the capture.
+        with contextlib.suppress(OSError):
+            sock.sendall(b"\x17\x03\x03\x00\x04BAITWATCH_FAKE_after-close" + b"A" * 4096)
+    assert hit["total_bytes"] == len(wire)
+    assert hit["extra_bytes"] == 0
 
 
 def test_http_expect_100_continue_client_gets_interim_response_and_full_body_capture(http_sink):

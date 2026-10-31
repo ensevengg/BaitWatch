@@ -4,18 +4,22 @@ The thresholds here are provisional until agreed with Manan; the fixed rules
 are already binding: any exception, timeout, truncated scan, missing component,
 READ incomplete/unavailable or RUN error is at least FLAG, never ALLOW, and any
 non-registry sink contact or honeytoken sent over the network is BLOCK. A
-decoy that only reads a honeytoken FLAGs. Package-registry lookups to the
-exact hosts in REGISTRY_HOSTS are network attempts, not exfiltration: they
-FLAG instead of BLOCK. The judge inside READ may escalate but never clears a
-high READ score, so fusion sees only the resulting top score.
+decoy that only reads a honeytoken FLAGs. Validated plain DNS lookups and
+hello-only TLS contacts to the exact hosts in REGISTRY_HOSTS do not affect
+the verdict. Other registry contacts remain attempts and FLAG instead of
+BLOCK. The judge inside READ may
+escalate but never clears a high READ score, so fusion sees only the resulting
+top score.
 """
 
+import re
 from dataclasses import dataclass
 
-from run.evidence import NetworkHit, ReadEvidence, RunEvidence, State, VerdictReport
+from run.evidence import CommandResult, NetworkHit, ReadEvidence, RunEvidence, State, VerdictReport
 
 # Provisional until agreed with Manan.
 READ_BLOCK_SCORE = 0.9
+CAGE_HOME = "/cage/home"
 REGISTRY_HOSTS = (
     "pypi.org",
     "registry.npmjs.org",
@@ -66,8 +70,152 @@ def _is_registry_attempt(hit: NetworkHit, kind: str = "dns") -> bool:
     return host.lower().removesuffix(".") in REGISTRY_HOSTS
 
 
+def _is_plain_registry_contact(hit: NetworkHit, kind: str) -> bool:
+    if kind == "tls":
+        return hit.hello_only is True and (
+            re.fullmatch(
+                r"hello_only=true hello_record_length=([1-9][0-9]*) total_bytes=\1 extra_bytes=0",
+                hit.detail,
+            )
+            is not None
+        )
+    return (
+        kind == "dns"
+        and re.fullmatch(
+            r"qtype=(?:A|NS|CNAME|SOA|PTR|MX|TXT|AAAA|SRV|NAPTR|DNAME|OPT|DS|RRSIG|DNSKEY|HTTPS|ANY)"
+            r"(?: raw=.*)?",
+            hit.detail,
+        )
+        is not None
+    )
+
+
 def _bounded(text: str) -> str:
     return text[:_REASON_PART_CHARS]
+
+
+_CONTROL_DIRS = frozenset(
+    {
+        ".claude",
+        ".cursor",
+        ".windsurf",
+        ".codex",
+        ".gemini",
+        ".continue",
+        ".vscode",
+        ".idea",
+        ".husky",
+    }
+)
+_CONTROL_FILES = frozenset(
+    {
+        ".claude.json",
+        ".claude.json.backup",
+        ".clinerules",
+        ".aider.conf.yml",
+        ".mcp.json",
+        "mcp.json",
+        "agents.md",
+        "claude.md",
+        "gemini.md",
+        ".cursorrules",
+        ".windsurfrules",
+        ".pre-commit-config.yaml",
+        ".envrc",
+    }
+)
+
+
+_HOME_SENSITIVE = frozenset(
+    {
+        ".bashrc",
+        ".profile",
+        ".bash_profile",
+        ".bash_login",
+        ".bash_logout",
+        ".zshrc",
+        ".zshenv",
+        ".zprofile",
+        ".zlogin",
+        ".zlogout",
+        ".kshrc",
+        ".cshrc",
+        ".tcshrc",
+        ".login",
+        ".config",
+        ".ssh",
+        ".gitconfig",
+        ".npmrc",
+        ".pypirc",
+        ".crontab",
+        "crontab",
+        "cron",
+        "cron.d",
+    }
+)
+
+
+def _agent_control(path: str) -> bool:
+    parts = path.casefold().split("/")
+    if any(
+        parent == ".git" and child in {"hooks", "config"}
+        for parent, child in zip(parts, parts[1:], strict=False)
+    ):
+        return True
+    cache_at = next(
+        (i for i, part in enumerate(parts[:-1]) if part in BUILD_CACHE_DIRS), len(parts)
+    )
+    scope = parts[:cache_at]
+    if path.startswith(f"{CAGE_HOME}/") and any(
+        part in _HOME_SENSITIVE or part.startswith("cron.") for part in scope[3:]
+    ):
+        return True
+    return any(part in _CONTROL_DIRS or part in _CONTROL_FILES for part in scope) or any(
+        parent == ".github" and child in {"copilot-instructions.md", "workflows"}
+        for parent, child in zip(scope, scope[1:], strict=False)
+    )
+
+
+BUILD_CACHE_DIRS = frozenset(
+    {
+        "build",
+        "dist",
+        "target",
+        "node_modules",
+        ".venv",
+        "venv",
+        "site-packages",
+        "vendor",
+        ".npm",
+        ".yarn",
+        ".pnpm-store",
+        "__pycache__",
+        ".pytest_cache",
+        ".cache",
+    }
+)
+
+
+def is_build_cache(path: str) -> bool:
+    return any(part.casefold() in BUILD_CACHE_DIRS for part in path.split("/")[:-1])
+
+
+def _path_reason(label: str, paths: list[str]) -> str:
+    shown = ", ".join(path[:100] for path in paths[:3])
+    return _bounded(f"{label} ({len(paths)}): {shown}")
+
+
+def _executed(entry: CommandResult) -> bool:
+    if len(entry.command) != 2 or entry.command[0] != "run_cmd":
+        return False
+    if entry.exit_code is None or entry.exit_code in {126, 127}:
+        return False
+    # Shell diagnostics also catch a missing command masked by a later shell exit.
+    return not re.search(
+        r"^(?:/[^ :]+/)?(?:sh|bash): .*: (?:command )?not found$",
+        entry.stderr,
+        re.MULTILINE,
+    )
 
 
 def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
@@ -77,7 +225,34 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     flags: list[str] = []
     hits = [(kind, hit) for kind in ("dns", "http", "tls") for hit in getattr(run, f"{kind}_hits")]
     exfil = [hit for kind, hit in hits if not _is_registry_attempt(hit, kind)]
-    attempts = [hit for kind, hit in hits if _is_registry_attempt(hit, kind)]
+    attempts = [
+        hit
+        for kind, hit in hits
+        if _is_registry_attempt(hit, kind) and not _is_plain_registry_contact(hit, kind)
+    ]
+
+    controls = [change.path for change in run.file_diffs if _agent_control(change.path)]
+    if controls:
+        blockers.append(_path_reason("agent-control or persistence changes", controls))
+
+    deleted = sorted(
+        [
+            change.path
+            for change in run.file_diffs
+            if (change.change == "deleted" or (change.change == "modified" and change.is_truncated))
+            and change.is_repo_file
+            and not change.path.startswith(f"{CAGE_HOME}/")
+            and not is_build_cache(change.path)
+        ]
+    )
+    if deleted:
+        reason = _path_reason("staged repository file deletions or truncations", deleted)
+        if len(deleted) > 200 or (
+            run.staged_file_count and len(deleted) * 2 >= run.staged_file_count
+        ):
+            blockers.append(reason)
+        else:
+            flags.append(reason)
 
     if exfil:
         destinations = ", ".join(dict.fromkeys(hit.destination for hit in exfil))
@@ -114,11 +289,11 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     if exclusions:
         shown = ", ".join(path[:100] for path in exclusions[:3])
         flags.append(_bounded(f"RUN excluded {len(exclusions)} unscanned path(s): {shown}"))
-    if not any(
-        len(entry.command) == 2 and entry.command[0] == "run_cmd" and entry.exit_code is not None
-        for entry in run.tool_log
-    ):
-        flags.append("RUN decoy did not execute a run_cmd tool call")
+    if not any(_executed(entry) for entry in run.tool_log):
+        if any(entry.command[0] == "run_cmd" for entry in run.tool_log):
+            flags.append("RUN setup could not run in the cage (no executed run_cmd)")
+        else:
+            flags.append("RUN decoy did not execute a run_cmd tool call")
     if read_only:
         tokens = ", ".join(dict.fromkeys(hit.token_id for hit in read_only))
         flags.append(_bounded(f"the decoy read planted honeytoken(s): {tokens}"))

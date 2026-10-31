@@ -47,6 +47,7 @@ class NetworkHit(StrictModel):
     scan_token: str | None = None
     destination: str
     detail: str = ""
+    hello_only: bool | None = None
 
 
 class HoneytokenHit(StrictModel):
@@ -56,6 +57,8 @@ class HoneytokenHit(StrictModel):
 
 
 class FileDiff(StrictModel):
+    is_repo_file: bool = False
+    is_truncated: bool = False
     path: str
     change: Literal["added", "modified", "deleted"]
 
@@ -88,6 +91,7 @@ class RunEvidence(StrictModel):
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     status: Literal["incomplete", "complete", "error"] = "incomplete"
     components: RunComponents = Field(default_factory=RunComponents)
+    staged_file_count: int = Field(default=0, ge=0)
     staging_exclusions: list[str] = Field(default_factory=list)
     dns_hits: list[NetworkHit] = Field(default_factory=list)
     http_hits: list[NetworkHit] = Field(default_factory=list)

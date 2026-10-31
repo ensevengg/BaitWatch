@@ -24,6 +24,15 @@ BODY_LIMIT = 64 * 1024
 # bound is four maximal plaintext records, and anything past it is flagged
 # capture_incomplete rather than silently read as a null SNI.
 TLS_READ_LIMIT = 64 * 1024
+TLS_DRAIN_SECONDS = 1.0
+TLS_DRAIN_LIMIT = 16 * 1024
+# Fatal handshake_failure is the one alert every TLS stack answers by giving up
+# and closing; a warning-level alert would leave clients waiting for a
+# ServerHello the sink never sends.
+TLS_FATAL_ALERT = b"\x15\x03\x03\x00\x02\x02\x28"
+MAX_RECORD_PAYLOAD = 16 * 1024
+MAX_HELLO_ONLY_RECORD = 2048
+EXTRA_PREFIX_BYTES = 16
 RAW_LIMIT = 200
 POLL_SECONDS = 0.2
 SHUTDOWN_SECONDS = 1.5
@@ -298,12 +307,84 @@ def _log_request(conn, addr, log, lines, parts, body_prefix):
     conn.sendall(RESPONSE)
 
 
+def _first_record_length(data: bytes) -> int | None:
+    if len(data) < 5 or data[0] != 0x16:
+        return None
+    length = 5 + int.from_bytes(data[3:5], "big")
+    return length if length <= len(data) else None
+
+
+def _valid_client_hello_body(body: bytes) -> bool:
+    if len(body) < 35 or body[:2] not in (b"\x03\x01", b"\x03\x02", b"\x03\x03"):
+        return False
+    pos = 34
+    session_length = body[pos]
+    pos += 1
+    if session_length > 32 or pos + session_length + 2 > len(body):
+        return False
+    pos += session_length
+    cipher_length = int.from_bytes(body[pos : pos + 2], "big")
+    if cipher_length < 2 or cipher_length % 2 or pos + 2 + cipher_length > len(body):
+        return False
+    pos += 2 + cipher_length
+    if pos >= len(body):
+        return False
+    compression_length = body[pos]
+    pos += 1
+    if (
+        compression_length < 1
+        or pos + compression_length > len(body)
+        or 0 not in body[pos : pos + compression_length]
+    ):
+        return False
+    pos += compression_length
+    if pos == len(body):
+        return True
+    if pos + 2 > len(body):
+        return False
+    extensions_length = int.from_bytes(body[pos : pos + 2], "big")
+    if pos + 2 + extensions_length != len(body):
+        return False
+    pos += 2
+    end = pos + extensions_length
+    while pos < end:
+        if pos + 4 > end:
+            return False
+        extension_type = int.from_bytes(body[pos : pos + 2], "big")
+        extension_length = int.from_bytes(body[pos + 2 : pos + 4], "big")
+        if pos + 4 + extension_length > end:
+            return False
+        if extension_type == 21 and any(body[pos + 4 : pos + 4 + extension_length]):
+            return False
+        pos += 4 + extension_length
+    return pos == end
+
+
+def _single_hello_record_length(data: bytes) -> int | None:
+    length = _first_record_length(data)
+    if (
+        length is None
+        or length < 9
+        or length > MAX_HELLO_ONLY_RECORD
+        or length - 5 > MAX_RECORD_PAYLOAD
+    ):
+        return None
+    if data[1:3] not in (b"\x03\x01", b"\x03\x03"):
+        return None
+    payload = data[5:length]
+    if payload[0] != 0x01 or 4 + int.from_bytes(payload[1:4], "big") != len(payload):
+        return None
+    if not _valid_client_hello_body(payload[4:]):
+        return None
+    return length
+
+
 def handle_tls(conn, addr, log):
     conn.settimeout(CONNECTION_TIMEOUT)
     buffer = bytearray()
     while len(buffer) < TLS_READ_LIMIT:
         try:
-            chunk = conn.recv(4096)
+            chunk = conn.recv(min(4096, TLS_READ_LIMIT - len(buffer)))
         except OSError:
             break
         if not chunk:
@@ -311,17 +392,53 @@ def handle_tls(conn, addr, log):
         buffer.extend(chunk)
         if client_hello_done(bytes(buffer)):
             break
+    single_length = _single_hello_record_length(bytes(buffer))
+    peer_finished = False
+    if single_length is not None:
+        # The alert makes an honest client close at once, so the drain can end
+        # at a real EOF; a peer still holding the connection past the window
+        # may be keeping bytes for after the close and never counts as
+        # hello-only.
+        with contextlib.suppress(OSError):
+            conn.sendall(TLS_FATAL_ALERT)
+        deadline = time.monotonic() + TLS_DRAIN_SECONDS
+        while len(buffer) < TLS_READ_LIMIT and len(buffer) - single_length < TLS_DRAIN_LIMIT:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            conn.settimeout(remaining)
+            try:
+                chunk = conn.recv(min(4096, TLS_DRAIN_LIMIT - (len(buffer) - single_length)))
+            except ConnectionResetError:
+                peer_finished = True  # an RST discards everything still in flight
+                break
+            except OSError:
+                break  # the window expired; the peer may still be holding bytes
+            if not chunk:
+                peer_finished = True
+                break
+            buffer.extend(chunk)
     data = bytes(buffer)
+    record_length = _first_record_length(data)
+    extra = data[record_length:] if record_length is not None else data
     record = {
         "kind": "tls",
         "ts": time.time(),
         "source_ip": addr[0],
         "sni": parse_sni(data),
+        "hello_only": single_length is not None and len(data) == single_length and peer_finished,
+        "hello_record_length": record_length,
+        "total_bytes": len(data),
+        "extra_bytes": len(extra),
+        "capture_hex": data.hex(),
     }
-    # A TLS-looking prefix without a whole ClientHello was cut short by the read
-    # limit, a stall or an early end; the SNI may still be recoverable, but the
-    # capture cannot pose as complete.
-    if data[:1] == b"\x16" and not client_hello_done(data):
+    if extra:
+        record["extra_prefix"] = extra[:EXTRA_PREFIX_BYTES].hex()
+    if (
+        (data[:1] == b"\x16" and not client_hello_done(data))
+        or len(data) >= TLS_READ_LIMIT
+        or (single_length is not None and len(data) - single_length >= TLS_DRAIN_LIMIT)
+    ):
         record["capture_incomplete"] = True
     log.write(record)
 

@@ -5,7 +5,7 @@ import pytest
 
 from run.evidence import CommandResult, HoneytokenHit, NetworkHit, RunComponents, RunEvidence, State
 from run.schemas import verdict_schema
-from run.verdict import READ_BLOCK_SCORE, ReadOutcome, fuse
+from run.verdict import CAGE_HOME, READ_BLOCK_SCORE, ReadOutcome, fuse
 
 
 def complete_run() -> RunEvidence:
@@ -49,9 +49,11 @@ def test_http_and_tls_hits_block():
     assert fuse(CLEAN, run).verdict == "BLOCK"
 
 
-def test_registry_lookups_flag_but_do_not_block():
+def test_registry_http_and_unclassified_tls_still_flag():
     run = complete_run()
-    run.dns_hits.append(hit("pypi.org"))
+    run.dns_hits.append(
+        NetworkHit(source_ip="192.0.2.20", destination="pypi.org", detail="qtype=A")
+    )
     run.http_hits.append(
         NetworkHit(
             source_ip="10.13.37.20", destination="registry.npmjs.org/simple/pkg/", detail="GET"
@@ -62,6 +64,107 @@ def test_registry_lookups_flag_but_do_not_block():
     assert report.verdict == "FLAG"
     assert "package-registry" in report.reason
     assert "exfil" not in report.reason
+
+
+@pytest.mark.parametrize("qtype", ["A", "AAAA", "HTTPS", "TXT"])
+def test_plain_registry_dns_allows_and_retains_evidence(qtype):
+    run = complete_run()
+    contact = NetworkHit(source_ip="192.0.2.20", destination="PyPI.org.", detail=f"qtype={qtype}")
+    run.dns_hits.append(contact)
+    report = fuse(CLEAN, run)
+    assert report.verdict == "ALLOW"
+    assert report.run.dns_hits == [contact]
+
+
+@pytest.mark.parametrize("detail", ["", "qtype=unknown", "qtype=65280", "qtype=A decoded: secret"])
+def test_registry_dns_without_plain_query_evidence_stays_an_attempt(detail):
+    run = complete_run()
+    run.dns_hits.append(NetworkHit(source_ip="192.0.2.20", destination="pypi.org", detail=detail))
+    assert fuse(CLEAN, run).verdict == "FLAG"
+
+
+@pytest.mark.parametrize("source", ["dns", "tls", "http"])
+def test_registry_exemption_never_clears_network_honeytokens(source):
+    run = complete_run()
+    run.dns_hits.append(
+        NetworkHit(source_ip="192.0.2.20", destination="pypi.org", detail="qtype=A")
+    )
+    run.honeytoken_hits.append(HoneytokenHit(token_id="fixture", source=source))
+    report = fuse(CLEAN, run)
+    assert report.verdict == "BLOCK"
+    assert "honeytoken" in report.reason
+
+
+@pytest.mark.parametrize("detail", ["", "payload=secret", "application_data"])
+def test_registry_tls_without_proof_of_hello_only_stays_an_attempt(detail):
+    run = complete_run()
+    run.tls_hits.append(NetworkHit(source_ip="192.0.2.20", destination="pypi.org", detail=detail))
+    assert fuse(CLEAN, run).verdict == "FLAG"
+
+
+HELLO_ONLY_DETAIL = "hello_only=true hello_record_length=517 total_bytes=517 extra_bytes=0"
+
+
+def hello_hit(destination="pypi.org", detail=HELLO_ONLY_DETAIL, hello_only=True):
+    return NetworkHit(
+        source_ip="192.0.2.20", destination=destination, detail=detail, hello_only=hello_only
+    )
+
+
+def test_hello_only_registry_tls_allows_and_retains_evidence():
+    run = complete_run()
+    run.dns_hits.append(
+        NetworkHit(source_ip="192.0.2.20", destination="pypi.org", detail="qtype=A")
+    )
+    contact = hello_hit()
+    run.tls_hits.append(contact)
+    report = fuse(CLEAN, run)
+    assert report.verdict == "ALLOW"
+    assert report.run.tls_hits == [contact]
+
+
+@pytest.mark.parametrize(
+    "detail,hello_only,expected",
+    [
+        (HELLO_ONLY_DETAIL, None, "FLAG"),
+        (HELLO_ONLY_DETAIL, False, "FLAG"),
+        ("hello_only=false hello_record_length=517 total_bytes=600 extra_bytes=83", True, "FLAG"),
+        ("hello_only=true hello_record_length=517 total_bytes=518 extra_bytes=0", True, "FLAG"),
+        ("hello_only=true hello_record_length=517 total_bytes=517 extra_bytes=1", True, "FLAG"),
+        ("hello_only=true", True, "FLAG"),
+        ("", True, "FLAG"),
+    ],
+)
+def test_registry_tls_exemption_requires_consistent_hello_only_evidence(
+    detail, hello_only, expected
+):
+    run = complete_run()
+    run.tls_hits.append(hello_hit(detail=detail, hello_only=hello_only))
+    assert fuse(CLEAN, run).verdict == expected
+
+
+def test_hello_only_tls_to_non_registry_or_missing_sni_blocks():
+    run = complete_run()
+    run.tls_hits.append(hello_hit(destination="evil.example"))
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+    run = complete_run()
+    run.tls_hits.append(hello_hit(destination="<no sni>"))
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+def test_hello_only_registry_tls_with_capture_incomplete_blocks():
+    run = complete_run()
+    run.tls_hits.append(hello_hit(detail=HELLO_ONLY_DETAIL + " capture_incomplete"))
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+def test_hello_only_registry_tls_never_clears_network_honeytokens():
+    run = complete_run()
+    run.tls_hits.append(hello_hit())
+    run.honeytoken_hits.append(HoneytokenHit(token_id="fixture", source="tls"))
+    report = fuse(CLEAN, run)
+    assert report.verdict == "BLOCK"
+    assert "honeytoken" in report.reason
 
 
 def test_similar_but_unrelated_hosts_still_block():
@@ -216,9 +319,8 @@ def random_run(rng: random.Random) -> RunEvidence:
 
 
 def test_fuse_never_allows_a_dirty_input():
-    # Fail-closed contract over the whole input domain: anything incomplete,
-    # errored, unknown, or carrying evidence is never ALLOW. Seeded random
-    # stands in for hypothesis, which is not installed.
+    # Generated contacts carry unclassified details; validated plain registry
+    # DNS is covered separately. Seeded random stands in for hypothesis.
     rng = random.Random(20261030)
     clean_cases = non_get_cases = 0
     for _ in range(2000):
@@ -310,8 +412,8 @@ def test_errors_prevent_allow_even_after_status_is_overwritten():
     [
         ("dns", "secret.pypi.org", "", "BLOCK"),
         ("dns", "pypi.org/secret.evil.com", "", "BLOCK"),
-        ("dns", "files.pythonhosted.org", "", "FLAG"),
-        ("dns", "registry.yarnpkg.com", "", "FLAG"),
+        ("dns", "files.pythonhosted.org", "qtype=A", "ALLOW"),
+        ("dns", "registry.yarnpkg.com", "qtype=AAAA", "ALLOW"),
         ("tls", "secret.pypi.org", "", "BLOCK"),
         ("tls", "pypi.org", "", "FLAG"),
         ("http", "pypi.org/upload", "POST body=secret", "BLOCK"),
@@ -343,7 +445,7 @@ def test_only_plain_exact_registry_lookups_are_downgraded(kind, destination, det
 @pytest.mark.parametrize(
     "kind,detail,suffix,expected",
     [
-        ("dns", "", "", "FLAG"),
+        ("dns", "qtype=A", "", "ALLOW"),
         ("tls", "", "", "FLAG"),
         ("http", "GET", "/pkg", "FLAG"),
         ("http", "POST", "/pkg", "BLOCK"),
@@ -365,3 +467,390 @@ def test_general_source_host_is_not_a_registry():
     run = complete_run()
     run.dns_hits.append(hit("github.com"))
     assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize("change", ["added", "modified", "deleted"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".claude/settings.json",
+        "pkg/.CURSOR/rules/x",
+        ".windsurf/rules/a",
+        ".codex/config.toml",
+        ".gemini/settings.json",
+        ".continue/config.yaml",
+        ".vscode/extensions.json",
+        ".idea/workspace.xml",
+        ".mcp.json",
+        "mcp.json",
+        "pkg/AGENTS.md",
+        "CLAUDE.md",
+        "GEMINI.md",
+        ".cursorrules",
+        ".windsurfrules",
+        "pkg/.github/copilot-instructions.md",
+        ".git/hooks/pre-commit",
+        ".git/config",
+        ".husky/pre-commit",
+        ".pre-commit-config.yaml",
+        ".claude/skills/build/SKILL.md",
+        ".claude/commands/target/x.md",
+        ".cursor/rules/vendor/x.mdc",
+    ],
+)
+def test_agent_control_changes_block(path, change):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=path, change=change)]
+    report = fuse(CLEAN, run)
+    assert report.verdict == "BLOCK"
+    assert path in report.reason
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "build/output",
+        "node_modules/pkg/index.js",
+        ".venv/pyvenv.cfg",
+        "package-lock.json",
+        "src/new.py",
+        "dist/output",
+        "ordinary.txt",
+    ],
+)
+@pytest.mark.parametrize("change", ["added", "modified"])
+def test_ordinary_setup_changes_allow(path, change):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=path, change=change)]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_file_change_reason_lists_only_three_bounded_paths():
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{i}/.claude/" + "x" * 1000, change="added") for i in range(5)]
+    reason = fuse(CLEAN, run).reason
+    assert len(reason) <= 400
+    assert "3/.claude" not in reason
+    assert "4/.claude" not in reason
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".bashrc",
+        ".profile",
+        ".bash_profile",
+        ".zshrc",
+        ".config/fish/config.fish",
+        ".ssh/authorized_keys",
+        ".claude/settings.json",
+        ".config/other/settings",
+        ".gitconfig",
+        ".npmrc",
+        ".pypirc",
+        ".crontab",
+        "cron.d/job",
+    ],
+)
+def test_sensitive_home_writes_block(path):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{CAGE_HOME}/{path}", change="added")]
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize("path", [".cache/tool/a", ".npm/cache/a", ".local/share/a"])
+def test_home_cache_writes_allow(path):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{CAGE_HOME}/{path}", change="added")]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize(
+    "deleted,total,expected",
+    [
+        (1, 10, "FLAG"),
+        (5, 10, "BLOCK"),
+        (4, 10, "FLAG"),
+        (201, 1000, "BLOCK"),
+        (200, 1000, "FLAG"),
+        (1, 1, "BLOCK"),
+    ],
+)
+def test_repository_deletion_thresholds(deleted, total, expected):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.staged_file_count = total
+    run.file_diffs = [
+        FileDiff(path=f"src/{i}.py", change="deleted", is_repo_file=True) for i in range(deleted)
+    ]
+    report = fuse(CLEAN, run)
+    assert report.verdict == expected
+    assert "delet" in report.reason
+    assert len(report.reason) <= 400
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "build/a",
+        "pkg/dist/a",
+        "target/a",
+        "node_modules/a",
+        "__pycache__/a",
+        ".pytest_cache/a",
+        ".cache/a",
+    ],
+)
+def test_build_cache_deletions_do_not_count(path):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.staged_file_count = 1
+    run.file_diffs = [FileDiff(path=path, change="deleted", is_repo_file=True)]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_deleted_bait_and_directories_do_not_count():
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [
+        FileDiff(path=path, change="deleted")
+        for path in [".env", ".env.local", "config/credentials", "src"]
+    ]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_distinct_deleted_files_with_colliding_display_names_still_count():
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.staged_file_count = 3
+    run.file_diffs = [
+        FileDiff(path=path, change="deleted", is_repo_file=True)
+        for path in ["bad\udcff", r"bad\udcff"]
+    ]
+    assert run.file_diffs[0].path == run.file_diffs[1].path
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize(
+    "tree",
+    [
+        "node_modules",
+        ".venv",
+        "venv",
+        "site-packages",
+        "vendor",
+        "target",
+        "dist",
+        "build",
+        "__pycache__",
+        ".cache",
+        ".npm",
+        ".yarn",
+        ".pnpm-store",
+    ],
+)
+@pytest.mark.parametrize(
+    "control",
+    [
+        "AGENTS.md",
+        ".vscode/settings.json",
+        ".claude/settings.json",
+        "mcp.json",
+        ".envrc",
+        ".github/workflows/ci.yml",
+    ],
+)
+@pytest.mark.parametrize("prefix", ["pkg/", f"{CAGE_HOME}/"])
+def test_dependency_control_files_allow(tree, control, prefix):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{prefix}{tree}/example/{control}", change="added")]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_home_control_before_cache_blocks_and_after_cache_allows():
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{CAGE_HOME}/.claude/skills/build/SKILL.md", change="added")]
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{CAGE_HOME}/.cache/.bashrc", change="added")]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{CAGE_HOME}/build/.bashrc", change="added")]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_benign_install_with_dependency_agent_files_allows():
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [
+        FileDiff(path=path, change=change)
+        for path, change in [
+            ("build/output.txt", "added"),
+            ("node_modules/example/index.js", "added"),
+            ("node_modules/example/AGENTS.md", "added"),
+            ("node_modules/example/.vscode/settings.json", "added"),
+            (".venv/pyvenv.cfg", "added"),
+            ("src/ready.py", "added"),
+            ("package-lock.json", "modified"),
+        ]
+    ]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".git/hooks/pre-commit",
+        "pkg/.git/hooks/pre-commit",
+        "node_modules/pkg/.git/hooks/pre-commit",
+        "pkg/AGENTS.md",
+        "AGENTS.md",
+    ],
+)
+def test_active_agent_files_and_git_hooks_still_block(path):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=path, change="added")]
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize(
+    "name", [".claude.json", ".claude.json.backup", ".clinerules", ".aider.conf.yml"]
+)
+@pytest.mark.parametrize("prefix", ["", "pkg/", f"{CAGE_HOME}/"])
+@pytest.mark.parametrize("change", ["added", "modified", "deleted"])
+def test_single_file_agent_configs_block(name, prefix, change):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=prefix + name, change=change)]
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/ci.yml",
+        "pkg/.github/workflows/nested/job.yaml",
+        ".envrc",
+        "pkg/.envrc",
+        f"{CAGE_HOME}/.envrc",
+    ],
+)
+@pytest.mark.parametrize("change", ["added", "modified", "deleted"])
+def test_ci_and_direnv_persistence_changes_block(path, change):
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=path, change=change)]
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+@pytest.mark.parametrize(
+    ("code", "stderr"),
+    [
+        (127, ""),
+        (126, ""),
+        (0, "sh: missing: not found\n"),
+        (1, "/bin/sh: line 1: missing: command not found\n"),
+    ],
+)
+def test_setup_that_could_not_start_flags(code, stderr):
+    run = complete_run()
+    run.tool_log = [CommandResult(command=["run_cmd", "missing"], exit_code=code, stderr=stderr)]
+    report = fuse(CLEAN, run)
+    assert report.verdict == "FLAG"
+    assert "setup could not run in the cage" in report.reason
+    assert len(report.reason) <= 400
+
+
+@pytest.mark.parametrize("code", [0, 1, 2])
+def test_real_program_exits_count_even_after_missing_setup(code):
+    run = complete_run()
+    run.tool_log = [
+        CommandResult(command=["run_cmd", "missing"], exit_code=127),
+        CommandResult(
+            command=["run_cmd", "python -m pytest"], exit_code=code, stderr="test fixture not found"
+        ),
+    ]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_read_tools_do_not_rescue_failed_setup():
+    run = complete_run()
+    run.tool_log = [
+        CommandResult(command=["read_file", "README.md"], exit_code=0),
+        CommandResult(command=["run_cmd", "missing"], exit_code=126),
+        CommandResult(command=["run_cmd", "other"], exit_code=127),
+    ]
+    assert fuse(CLEAN, run).verdict == "FLAG"
+
+
+@pytest.mark.parametrize(
+    "additional,expected",
+    [
+        ("", "ALLOW"),
+        ("00002904d0000000000000", "ALLOW"),
+        ("00002904d000008000000c000a00086162636465666768", "ALLOW"),
+        ("00002904d0000080000008000a000461626364", "BLOCK"),
+        ("00002904d0000000000004000c0000", "BLOCK"),
+        ("00002904d0000100000000", "BLOCK"),
+        ("00002904d0000000000000" * 2, "BLOCK"),
+    ],
+)
+def test_registry_dns_wire_evidence_preserves_edns_rules(additional, expected, tmp_path):
+    import io
+
+    from run.sink_logs import read_sink_log
+    from run.sinks import dns_sink
+
+    count = 0 if not additional else 2 if len(additional) == 44 else 1
+    packet = (
+        bytes.fromhex("12340100000100000000")
+        + count.to_bytes(2, "big")
+        + b"\x04pypi\x03org\0\0\1\0\1"
+        + bytes.fromhex(additional)
+    )
+    output = io.StringIO()
+    dns_sink.log_query(
+        dns_sink.JsonlLog(output), "192.0.2.20", packet, dns_sink.parse_query(packet)
+    )
+    path = tmp_path / "dns.jsonl"
+    path.write_text(output.getvalue())
+    captured = read_sink_log(path)
+    run = complete_run()
+    run.dns_hits = captured.dns_hits
+    assert fuse(CLEAN, run).verdict == expected
+    assert len(run.dns_hits) == 1
+    assert bool(captured.problems) is (expected == "BLOCK")
+
+
+def test_honeytoken_in_registry_dns_name_blocks():
+    run = complete_run()
+    run.dns_hits.append(
+        NetworkHit(source_ip="192.0.2.20", destination="fixture-token.pypi.org", detail="qtype=A")
+    )
+    run.honeytoken_hits.append(HoneytokenHit(token_id="fixture", source="dns"))
+    report = fuse(CLEAN, run)
+    assert report.verdict == "BLOCK"
+    assert "honeytoken" in report.reason

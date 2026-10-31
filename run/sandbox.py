@@ -12,9 +12,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import docker
-from docker.errors import APIError, DockerException, NotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount, Ulimit
 
+from run.cage import DEFAULT_IMAGE
 from run.capture import capture_attached, capture_exec
 from run.evidence import (
     CommandResult,
@@ -36,6 +37,7 @@ from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
 from run.trace import TraceError, TraceLimits, diff, error_paths, manifest_from_json
+from run.verdict import CAGE_HOME, is_build_cache
 
 SCAN_LABEL = "org.baitwatch.scan-id"
 DEFAULT_SUBNET = "10.13.37.0/24"
@@ -82,6 +84,10 @@ KILL_LINGERING = (
     "done; exit 1"
 )
 KILL_TIMEOUT_SECONDS = 10
+# Cleanup unlock walks the whole cage-grown tree per root; a short configured
+# trace timeout must not cut it off before it reaches a locked directory.
+CLEANUP_UNLOCK_TIMEOUT_SECONDS = 60.0
+UNLOCK_WAIT_SLACK_SECONDS = 5.0
 # Printed by the in-cage wrapper before the tool starts; its absence means the
 # docker exec never reached the cage, so its exit code is not the tool's.
 EXEC_START_MARKER = "baitwatch-exec-started"
@@ -104,7 +110,7 @@ class SandboxError(RuntimeError):
 
 @dataclass(frozen=True)
 class SandboxConfig:
-    image: str = "alpine:3.20"
+    image: str = DEFAULT_IMAGE
     sink_image: str = "python:3.12-alpine"
     # None tries DEFAULT_SUBNET, then other 10.13.X.0/24 pools on overlap.
     # An explicit subnet never falls back.
@@ -226,6 +232,7 @@ class Sandbox:
         self._planted_max_file_bytes = 0
         self._honeytoken_scanned = False
         self._trace_before: dict | None = None
+        self._git_paths: frozenset[str] = frozenset()
 
     @property
     def network_id(self) -> str | None:
@@ -240,6 +247,12 @@ class Sandbox:
         if self._temporary is None:
             raise SandboxError("repository has not been staged")
         return self._temporary / "repo"
+
+    @property
+    def home_path(self) -> Path:
+        if self._temporary is None:
+            raise SandboxError("repository has not been staged")
+        return self._temporary / "home"
 
     @property
     def honeytokens(self) -> tuple[Honeytoken, ...]:
@@ -328,7 +341,13 @@ class Sandbox:
             self._client.ping()
             if self._client.info().get("OSType") != "linux":
                 raise SandboxError("Linux containers are required")
-            self._client.images.get(self.config.image)
+            try:
+                self._client.images.get(self.config.image)
+            except ImageNotFound as exc:
+                raise SandboxError(
+                    f"trusted cage image {self.config.image!r} is missing; "
+                    "build the default with python -m run.cage build"
+                ) from exc
             self._temporary = Path(tempfile.mkdtemp(prefix="bw-stage-"))
             self.evidence.staging_exclusions = [
                 safe_text(path)
@@ -359,6 +378,8 @@ class Sandbox:
                 ),
                 default=0,
             )
+            self.home_path.mkdir(mode=0o777)
+            self.home_path.chmod(0o777)
             self._subnet = self._create_network()
             self._open = True
             return self
@@ -407,7 +428,25 @@ class Sandbox:
             labels=self.labels,
             user="65532:65532",
             working_dir=working_dir,
-            environment={"HOME": "/tmp", "PYTHONDONTWRITEBYTECODE": "1"},
+            environment={
+                "HOME": CAGE_HOME,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                # Sinks cannot serve packages; retries must not consume the tool deadline.
+                "PIP_RETRIES": "0",
+                "PIP_TIMEOUT": "3",
+                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+                "PIP_NO_INPUT": "1",
+                "npm_config_fetch_retries": "0",
+                "npm_config_fetch_timeout": "3000",
+                "npm_config_fetch_retry_mintimeout": "100",
+                "npm_config_fetch_retry_maxtimeout": "100",
+                "npm_config_audit": "false",
+                "npm_config_fund": "false",
+                "npm_config_update_notifier": "false",
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_HTTP_LOW_SPEED_LIMIT": "1",
+                "GIT_HTTP_LOW_SPEED_TIME": "3",
+            },
             mounts=list(mounts),
             read_only=True,
             privileged=False,
@@ -670,9 +709,25 @@ class Sandbox:
             # Cleanup must reach cage growth even when the snapshot rejected it.
             values["max_entries"] += 1_000_000
             values["max_depth"] = max(values["max_depth"], 512)
+            values["timeout_seconds"] = max(
+                values["timeout_seconds"], CLEANUP_UNLOCK_TIMEOUT_SECONDS
+            )
         return values
 
     def _run_trace_helper(self, role: str) -> dict:
+        manifest = {}
+        for root, prefix in ((self.staged_path, ""), (self.home_path, f"{CAGE_HOME}/")):
+            try:
+                entries = self._snapshot_tree(role + ("-home" if prefix else ""), root)
+            except Exception as exc:
+                if not prefix:
+                    raise
+                self._error("TRACE_FAILED", str(exc), component="trace")
+                continue
+            manifest.update({prefix + path: entry for path, entry in entries.items()})
+        return manifest
+
+    def _snapshot_tree(self, role: str, root: Path) -> dict:
         command = [
             "python",
             "-I",
@@ -689,7 +744,7 @@ class Sandbox:
             None,
             networked=False,
             mounts=[
-                Mount("/repo", str(self.staged_path), type="bind", read_only=True),
+                Mount("/repo", str(root), type="bind", read_only=True),
                 Mount("/trace/trace.py", str(TRACE_SCRIPT), type="bind", read_only=True),
             ],
         )
@@ -722,15 +777,46 @@ class Sandbox:
         except TraceError as exc:
             raise SandboxError(str(exc)) from exc
 
+    def prepare_repository(self) -> None:
+        command = [
+            "sh",
+            "-ec",
+            "umask 000; git init -q --template= --initial-branch=main /repo; "
+            "mkdir /repo/.git/hooks",
+        ]
+        container = self._create(
+            DEFAULT_IMAGE,
+            command,
+            "git-init",
+            None,
+            networked=False,
+            mounts=[Mount("/repo", str(self.staged_path), type="bind", read_only=False)],
+        )
+        try:
+            result = capture_attached(
+                ["docker", "--host", self._docker_host, "start", "--attach", container.id],
+                command,
+                timeout_seconds=self.config.timeout_seconds,
+                max_output_bytes=self.config.max_output_bytes,
+                stop_container=container.kill,
+            )
+        finally:
+            self._remove_container(container, set())
+        if result.exit_code != 0 or result.timed_out or result.output_truncated:
+            raise SandboxError("trusted staged git initialization failed")
+
     def trace_before(self) -> bool:
         if self._trace_before is not None:
             raise SandboxError("the before snapshot can only be taken once")
         try:
             self._trace_before = self._run_trace_helper("trace-before")
+            self._git_paths = frozenset(
+                path for path in self._trace_before if path == ".git" or path.startswith(".git/")
+            )
         except Exception as exc:
             self._error("TRACE_FAILED", str(exc), component="trace")
             return False
-        return True
+        return self.evidence.components.trace != State.ERROR
 
     def trace_after(self) -> None:
         if self._trace_before is None:
@@ -740,13 +826,38 @@ class Sandbox:
         except Exception as exc:
             self._error("TRACE_FAILED", str(exc), component="trace")
             return
+        planted = {token.location for token in self._honeytokens}
+        repo_files = {
+            path
+            for path, entry in self._trace_before.items()
+            if entry.kind == "file"
+            and not path.startswith(f"{CAGE_HOME}/")
+            and path not in planted
+            and path not in self._git_paths
+            and not is_build_cache(path)
+        }
+        self.evidence.staged_file_count = len(repo_files)
         self.evidence.file_diffs = [
-            FileDiff(path=path, change=change) for path, change in diff(self._trace_before, after)
+            FileDiff(
+                path=path,
+                change=change,
+                is_repo_file=path in repo_files,
+                is_truncated=(
+                    path in repo_files
+                    and change == "modified"
+                    and self._trace_before[path].size > 0
+                    and after[path].kind == "file"
+                    and after[path].size == 0
+                ),
+            )
+            for path, change in diff(self._trace_before, after)
         ]
         limits = self.config.staging
         # Bait the cage left untouched is ours, not the repository's growth.
         planted = {
-            path for path in self._planted_paths if after.get(path) == self._trace_before.get(path)
+            path
+            for path in self._planted_paths | self._git_paths
+            if after.get(path) == self._trace_before.get(path)
         }
         if (
             sum(1 for path in after if path not in planted) > limits.max_entries
@@ -782,7 +893,8 @@ class Sandbox:
                 component="trace",
             )
             return
-        self.evidence.components.trace = State.COMPLETE
+        if self.evidence.components.trace != State.ERROR:
+            self.evidence.components.trace = State.COMPLETE
 
     def open_cage(self) -> None:
         """Start the long-lived cage the decoy's tool calls exec into.
@@ -801,7 +913,10 @@ class Sandbox:
                 ["sleep", str(max(1, math.ceil(self.config.decoy_seconds)))],
                 "cage",
                 self.cage_ip,
-                mounts=[Mount("/repo", str(self.staged_path), type="bind", read_only=False)],
+                mounts=[
+                    Mount("/repo", str(self.staged_path), type="bind", read_only=False),
+                    Mount(CAGE_HOME, str(self.home_path), type="bind", read_only=False),
+                ],
                 working_dir="/repo",
             )
             self._cage.start()
@@ -1022,7 +1137,10 @@ class Sandbox:
                 command,
                 "cage",
                 self.cage_ip,
-                mounts=[Mount("/repo", str(self.staged_path), type="bind", read_only=False)],
+                mounts=[
+                    Mount("/repo", str(self.staged_path), type="bind", read_only=False),
+                    Mount(CAGE_HOME, str(self.home_path), type="bind", read_only=False),
+                ],
                 working_dir="/repo",
             )
 
@@ -1134,6 +1252,12 @@ class Sandbox:
         Returns (unlocked, helper removed). A helper whose create reply was lost
         has no handle here, so it counts as not removed and the caller sweeps.
         """
+        roots = [
+            (target, root)
+            for target, root in (("/repo", self.staged_path), (CAGE_HOME, self.home_path))
+            if root.is_dir()
+        ]
+        cleanup_limits = self._trace_limits(cleanup=True)
         try:
             container = self._create(
                 self.config.sink_image,
@@ -1141,16 +1265,19 @@ class Sandbox:
                     "python",
                     "-I",
                     "/trace/trace.py",
-                    "unlock",
-                    "/repo",
+                    "unlock-pair",
+                    *[target for target, _ in roots],
                     "--limits",
-                    json.dumps(self._trace_limits(cleanup=True)),
+                    json.dumps(cleanup_limits),
                 ],
                 "unlock-staging",
                 None,
                 networked=False,
                 mounts=[
-                    Mount("/repo", str(self.staged_path), type="bind", read_only=False),
+                    *[
+                        Mount(target, str(root), type="bind", read_only=False)
+                        for target, root in roots
+                    ],
                     Mount("/trace/trace.py", str(TRACE_SCRIPT), type="bind", read_only=True),
                 ],
             )
@@ -1158,7 +1285,10 @@ class Sandbox:
             return False, False
         try:
             container.start()
-            status = container.wait(timeout=self.config.timeout_seconds)
+            # unlock-pair walks each root sequentially, each with its own deadline.
+            status = container.wait(
+                timeout=len(roots) * cleanup_limits["timeout_seconds"] + UNLOCK_WAIT_SLACK_SECONDS
+            )
             code = status.get("StatusCode") if isinstance(status, dict) else None
             return code == 0, self._remove_container(container, set())
         except Exception:
@@ -1251,6 +1381,7 @@ def detonate(
     try:
         with sandbox:
             try:
+                sandbox.prepare_repository()
                 sandbox.start_sinks()
                 sandbox.trace_before()
                 if backend is None:
