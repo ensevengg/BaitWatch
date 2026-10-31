@@ -83,6 +83,10 @@ KILL_LINGERING = (
     "done; exit 1"
 )
 KILL_TIMEOUT_SECONDS = 10
+# Cleanup unlock walks the whole cage-grown tree per root; a short configured
+# trace timeout must not cut it off before it reaches a locked directory.
+CLEANUP_UNLOCK_TIMEOUT_SECONDS = 60.0
+UNLOCK_WAIT_SLACK_SECONDS = 5.0
 # Printed by the in-cage wrapper before the tool starts; its absence means the
 # docker exec never reached the cage, so its exit code is not the tool's.
 EXEC_START_MARKER = "baitwatch-exec-started"
@@ -679,6 +683,9 @@ class Sandbox:
             # Cleanup must reach cage growth even when the snapshot rejected it.
             values["max_entries"] += 1_000_000
             values["max_depth"] = max(values["max_depth"], 512)
+            values["timeout_seconds"] = max(
+                values["timeout_seconds"], CLEANUP_UNLOCK_TIMEOUT_SECONDS
+            )
         return values
 
     def _run_trace_helper(self, role: str) -> dict:
@@ -1190,6 +1197,7 @@ class Sandbox:
             for target, root in (("/repo", self.staged_path), ("/home/agent", self.home_path))
             if root.is_dir()
         ]
+        cleanup_limits = self._trace_limits(cleanup=True)
         try:
             container = self._create(
                 self.config.sink_image,
@@ -1200,7 +1208,7 @@ class Sandbox:
                     "unlock-pair",
                     *[target for target, _ in roots],
                     "--limits",
-                    json.dumps(self._trace_limits(cleanup=True)),
+                    json.dumps(cleanup_limits),
                 ],
                 "unlock-staging",
                 None,
@@ -1217,7 +1225,10 @@ class Sandbox:
             return False, False
         try:
             container.start()
-            status = container.wait(timeout=self.config.timeout_seconds)
+            # unlock-pair walks each root sequentially, each with its own deadline.
+            status = container.wait(
+                timeout=len(roots) * cleanup_limits["timeout_seconds"] + UNLOCK_WAIT_SLACK_SECONDS
+            )
             code = status.get("StatusCode") if isinstance(status, dict) else None
             return code == 0, self._remove_container(container, set())
         except Exception:

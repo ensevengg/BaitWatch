@@ -858,6 +858,27 @@ def test_unlock_helper_with_a_lost_create_reply_is_swept_after_staging(
     assert client.containers.list.call_count == 2
 
 
+def test_cleanup_unlock_gets_a_floor_timeout_and_a_covering_host_wait(repo: Path):
+    client = fake_client()
+    helper = MagicMock()
+    helper.id = "unlock-helper"
+    helper.wait.return_value = {"StatusCode": 0}
+    client.containers.create.side_effect = [helper]
+    sandbox = Sandbox(
+        repo,
+        SandboxConfig(staging=StagingLimits(timeout_seconds=0.25)),
+        client_factory=lambda: client,
+    )
+    with sandbox:
+        assert sandbox._trace_limits()["timeout_seconds"] == 0.25
+        cleanup = sandbox._trace_limits(cleanup=True)
+        assert sandbox._unlock_staging() == (True, True)
+    assert cleanup["timeout_seconds"] >= 60
+    limits = client.containers.create.call_args.kwargs["command"][-1]
+    assert '"timeout_seconds": 60' in limits or '"timeout_seconds": 60.0' in limits
+    assert helper.wait.call_args.kwargs["timeout"] >= 2 * cleanup["timeout_seconds"]
+
+
 def test_decoy_time_limits_are_validated():
     assert SandboxConfig(decoy_seconds=0.5, tool_timeout_seconds=2).decoy_seconds == 0.5
     with pytest.raises(ValueError, match="finite int or float"):
