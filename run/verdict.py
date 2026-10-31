@@ -90,6 +90,10 @@ def _is_plain_registry_contact(hit: NetworkHit, kind: str) -> bool:
     )
 
 
+def is_counted_contact(hit: NetworkHit, kind: str) -> bool:
+    return not (_is_registry_attempt(hit, kind) and _is_plain_registry_contact(hit, kind))
+
+
 def _bounded(text: str) -> str:
     return text[:_REASON_PART_CHARS]
 
@@ -224,12 +228,9 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     blockers: list[str] = []
     flags: list[str] = []
     hits = [(kind, hit) for kind in ("dns", "http", "tls") for hit in getattr(run, f"{kind}_hits")]
-    exfil = [hit for kind, hit in hits if not _is_registry_attempt(hit, kind)]
-    attempts = [
-        hit
-        for kind, hit in hits
-        if _is_registry_attempt(hit, kind) and not _is_plain_registry_contact(hit, kind)
-    ]
+    counted = [(kind, hit) for kind, hit in hits if is_counted_contact(hit, kind)]
+    exfil = [hit for kind, hit in counted if not _is_registry_attempt(hit, kind)]
+    attempts = [hit for kind, hit in counted if _is_registry_attempt(hit, kind)]
 
     controls = [change.path for change in run.file_diffs if _agent_control(change.path)]
     if controls:

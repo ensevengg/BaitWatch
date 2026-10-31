@@ -84,11 +84,14 @@ def test_no_fallback_on_4xx():
 def test_both_fail_raises():
     with (
         fake_server(lambda _r: (500, b"{}")) as primary,
-        fake_server(lambda _r: (503, b"{}")) as fallback,
+        fake_server(lambda _r: (400, b"{}")) as fallback,
     ):
         backend = FallbackBackend(_backend(primary), _backend(fallback))
-        with pytest.raises(LLMError, match="both"):
+        with pytest.raises(LLMError, match="both") as caught:
             backend.chat([], [])
+        assert caught.value.kind == "both_failed"
+        assert "primary=http_5xx" in str(caught.value)
+        assert "fallback=http_4xx" in str(caught.value)
 
 
 def test_chat_payload_carries_token_bound():

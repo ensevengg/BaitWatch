@@ -536,9 +536,11 @@ class FallbackBackend:
                 raise
             try:
                 reply = call_with_token_bound(self.fallback, messages, tools, max_tokens)
-            except LLMError:
+            except LLMError as fallback_exc:
                 raise LLMError(
-                    "both primary and fallback LLM backends failed", kind="both_failed"
+                    "both primary and fallback LLM backends failed "
+                    f"(primary={exc.kind}, fallback={fallback_exc.kind})",
+                    kind="both_failed",
                 ) from None
             self.fallback_count += 1
             self.last_backend = reply.backend or self.fallback_name

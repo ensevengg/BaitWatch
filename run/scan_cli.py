@@ -14,6 +14,7 @@ import typer
 from rich.console import Console
 
 from run.cage import DEFAULT_IMAGE
+from run.decoy import DECOY_CAGE_GRACE_SECONDS
 from run.evidence import State, VerdictReport
 from run.llm import LLMError, make_backend_with_fallback
 from run.sandbox import SandboxConfig
@@ -109,7 +110,7 @@ def scan(
             raise ValueError("max-seconds must be positive")
         config = SandboxConfig(
             image=image,
-            decoy_seconds=max_seconds,
+            decoy_seconds=max_seconds + DECOY_CAGE_GRACE_SECONDS,
             decoy_max_tokens=max_tokens,
             decoy_max_seconds=max_seconds,
         )

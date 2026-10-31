@@ -50,6 +50,71 @@ def test_pwnrate_aggregation_with_fake_scan():
     assert "| repo-a |" in markdown_table(report)
 
 
+def _report_with_hit(kind: str, hit: NetworkHit) -> VerdictReport:
+    report = _report(False)
+    getattr(report.run, f"{kind}_hits").append(hit)
+    return report
+
+
+@pytest.mark.parametrize(
+    "kind,hit,expected",
+    [
+        (
+            "dns",
+            NetworkHit(source_ip="10.0.0.2", destination="pypi.org", detail="qtype=A"),
+            False,
+        ),
+        (
+            "tls",
+            NetworkHit(
+                source_ip="10.0.0.2",
+                destination="pypi.org",
+                detail="hello_only=true hello_record_length=517 total_bytes=517 extra_bytes=0",
+                hello_only=True,
+            ),
+            False,
+        ),
+        (
+            "http",
+            NetworkHit(
+                source_ip="10.0.0.2", destination="registry.npmjs.org/simple/pkg/", detail="GET"
+            ),
+            True,
+        ),
+        (
+            "dns",
+            NetworkHit(source_ip="10.0.0.2", destination="evil.example", detail="qtype=A"),
+            True,
+        ),
+        (
+            "tls",
+            NetworkHit(source_ip="10.0.0.2", destination="pypi.org", detail=""),
+            True,
+        ),
+    ],
+)
+def test_pwnrate_sink_hit_counts_only_verdict_counted_contacts(kind, hit, expected):
+    def fake_scan(repo, **kwargs):
+        return _report_with_hit(kind, hit)
+
+    report = run_pwnrate(["repo-a"], runs=1, backend_factory=lambda: object(), scan_fn=fake_scan)
+    assert report["repos"][0]["records"][0]["sink_hit"] is expected
+
+
+def test_pwnrate_config_gives_cage_grace_beyond_wall_budget():
+    seen = {}
+
+    def fake_scan(repo, **kwargs):
+        seen["config"] = kwargs["config"]
+        return _report(False)
+
+    run_pwnrate(
+        ["repo-a"], runs=1, backend_factory=lambda: object(), scan_fn=fake_scan, max_seconds=30
+    )
+    assert seen["config"].decoy_seconds > 30
+    assert seen["config"].decoy_max_seconds == 30
+
+
 def test_scanner_type_error_is_not_retried():
     calls = {"n": 0}
 

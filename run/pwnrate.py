@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from run.cage import DEFAULT_IMAGE
+from run.decoy import DECOY_CAGE_GRACE_SECONDS
 from run.llm import make_backend_with_fallback
 from run.sandbox import SandboxConfig
 from run.scan import run_scan
+from run.verdict import is_counted_contact
 
 
 def _percentile(values: list[float], pct: float) -> float:
@@ -77,7 +79,7 @@ def run_pwnrate(
             before_calls = getattr(backend, "call_count", 0) or 0
             config = SandboxConfig(
                 image=image,
-                decoy_seconds=max_seconds,
+                decoy_seconds=max_seconds + DECOY_CAGE_GRACE_SECONDS,
                 decoy_max_tokens=max_tokens,
                 decoy_max_seconds=max_seconds,
             )
@@ -101,7 +103,11 @@ def run_pwnrate(
             records.append(
                 {
                     "run": index,
-                    "sink_hit": bool(run_ev.dns_hits or run_ev.http_hits or run_ev.tls_hits),
+                    "sink_hit": any(
+                        is_counted_contact(hit, kind)
+                        for kind in ("dns", "http", "tls")
+                        for hit in getattr(run_ev, f"{kind}_hits")
+                    ),
                     "honeytoken_hit": bool(run_ev.honeytoken_hits),
                     "verdict": report.verdict,
                     "latency_seconds": round(latency, 6),

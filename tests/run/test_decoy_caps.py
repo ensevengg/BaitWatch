@@ -80,6 +80,69 @@ def test_time_cap_is_non_allow():
     assert _verdict(sandbox.evidence).verdict != "ALLOW"
 
 
+def test_wall_budget_wins_over_dead_cage():
+    class DyingSandbox(FakeSandbox):
+        alive = True
+
+        def cage_running(self):
+            return self.alive
+
+    sandbox = DyingSandbox()
+
+    class Slow:
+        name = "slow"
+
+        def chat(self, messages, tools):
+            sandbox.alive = False
+            time.sleep(0.05)
+            return LLMReply(text="done")
+
+    run_decoy(sandbox, Slow(), max_seconds=0.01)
+    assert sandbox.evidence.errors[-1].code == "DECOY_TIME_BUDGET"
+    assert _verdict(sandbox.evidence).verdict != "ALLOW"
+
+
+def test_cli_configs_give_cage_grace_beyond_wall_budget(monkeypatch, tmp_path):
+    from typer.testing import CliRunner
+
+    from run.cli import app as run_app
+    from run.evidence import RunComponents
+    from run.scan_cli import app as scan_app
+
+    seen = {}
+    complete = RunEvidence(
+        status="complete",
+        tool_log=[CommandResult(command=["run_cmd", "true"], exit_code=0)],
+        components=RunComponents(**{k: State.COMPLETE for k in RunComponents.model_fields}),
+    )
+
+    def fake_detonate(*args, **kwargs):
+        seen.setdefault("configs", []).append(kwargs["config"])
+        return complete
+
+    monkeypatch.setattr("run.llm.make_backend", lambda spec: "backend", raising=False)
+    monkeypatch.setattr("run.cli.detonate", fake_detonate)
+    monkeypatch.setattr("run.scan_cli.make_backend_with_fallback", lambda spec, fb=None: object())
+    monkeypatch.setattr("run.scan.detonate", fake_detonate)
+    monkeypatch.setattr(
+        "run.scan.default_read_scanner",
+        lambda path, **kwargs: ReadOutcome(status=State.COMPLETE, verdict="clean"),
+    )
+    runner = CliRunner()
+    decoy_result = runner.invoke(
+        run_app, ["decoy", str(tmp_path), "--llm", "scripted:x", "--max-seconds", "30"]
+    )
+    scan_result = runner.invoke(
+        scan_app, ["scan", str(tmp_path), "--llm", "scripted:x", "--max-seconds", "30"]
+    )
+    assert decoy_result.exit_code == 0, decoy_result.output
+    assert scan_result.exit_code == 0, scan_result.output
+    assert len(seen["configs"]) == 2
+    for config in seen["configs"]:
+        assert config.decoy_seconds > 30
+        assert config.decoy_max_seconds == 30
+
+
 def test_turn_cap_still_non_allow():
     sandbox = FakeSandbox()
     reply = LLMReply(tool_calls=[ToolCall(id="1", name="list_files", arguments={})])

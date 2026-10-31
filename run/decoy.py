@@ -23,6 +23,8 @@ MAX_TOKENS = 100_000
 # Many hosted endpoints reject a completion bound above their model's output cap.
 TURN_TOKENS = 4096
 MAX_SECONDS = 120.0
+# Cage lifetime is a backstop so the wall budget fires first.
+DECOY_CAGE_GRACE_SECONDS = 5
 READ_BYTES = 16 * 1024
 FEEDBACK_CHARS = 8 * 1024
 
@@ -231,14 +233,14 @@ def run_decoy(
     calls = 0
     try:
         for _ in range(max_steps):
-            _check_cage(sandbox, deadline)
             _check_wall()
+            _check_cage(sandbox, deadline)
             remaining = max_tokens - total_tokens
             if remaining < 1:
                 raise _DecoyFailure("DECOY_TOKEN_BUDGET", "the decoy exhausted its token budget")
             reply = call_with_token_bound(backend, messages, tools, min(remaining, TURN_TOKENS))
-            _check_cage(sandbox, deadline)
             _check_wall()
+            _check_cage(sandbox, deadline)
             if reply.total_tokens:
                 total_prompt += reply.prompt_tokens
                 total_completion += reply.completion_tokens
@@ -266,8 +268,8 @@ def run_decoy(
                 break
             messages.append(_assistant_message(reply))
             for call in reply.tool_calls:
-                _check_cage(sandbox, deadline)
                 _check_wall()
+                _check_cage(sandbox, deadline)
                 if calls >= max_steps:
                     raise _DecoyFailure(
                         "DECOY_STEP_BUDGET", "the decoy exhausted its tool-call budget"
@@ -282,8 +284,8 @@ def run_decoy(
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": feedback})
         else:
             raise _DecoyFailure("DECOY_STEP_BUDGET", "the decoy exhausted its step budget")
-        _check_cage(sandbox, deadline)
         _check_wall()
+        _check_cage(sandbox, deadline)
     except Exception as exc:
         _record()
         evidence.components.decoy = State.ERROR

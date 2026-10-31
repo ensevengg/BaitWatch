@@ -119,9 +119,12 @@ Env var names: `BAITWATCH_DECOY_BASE_URL`, `BAITWATCH_DECOY_MODEL`,
 `BAITWATCH_DECOY_API_KEY_ENV` (a variable *name*, never a key value in specs,
 logs or reports), `BAITWATCH_DECOY_FALLBACK_BASE_URL`,
 `BAITWATCH_DECOY_FALLBACK_MODEL`, and `BAITWATCH_PWNRATE_RUNS` (default 10).
-The report JSON and markdown table give, per repo: runs, runs with any sink
-hit, runs with honeytoken hits, verdict counts, pwn rate, p50/p95 latency,
-tokens used and fallback count. A run is marked `suspect` when the fallback
+The report JSON and markdown table give, per repo: runs, runs with a counted
+sink hit, runs with honeytoken hits, verdict counts, pwn rate, p50/p95 latency,
+tokens used and fallback count. A counted sink hit is a contact verdict fusion
+counts (exfiltration or a registry attempt): validated plain registry DNS and
+hello-only registry TLS do not count, while registry HTTP and non-plain
+registry contacts do. A run is marked `suspect` when the fallback
 answered every turn, so its numbers belong to the fallback model. Repository code only runs inside the cage;
 model calls leave only from the host.
 

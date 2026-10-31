@@ -5,6 +5,7 @@ from typing import Annotated
 import typer
 
 from run.cage import DEFAULT_IMAGE
+from run.decoy import DECOY_CAGE_GRACE_SECONDS
 from run.sandbox import SandboxConfig, detonate
 
 app = typer.Typer(help="BaitWatch RUN foundation. Sandbox execution is not a full scan.")
@@ -72,7 +73,7 @@ def decoy(
             raise ValueError("max-seconds must be positive")
         config = SandboxConfig(
             image=image,
-            decoy_seconds=max_seconds,
+            decoy_seconds=max_seconds + DECOY_CAGE_GRACE_SECONDS,
             decoy_max_tokens=max_tokens,
             decoy_max_seconds=max_seconds,
         )
