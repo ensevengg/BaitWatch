@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from run.llm import FallbackBackend, LLMError, OpenAICompatBackend
+from run.llm import FallbackBackend, LLMError, LLMReply, OpenAICompatBackend
 from tests.run.test_llm import completion, fake_server, reply
 
 
@@ -120,6 +120,57 @@ def test_fallback_passes_same_token_bound():
         backend = FallbackBackend(_backend(primary), _backend(fallback))
         assert backend.chat([], [], max_tokens=77).text == "ok"
     assert seen["max_tokens"] == 77
+
+
+class _FakeBackend:
+    def __init__(self, *, fail_kind=None, delay=0.0, text="ok"):
+        self.fail_kind = fail_kind
+        self.delay = delay
+        self.text = text
+        self.timeouts = []
+        self.name = "fake"
+
+    def chat(self, messages, tools, *, max_tokens=None, timeout=None):
+        self.timeouts.append(timeout)
+        if self.delay:
+            time.sleep(self.delay)
+        if self.fail_kind:
+            raise LLMError("primary down", kind=self.fail_kind)
+        return LLMReply(text=self.text)
+
+
+def test_fallback_not_called_when_no_time_remains():
+    primary = _FakeBackend(fail_kind="timeout", delay=0.05)
+    fallback = _FakeBackend(text="fallback")
+    backend = FallbackBackend(primary, fallback)
+    with pytest.raises(LLMError):
+        backend.chat([], [], timeout=0.01)
+    assert fallback.timeouts == []
+    assert backend.fallback_count == 0
+
+
+def test_fallback_gets_remaining_time_not_original():
+    primary = _FakeBackend(fail_kind="http_5xx", delay=0.02)
+    fallback = _FakeBackend(text="fallback")
+    backend = FallbackBackend(primary, fallback)
+    assert backend.chat([], [], timeout=1.0).text == "fallback"
+    assert primary.timeouts == [1.0]
+    assert len(fallback.timeouts) == 1
+    assert 0 < fallback.timeouts[0] < 1.0
+
+
+def test_openai_per_call_timeout_bounds_slow_endpoint():
+    def slow(_raw):
+        time.sleep(0.3)
+        return 200, b"{}"
+
+    with fake_server(slow) as server:
+        backend = OpenAICompatBackend(server.base_url, "m", timeout_seconds=60)
+        started = time.monotonic()
+        with pytest.raises(LLMError) as caught:
+            backend.chat([], [], timeout=0.05)
+        assert caught.value.kind == "timeout"
+        assert time.monotonic() - started < 1
 
 
 def test_fallback_sends_temperature_and_seed():

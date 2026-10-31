@@ -67,6 +67,7 @@ class LLMBackend(Protocol):
         tools: list[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> LLMReply: ...
 
 
@@ -97,6 +98,7 @@ class ScriptedBackend:
         tools: list[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> LLMReply:
         prompt = estimate_messages_tokens(messages, tools)
         if self._index >= len(self._steps):
@@ -236,9 +238,14 @@ class OpenAICompatBackend:
         tools: list[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> LLMReply:
         if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
             raise LLMError("max_tokens must be a positive integer")
+        if timeout is not None and (
+            type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise LLMError("timeout must be a positive number", kind="timeout")
         if self._calls >= self.max_calls:
             raise LLMError(f"LLM call budget of {self.max_calls} is exhausted")
         self._calls += 1
@@ -270,7 +277,10 @@ class OpenAICompatBackend:
             headers=headers,
             method="POST",
         )
-        reply = _parse_reply(self._post(request))
+        effective_timeout = (
+            min(self.timeout_seconds, timeout) if timeout is not None else self.timeout_seconds
+        )
+        reply = _parse_reply(self._post(request, effective_timeout))
         if reply.total_tokens:
             return LLMReply(
                 text=reply.text,
@@ -307,12 +317,13 @@ class OpenAICompatBackend:
             )
         return key
 
-    def _post(self, request: urllib.request.Request) -> bytes:
+    def _post(self, request: urllib.request.Request, timeout_seconds: float | None = None) -> bytes:
+        effective = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         # The socket timeout bounds one operation, so a body that drips a byte at
         # a time would never hit it; this deadline bounds the whole exchange.
-        deadline = time.monotonic() + self.timeout_seconds
+        deadline = time.monotonic() + effective
         try:
-            with self._opener.open(request, timeout=self.timeout_seconds) as response:
+            with self._opener.open(request, timeout=effective) as response:
                 raw = _read_bounded(response, self.max_response_bytes, deadline)
         except urllib.error.HTTPError as exc:
             exc.close()
@@ -321,15 +332,13 @@ class OpenAICompatBackend:
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
                 raise LLMError(
-                    f"LLM request timed out after {self.timeout_seconds}s", kind="timeout"
+                    f"LLM request timed out after {effective}s", kind="timeout"
                 ) from None
             raise LLMError(
                 f"LLM request failed: {_short_reason(exc.reason)}", kind="connection"
             ) from None
         except TimeoutError:
-            raise LLMError(
-                f"LLM request timed out after {self.timeout_seconds}s", kind="timeout"
-            ) from None
+            raise LLMError(f"LLM request timed out after {effective}s", kind="timeout") from None
         except http.client.HTTPException as exc:
             raise LLMError(f"LLM request failed: {type(exc).__name__}", kind="connection") from None
         except ValueError as exc:
@@ -493,18 +502,27 @@ def call_with_token_bound(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     max_tokens: int | None,
+    *,
+    timeout: float | None = None,
 ) -> LLMReply:
-    # Injected backends may predate the bound; only pass it where accepted.
-    if max_tokens is not None:
+    # Injected backends may predate the bounds; only pass each where accepted.
+    kwargs: dict[str, Any] = {}
+    if max_tokens is not None or timeout is not None:
         try:
             params = inspect.signature(backend.chat).parameters
         except (TypeError, ValueError):
             params = {}
-        if "max_tokens" in params or any(
-            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-        ):
-            return backend.chat(messages, tools, max_tokens=max_tokens)
-    return backend.chat(messages, tools)
+
+        def accepts(name: str) -> bool:
+            return name in params or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+
+        if max_tokens is not None and accepts("max_tokens"):
+            kwargs["max_tokens"] = max_tokens
+        if timeout is not None and accepts("timeout"):
+            kwargs["timeout"] = timeout
+    return backend.chat(messages, tools, **kwargs)
 
 
 class FallbackBackend:
@@ -527,15 +545,28 @@ class FallbackBackend:
         tools: list[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> LLMReply:
         self.call_count += 1
+        deadline = time.monotonic() + timeout if timeout is not None else None
         try:
-            reply = call_with_token_bound(self.primary, messages, tools, max_tokens)
+            reply = call_with_token_bound(
+                self.primary, messages, tools, max_tokens, timeout=timeout
+            )
         except LLMError as exc:
             if exc.kind not in RETRYABLE_KINDS:
                 raise
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                fallback_timeout: float | None = remaining
+            else:
+                fallback_timeout = None
             try:
-                reply = call_with_token_bound(self.fallback, messages, tools, max_tokens)
+                reply = call_with_token_bound(
+                    self.fallback, messages, tools, max_tokens, timeout=fallback_timeout
+                )
             except LLMError as fallback_exc:
                 raise LLMError(
                     "both primary and fallback LLM backends failed "

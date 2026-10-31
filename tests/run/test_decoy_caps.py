@@ -1,10 +1,18 @@
+import copy
+import json
 import time
 from types import SimpleNamespace
 
 from run.decoy import TURN_TOKENS, run_decoy
 from run.evidence import CommandResult, RunEvidence, State
-from run.llm import LLMReply, ToolCall
+from run.llm import LLMError, LLMReply, ToolCall, estimate_tokens
 from run.verdict import ReadOutcome, fuse
+
+
+def _prompt_estimate(messages, tools):
+    return estimate_tokens(json.dumps(messages, ensure_ascii=True, default=str)) + estimate_tokens(
+        json.dumps(tools, ensure_ascii=True, default=str)
+    )
 
 
 class FakeSandbox:
@@ -26,9 +34,13 @@ class Backend:
         self.replies = list(replies)
         self.name = "fake"
         self.bounds = []
+        self.timeouts = []
+        self.prompts = []
 
-    def chat(self, messages, tools, *, max_tokens=None):
+    def chat(self, messages, tools, *, max_tokens=None, timeout=None):
         self.bounds.append(max_tokens)
+        self.timeouts.append(timeout)
+        self.prompts.append(_prompt_estimate(copy.deepcopy(messages), tools))
         return self.replies.pop(0) if self.replies else LLMReply(text="done")
 
 
@@ -45,7 +57,7 @@ def test_token_cap_is_non_allow():
         total_tokens=1100,
         backend="openai:m@x",
     )
-    run_decoy(sandbox, Backend(reply), max_tokens=100)
+    run_decoy(sandbox, Backend(reply), max_tokens=1000)
     assert sandbox.evidence.components.decoy == State.ERROR
     assert sandbox.evidence.errors[-1].code == "DECOY_TOKEN_BUDGET"
     assert sandbox.evidence.decoy_total_tokens == 1100
@@ -59,7 +71,7 @@ def test_token_estimate_cap_is_non_allow():
         tool_calls=[ToolCall(id="1", name="run_cmd", arguments={"command": "true"})],
         text="x" * 500,
     )
-    run_decoy(sandbox, Backend(reply), max_tokens=10)
+    run_decoy(sandbox, Backend(reply), max_tokens=700)
     assert sandbox.evidence.errors[-1].code == "DECOY_TOKEN_BUDGET"
     assert sandbox.evidence.decoy_tokens_estimated is True
     assert _verdict(sandbox.evidence).verdict != "ALLOW"
@@ -172,9 +184,20 @@ def test_token_bound_shrinks_as_budget_is_spent():
     )
     second = LLMReply(text="done", prompt_tokens=5, completion_tokens=5, total_tokens=10)
     backend = Backend(first, second)
-    run_decoy(sandbox, backend, max_tokens=100)
-    assert backend.bounds == [100, 70]
+    run_decoy(sandbox, backend, max_tokens=1000)
+    assert backend.bounds == [1000 - backend.prompts[0], 970 - backend.prompts[1]]
+    assert backend.bounds[0] < 1000
     assert sandbox.evidence.components.decoy == State.COMPLETE
+
+
+def test_prompt_estimate_over_remaining_budget_is_never_sent():
+    sandbox = FakeSandbox()
+    backend = Backend(LLMReply(text="never sent"))
+    run_decoy(sandbox, backend, max_tokens=10)
+    assert backend.bounds == []
+    assert sandbox.evidence.components.decoy == State.ERROR
+    assert sandbox.evidence.errors[-1].code == "DECOY_TOKEN_BUDGET"
+    assert _verdict(sandbox.evidence).verdict != "ALLOW"
 
 
 def test_both_backend_failure_is_non_allow():
@@ -202,11 +225,42 @@ def test_exhausted_budget_fails_before_the_next_request():
     sandbox = FakeSandbox()
     first = LLMReply(
         tool_calls=[ToolCall(id="1", name="run_cmd", arguments={"command": "true"})],
-        total_tokens=50,
+        total_tokens=700,
     )
     backend = Backend(first, LLMReply(text="never sent"))
-    run_decoy(sandbox, backend, max_tokens=50)
-    assert backend.bounds == [50]
+    run_decoy(sandbox, backend, max_tokens=700)
+    assert backend.bounds == [700 - backend.prompts[0]]
     assert sandbox.evidence.components.decoy == State.ERROR
     assert [error.code for error in sandbox.evidence.errors] == ["DECOY_TOKEN_BUDGET"]
+    assert _verdict(sandbox.evidence).verdict != "ALLOW"
+
+
+def test_call_timeout_shrinks_with_elapsed_time():
+    sandbox = FakeSandbox()
+
+    class TimedBackend(Backend):
+        def chat(self, messages, tools, *, max_tokens=None, timeout=None):
+            time.sleep(0.02)
+            return super().chat(messages, tools, max_tokens=max_tokens, timeout=timeout)
+
+    first = LLMReply(tool_calls=[ToolCall(id="1", name="run_cmd", arguments={"command": "true"})])
+    backend = TimedBackend(first, LLMReply(text="done"))
+    run_decoy(sandbox, backend, max_seconds=5)
+    assert len(backend.timeouts) == 2
+    assert 0 < backend.timeouts[1] < backend.timeouts[0] <= 5
+
+
+def test_stalled_call_past_wall_budget_is_time_budget_not_failed():
+    sandbox = FakeSandbox()
+
+    class Stalled:
+        name = "stalled"
+
+        def chat(self, messages, tools, *, timeout=None):
+            time.sleep(timeout + 0.05 if timeout else 0.1)
+            raise LLMError("LLM request timed out", kind="timeout")
+
+    run_decoy(sandbox, Stalled(), max_seconds=0.05)
+    assert sandbox.evidence.components.decoy == State.ERROR
+    assert sandbox.evidence.errors[-1].code == "DECOY_TIME_BUDGET"
     assert _verdict(sandbox.evidence).verdict != "ALLOW"

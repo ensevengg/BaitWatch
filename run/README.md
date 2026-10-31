@@ -119,9 +119,9 @@ Env var names: `BAITWATCH_DECOY_BASE_URL`, `BAITWATCH_DECOY_MODEL`,
 `BAITWATCH_DECOY_API_KEY_ENV` (a variable *name*, never a key value in specs,
 logs or reports), `BAITWATCH_DECOY_FALLBACK_BASE_URL`,
 `BAITWATCH_DECOY_FALLBACK_MODEL`, and `BAITWATCH_PWNRATE_RUNS` (default 10).
-The report JSON and markdown table give, per repo: runs, runs with a counted
+The report JSON and Markdown table give, per repo: runs, runs with a counted
 sink hit, runs with honeytoken hits, verdict counts, pwn rate, p50/p95 latency,
-tokens used and fallback count. A counted sink hit is a contact verdict fusion
+tokens used and fallback count. A counted sink hit is a contact that verdict fusion
 counts (exfiltration or a registry attempt): validated plain registry DNS and
 hello-only registry TLS do not count, while registry HTTP and non-plain
 registry contacts do. A run is marked `suspect` when the fallback
@@ -131,8 +131,10 @@ model calls leave only from the host.
 Spend caps (per scan, configurable on `baitwatch scan`, `baitwatch-run decoy`
 and `run.pwnrate`): `--max-steps` (turns and total tool calls, default 20),
 `--max-tokens` (prompt+completion, from the API `usage` field when present,
-else a conservative character estimate; default 100000; each request asks for
-at most the remaining budget, capped at 4096 completion tokens) and `--max-seconds`
+else a conservative character estimate; default 100000; each request reserves
+the estimated prompt tokens and asks for at most the remaining budget after
+that reserve, capped at 4096 completion tokens, and each request is bounded
+by the remaining wall time) and `--max-seconds`
 (decoy wall time, default 120). Hitting any cap records
 `DECOY_STEP_BUDGET`, `DECOY_TOKEN_BUDGET` or `DECOY_TIME_BUDGET`, marks the
 decoy component `error`, and can never ALLOW — matching step-budget
@@ -142,7 +144,8 @@ exhaustion. Evidence records `decoy_total_tokens`, `decoy_backend` and
 Fallback: `--llm-fallback SPEC` wraps the primary backend. On connection
 error, HTTP 5xx, HTTP 429, timeout or a missing key it retries the same turn
 on the fallback (temperature 0, fixed seed 0 for the local Llama backend via
-`ollama:`/`openai:` specs). A fallback answer is recorded in
+`ollama:`/`openai:` specs), only if wall time remains, and the fallback gets
+the time left rather than the original timeout. A fallback answer is recorded in
 `decoy_backend`/`decoy_fallback_count` and is not by itself an error; if both
 backends fail the decoy records `DECOY_FAILED` and the scan stays non-ALLOW.
 

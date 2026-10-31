@@ -216,6 +216,11 @@ def run_decoy(
         if wall_deadline is not None and time.monotonic() >= wall_deadline:
             raise _DecoyFailure("DECOY_TIME_BUDGET", "the decoy exhausted its wall-time budget")
 
+    def _call_timeout() -> float | None:
+        now = time.monotonic()
+        limits = [limit - now for limit in (wall_deadline, deadline) if limit is not None]
+        return min(limits) if limits else None
+
     def _record() -> None:
         evidence.decoy_prompt_tokens = total_prompt
         evidence.decoy_completion_tokens = total_completion
@@ -238,7 +243,25 @@ def run_decoy(
             remaining = max_tokens - total_tokens
             if remaining < 1:
                 raise _DecoyFailure("DECOY_TOKEN_BUDGET", "the decoy exhausted its token budget")
-            reply = call_with_token_bound(backend, messages, tools, min(remaining, TURN_TOKENS))
+            prompt_estimate = estimate_tokens(
+                json.dumps(messages, ensure_ascii=True, default=str)
+            ) + estimate_tokens(json.dumps(tools, ensure_ascii=True, default=str))
+            if prompt_estimate >= remaining:
+                raise _DecoyFailure("DECOY_TOKEN_BUDGET", "the decoy exhausted its token budget")
+            try:
+                reply = call_with_token_bound(
+                    backend,
+                    messages,
+                    tools,
+                    min(remaining - prompt_estimate, TURN_TOKENS),
+                    timeout=_call_timeout(),
+                )
+            except Exception as exc:
+                if wall_deadline is not None and time.monotonic() >= wall_deadline:
+                    raise _DecoyFailure(
+                        "DECOY_TIME_BUDGET", "the decoy exhausted its wall-time budget"
+                    ) from exc
+                raise
             _check_wall()
             _check_cage(sandbox, deadline)
             if reply.total_tokens:
