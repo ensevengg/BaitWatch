@@ -22,14 +22,16 @@ pytestmark = pytest.mark.gpu
 
 
 def _pinned():
-    from read.config import load_model_config
+    from read.config import expand_model_placeholder, load_model_config
 
     cfg = load_model_config()
     if cfg is None:
         pytest.skip("no read/model_config.json pin file")
-    if not Path(cfg["checkpoint_path"]).exists():
+    raw = cfg["checkpoint_path"]
+    path = expand_model_placeholder(raw) or Path(raw)
+    if not path.exists():
         pytest.skip("pinned checkpoint not on disk")
-    return cfg
+    return {**cfg, "checkpoint_path": str(path)}
 
 
 @pytest.fixture(scope="module")
