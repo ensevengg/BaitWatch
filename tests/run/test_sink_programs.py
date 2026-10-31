@@ -1097,6 +1097,26 @@ def run_handle_tls(segments: list[bytes]) -> dict:
     return records[0]
 
 
+def test_tls_read_past_the_limit_stays_within_the_parser_bound(tmp_path):
+    from run.evidence import RunEvidence
+    from run.sink_logs import read_sink_log
+    from run.verdict import ReadOutcome, fuse
+
+    module = load_sink_module("http_sink.py")
+    hello = build_client_hello("big-pq.evil.example", module.TLS_READ_LIMIT + 8192)
+    wire = tls_records(hello, 60_000)
+    first = module.TLS_READ_LIMIT - 1
+    record = run_handle_tls([wire[:first], wire[first : first + 4096]])
+    assert record["total_bytes"] == module.TLS_READ_LIMIT
+    assert record["capture_incomplete"] is True
+    path = tmp_path / "tls.jsonl"
+    path.write_text(json.dumps(record) + "\n")
+    captured = read_sink_log(path)
+    assert all("bounded hex" not in problem for problem in captured.problems)
+    assert [hit.destination for hit in captured.tls_hits] == ["big-pq.evil.example"]
+    assert fuse(ReadOutcome(), RunEvidence(tls_hits=captured.tls_hits)).verdict == "BLOCK"
+
+
 def test_tls_clienthello_cut_short_before_the_record_completes_flags_incomplete():
     record = run_handle_tls([b"\x16\x03\x01\x00\x20\x01"])  # promises 32 bytes, sends 1
     assert record["sni"] is None

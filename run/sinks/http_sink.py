@@ -384,7 +384,7 @@ def handle_tls(conn, addr, log):
     buffer = bytearray()
     while len(buffer) < TLS_READ_LIMIT:
         try:
-            chunk = conn.recv(4096)
+            chunk = conn.recv(min(4096, TLS_READ_LIMIT - len(buffer)))
         except OSError:
             break
         if not chunk:
