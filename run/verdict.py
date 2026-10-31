@@ -162,15 +162,17 @@ def _agent_control(path: str) -> bool:
         for parent, child in zip(parts, parts[1:], strict=False)
     ):
         return True
-    if is_build_cache(path):
-        return False
-    if path.startswith(f"{CAGE_HOME}/"):
-        home_parts = path.removeprefix(f"{CAGE_HOME}/").casefold().split("/")
-        if any(part in _HOME_SENSITIVE or part.startswith("cron.") for part in home_parts):
-            return True
-    return any(part in _CONTROL_DIRS or part in _CONTROL_FILES for part in parts) or any(
+    cache_at = next(
+        (i for i, part in enumerate(parts[:-1]) if part in BUILD_CACHE_DIRS), len(parts)
+    )
+    scope = parts[:cache_at]
+    if path.startswith(f"{CAGE_HOME}/") and any(
+        part in _HOME_SENSITIVE or part.startswith("cron.") for part in scope[3:]
+    ):
+        return True
+    return any(part in _CONTROL_DIRS or part in _CONTROL_FILES for part in scope) or any(
         parent == ".github" and child in {"copilot-instructions.md", "workflows"}
-        for parent, child in zip(parts, parts[1:], strict=False)
+        for parent, child in zip(scope, scope[1:], strict=False)
     )
 
 

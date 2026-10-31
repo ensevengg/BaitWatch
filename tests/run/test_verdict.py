@@ -493,6 +493,9 @@ def test_general_source_host_is_not_a_registry():
         ".git/config",
         ".husky/pre-commit",
         ".pre-commit-config.yaml",
+        ".claude/skills/build/SKILL.md",
+        ".claude/commands/target/x.md",
+        ".cursor/rules/vendor/x.mdc",
     ],
 )
 def test_agent_control_changes_block(path, change):
@@ -677,6 +680,20 @@ def test_dependency_control_files_allow(tree, control, prefix):
 
     run = complete_run()
     run.file_diffs = [FileDiff(path=f"{prefix}{tree}/example/{control}", change="added")]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+
+
+def test_home_control_before_cache_blocks_and_after_cache_allows():
+    from run.evidence import FileDiff
+
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{CAGE_HOME}/.claude/skills/build/SKILL.md", change="added")]
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{CAGE_HOME}/.cache/.bashrc", change="added")]
+    assert fuse(CLEAN, run).verdict == "ALLOW"
+    run = complete_run()
+    run.file_diffs = [FileDiff(path=f"{CAGE_HOME}/build/.bashrc", change="added")]
     assert fuse(CLEAN, run).verdict == "ALLOW"
 
 
