@@ -17,7 +17,7 @@ _ENTRY_FIELDS = frozenset({"kind", "mode", "size", "sha256", "target", "error"})
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _MAX_PATH_KEY = 65_536
 _MAX_ERROR = 64
-USAGE = "usage: trace.py snapshot ROOT [--limits JSON] | trace.py unlock ROOT"
+USAGE = "usage: trace.py snapshot ROOT [--limits JSON] | trace.py unlock ROOT [--limits JSON]"
 
 
 class TraceError(RuntimeError):
@@ -33,9 +33,11 @@ class TraceLimits:
     timeout_seconds: float = 15
 
     def __post_init__(self) -> None:
-        counts = (self.max_entries, self.max_bytes, self.max_file_bytes, self.max_depth)
+        counts = (self.max_entries, self.max_bytes, self.max_file_bytes)
         if any(type(value) is not int for value in counts) or any(value <= 0 for value in counts):
-            raise ValueError("trace entry, byte, and depth limits must be positive integers")
+            raise ValueError("trace entry and byte limits must be positive integers")
+        if type(self.max_depth) is not int or self.max_depth < 0:
+            raise ValueError("trace depth limit must be a nonnegative integer")
         if (
             type(self.timeout_seconds) not in (int, float)
             or not is_finite(self.timeout_seconds)
@@ -336,18 +338,18 @@ def main(argv: Sequence[str]) -> int:
         len(argv) == 2
         and argv[0] in {"snapshot", "unlock"}
         or len(argv) == 4
-        and argv[0] == "snapshot"
+        and argv[0] in {"snapshot", "unlock"}
         and argv[2] == "--limits"
     ):
         print(USAGE, file=sys.stderr)
         return 2
     action, root = argv[0], Path(argv[1])
     try:
+        limits = TraceLimits(**json.loads(argv[3])) if len(argv) == 4 else DEFAULT_LIMITS
         if action == "snapshot":
-            limits = TraceLimits(**json.loads(argv[3])) if len(argv) == 4 else DEFAULT_LIMITS
             print(manifest_to_json(snapshot(root, limits)))
             return 0
-        failures = unlock(root)
+        failures = unlock(root, limits)
     except (TraceError, ValueError, TypeError) as exc:
         print(f"trace error: {exc}", file=sys.stderr)
         return 1

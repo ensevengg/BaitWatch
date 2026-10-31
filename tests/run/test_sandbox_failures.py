@@ -1350,3 +1350,21 @@ def test_only_added_or_modified_files_at_the_cap_trigger_write_limit(repo, monke
     assert any(e.code == "REPO_WRITE_LIMIT" for e in sandbox.evidence.errors) is (
         change != "unchanged"
     )
+
+
+@pytest.mark.parametrize("path", ["extra", ".env"])
+def test_trace_charges_oversize_new_files_and_rewritten_bait(repo: Path, monkeypatch, path):
+    before = _planted_manifest()
+    before[".env"] = Entry(kind="file", mode=0o666, size=128, sha256="1" * 64)
+    after = dict(before)
+    after[path] = Entry(kind="file", mode=0o666, size=65, sha256="4" * 64)
+    manifests = iter([before, after])
+    monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
+    sandbox = Sandbox(
+        repo, SandboxConfig(staging=StagingLimits(max_file_bytes=64)), client_factory=fake_client
+    )
+    with sandbox:
+        assert sandbox.trace_before()
+        sandbox.trace_after()
+    assert "REPO_WRITE_LIMIT" in {error.code for error in sandbox.evidence.errors}
+    assert sandbox.evidence.status == "error"

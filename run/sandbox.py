@@ -8,7 +8,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import docker
@@ -35,7 +35,7 @@ from run.honeytokens import (
 from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
-from run.trace import TraceError, diff, error_paths, manifest_from_json
+from run.trace import TraceError, TraceLimits, diff, error_paths, manifest_from_json
 
 SCAN_LABEL = "org.baitwatch.scan-id"
 DEFAULT_SUBNET = "10.13.37.0/24"
@@ -223,6 +223,7 @@ class Sandbox:
         self._honeytokens: tuple[Honeytoken, ...] = ()
         self._planted_paths: frozenset[str] = frozenset()
         self._planted_bytes = 0
+        self._planted_max_file_bytes = 0
         self._honeytoken_scanned = False
         self._trace_before: dict | None = None
 
@@ -349,6 +350,14 @@ class Sandbox:
                 len(file.content.encode("utf-8"))
                 for file in token_set.files
                 if file.path in self._planted_paths
+            )
+            self._planted_max_file_bytes = max(
+                (
+                    len(file.content.encode("utf-8"))
+                    for file in token_set.files
+                    if file.path in self._planted_paths
+                ),
+                default=0,
             )
             self._subnet = self._create_network()
             self._open = True
@@ -645,8 +654,25 @@ class Sandbox:
             self.evidence.status = "error"
         self._scan_honeytokens()
 
-    def _run_trace_helper(self, role: str) -> dict:
+    def _trace_limits(self, *, cleanup: bool = False) -> dict:
         limits = self.config.staging
+        adjusted = TraceLimits(
+            max_entries=limits.max_entries + len(self._planted_paths),
+            max_bytes=limits.max_bytes + self._planted_bytes,
+            max_file_bytes=max(limits.max_file_bytes, self._planted_max_file_bytes),
+            max_depth=max(
+                limits.max_depth, max((p.count("/") for p in self._planted_paths), default=0)
+            ),
+            timeout_seconds=limits.timeout_seconds,
+        )
+        values = asdict(adjusted)
+        if cleanup:
+            # Cleanup must reach cage growth even when the snapshot rejected it.
+            values["max_entries"] += 1_000_000
+            values["max_depth"] = max(values["max_depth"], 512)
+        return values
+
+    def _run_trace_helper(self, role: str) -> dict:
         command = [
             "python",
             "-I",
@@ -654,15 +680,7 @@ class Sandbox:
             "snapshot",
             "/repo",
             "--limits",
-            json.dumps(
-                {
-                    "max_entries": limits.max_entries + len(self._planted_paths),
-                    "max_bytes": limits.max_bytes + self._planted_bytes,
-                    "max_file_bytes": limits.max_file_bytes,
-                    "max_depth": limits.max_depth,
-                    "timeout_seconds": limits.timeout_seconds,
-                }
-            ),
+            json.dumps(self._trace_limits()),
         ]
         container = self._create(
             self.config.sink_image,
@@ -739,6 +757,11 @@ class Sandbox:
             )
             > limits.max_bytes
             or any(
+                path.count("/") + (entry.kind == "dir") > limits.max_depth
+                for path, entry in after.items()
+                if path not in planted
+            )
+            or any(
                 entry.kind == "file"
                 and entry.size >= limits.max_file_bytes
                 and self._trace_before.get(path) != entry
@@ -746,7 +769,8 @@ class Sandbox:
             )
         ):
             self._error(
-                "REPO_WRITE_LIMIT", "staged repository reached a file, total byte or entry limit"
+                "REPO_WRITE_LIMIT",
+                "staged repository reached a file, total byte, entry or depth limit",
             )
         marked = sorted(set(error_paths(self._trace_before)) | set(error_paths(after)))
         if marked:
@@ -1113,7 +1137,15 @@ class Sandbox:
         try:
             container = self._create(
                 self.config.sink_image,
-                ["python", "-I", "/trace/trace.py", "unlock", "/repo"],
+                [
+                    "python",
+                    "-I",
+                    "/trace/trace.py",
+                    "unlock",
+                    "/repo",
+                    "--limits",
+                    json.dumps(self._trace_limits(cleanup=True)),
+                ],
                 "unlock-staging",
                 None,
                 networked=False,

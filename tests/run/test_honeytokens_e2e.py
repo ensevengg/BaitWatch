@@ -104,6 +104,22 @@ def test_trace_at_staging_limit_with_planted_tokens(
     assert_no_leftovers(engine, sandbox.evidence)
 
 
+@pytest.mark.parametrize("limits", [StagingLimits(max_file_bytes=64), StagingLimits(max_depth=0)])
+def test_trace_allows_planted_file_size_and_depth(tmp_path: Path, engine, limits):
+    repo = tmp_path / "flat"
+    repo.mkdir()
+    if limits.max_depth == 0:
+        (repo / "flat.txt").write_text("fixture")
+    sandbox = Sandbox(repo, SandboxConfig(staging=limits))
+    with sandbox:
+        assert sandbox.trace_before(), sandbox.evidence.errors
+        sandbox.trace_after()
+    assert not sandbox.evidence.errors
+    assert sandbox.evidence.components.trace == State.COMPLETE
+    assert sandbox.evidence.file_diffs == []
+    assert_no_leftovers(engine, sandbox.evidence)
+
+
 @pytest.mark.parametrize(
     ("boundary", "command", "error_code"),
     [
@@ -128,6 +144,35 @@ def test_cage_cannot_use_planted_headroom_for_repository_growth(
         assert result.exit_code == 0, result
         sandbox.trace_after()
     assert error_code in {error.code for error in sandbox.evidence.errors}
+    assert sandbox.evidence.status == "error"
+    with pytest.raises(ValidationError):
+        VerdictReport(
+            verdict="ALLOW", reason="bad", read={"status": "complete"}, run=sandbox.evidence
+        )
+    assert_no_leftovers(engine, sandbox.evidence)
+
+
+@pytest.mark.parametrize(
+    ("limits", "command"),
+    [
+        (StagingLimits(max_file_bytes=64), "printf x | dd of=.env bs=1 count=1 conv=notrunc"),
+        (StagingLimits(max_depth=0), "mkdir nested; touch nested/file"),
+        (StagingLimits(max_depth=0), "printf changed > config/credentials"),
+        (StagingLimits(max_depth=0), "mkdir empty"),
+    ],
+)
+def test_cage_size_and_depth_are_charged_despite_planted_allowance(
+    tmp_path: Path, engine, limits, command: str
+):
+    repo = tmp_path / "flat"
+    repo.mkdir()
+    sandbox = Sandbox(repo, SandboxConfig(staging=limits))
+    with sandbox:
+        assert sandbox.trace_before(), sandbox.evidence.errors
+        result = sandbox.run_command(["sh", "-c", command])
+        assert result.exit_code == 0, result
+        sandbox.trace_after()
+    assert "REPO_WRITE_LIMIT" in {error.code for error in sandbox.evidence.errors}
     assert sandbox.evidence.status == "error"
     with pytest.raises(ValidationError):
         VerdictReport(
@@ -244,3 +289,29 @@ def test_a_decoy_that_reads_the_planted_env_is_a_tool_log_hit(repo: Path, engine
         VerdictReport(verdict="ALLOW", reason="bad", read={"status": "complete"}, run=evidence)
     assert (repo / ".env").exists() is False
     assert_no_leftovers(engine, evidence)
+
+
+def test_cleanup_unlocks_cage_growth_past_snapshot_limits(repo: Path, engine):
+    sandbox = Sandbox(
+        repo, SandboxConfig(image=PYTHON_IMAGE, staging=StagingLimits(max_entries=1, max_depth=0))
+    )
+    with sandbox:
+        staged = sandbox.staged_path
+        assert sandbox.trace_before(), sandbox.evidence.errors
+        result = sandbox.run_command(
+            [
+                "python",
+                "-c",
+                "import os; "
+                "[os.mkdir(str(i)) for i in range(10005)]; "
+                "names=[n for n in os.listdir('.') if n.isdigit()]; "
+                "os.mkdir(names[-1]+'/deep'); "
+                "os.chmod(names[0],0); os.chmod(names[-1],0)",
+            ]
+        )
+        assert result.exit_code == 0, result
+        sandbox.trace_after()
+    assert "TRACE_FAILED" in {error.code for error in sandbox.evidence.errors}
+    assert "STAGING_CLEANUP" not in {error.code for error in sandbox.evidence.errors}
+    assert not staged.exists()
+    assert_no_leftovers(engine, sandbox.evidence)
