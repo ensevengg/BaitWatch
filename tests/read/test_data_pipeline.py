@@ -97,11 +97,12 @@ def test_read_jsonl_reports_bad_rows(tmp_path):
 
 
 def test_leakage_check_finds_planted_leak(tmp_path):
-    from read.data.leakage import check_split, frozen_texts
+    from read.data.leakage import INJECAGENT_DIR, check_split, frozen_texts
 
     injecagent = frozen_texts()
-    if not injecagent.get("injecagent"):
+    if not INJECAGENT_DIR.exists():
         pytest.skip("InjecAgent checkout not present (injectionagent/InjecAgent/data)")
+    assert injecagent.get("injecagent"), "InjecAgent frozen texts must be present"
     attacker_instruction = injecagent["injecagent"][0]
 
     clean_row = Row("normal repository helper documentation " * 5, 0, "prodnull", SPLIT_TEST)
