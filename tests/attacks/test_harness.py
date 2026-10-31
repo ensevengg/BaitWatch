@@ -119,7 +119,7 @@ def test_keyword_scanner_marks_decoder_coverage_incomplete(
 ) -> None:
     (tmp_path / "notes.md").write_text("ordinary project note\n", encoding="utf-8")
 
-    def fake_views(_text, _decoders, errors=None):
+    def fake_views(_text, _decoders, errors=None, overflow=None):
         if errors is not None:
             errors.append(("bidi", "decode budget exhausted; output truncated"))
         return []
@@ -129,6 +129,24 @@ def test_keyword_scanner_marks_decoder_coverage_incomplete(
     assert outcome.incomplete
     assert outcome.notes == [
         "notes.md: decoder coverage incomplete (bidi: decode budget exhausted; output truncated)"
+    ]
+
+
+def test_keyword_scanner_marks_dropped_segments_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "notes.md").write_text("ordinary project note\n", encoding="utf-8")
+
+    def fake_views(_text, _decoders, errors=None, overflow=None):
+        if overflow is not None:
+            overflow.append(3)
+        return []
+
+    monkeypatch.setattr(harness, "produce_views", fake_views)
+    outcome = harness.keyword_scanner(tmp_path)
+    assert outcome.incomplete
+    assert outcome.notes == [
+        "notes.md: decoder coverage incomplete (3 segment(s) dropped past the view limit)"
     ]
 
 
@@ -142,7 +160,12 @@ def test_keyword_scanner_skips_file_links_outside_the_repo(tmp_path: Path) -> No
         (repo / "linked.txt").symlink_to(outside)
     except OSError as exc:
         pytest.skip(f"symlinks are unavailable: {exc}")
-    assert harness.keyword_scanner(repo).flagged == {}
+    outcome = harness.keyword_scanner(repo)
+    assert outcome.flagged == {}
+    assert outcome.incomplete
+    assert outcome.notes == [
+        "linked.txt: link target missing or outside the repository; not scanned"
+    ]
 
 
 def test_keyword_scanner_skips_manifest(tmp_path: Path) -> None:

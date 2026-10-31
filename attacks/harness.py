@@ -201,7 +201,7 @@ def stage_repo(repo_dir: str | Path, dest: str | Path) -> Path:
     return dest
 
 
-def _iter_files(root: Path) -> Iterator[tuple[str, Path]]:
+def _iter_files(root: Path, skipped: list[str] | None = None) -> Iterator[tuple[str, Path]]:
     resolved_root = root.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = sorted(name for name in dirnames if name not in _SKIP_DIRS)
@@ -211,8 +211,12 @@ def _iter_files(root: Path) -> Iterator[tuple[str, Path]]:
                 try:
                     target = path.resolve(strict=True)
                 except (OSError, RuntimeError):
+                    if skipped is not None:
+                        skipped.append(path.relative_to(root).as_posix())
                     continue
                 if target != resolved_root and resolved_root not in target.parents:
+                    if skipped is not None:
+                        skipped.append(path.relative_to(root).as_posix())
                     continue
             if path.suffix.lower() in _BINARY_SUFFIXES:
                 continue
@@ -229,7 +233,8 @@ def keyword_scanner(root: str | Path) -> ScanOutcome:
     root = Path(root)
     decoders = builtin_decoders() + external_decoders()
     outcome = ScanOutcome()
-    for rel, path in _iter_files(root):
+    skipped_links: list[str] = []
+    for rel, path in _iter_files(root, skipped=skipped_links):
         if path.name == MANIFEST_NAME:
             continue  # answer key, never evidence
         try:
@@ -239,15 +244,21 @@ def keyword_scanner(root: str | Path) -> ScanOutcome:
             outcome.notes.append(f"{rel}: unreadable ({exc})")
             continue
         errors: list[tuple[str, str]] = []
-        views = produce_views(text, decoders, errors=errors)
-        if errors:
+        overflow: list[int] = []
+        views = produce_views(text, decoders, errors=errors, overflow=overflow)
+        detail = [f"{name}: {message}" for name, message in errors[:3]]
+        if overflow:
+            detail.append(f"{sum(overflow)} segment(s) dropped past the view limit")
+        if detail:
             outcome.incomplete = True
-            detail = "; ".join(f"{name}: {message}" for name, message in errors[:3])
-            outcome.notes.append(f"{rel}: decoder coverage incomplete ({detail})")
+            outcome.notes.append(f"{rel}: decoder coverage incomplete ({'; '.join(detail)})")
         for view in views:
             if any(marker.search(view.text) for marker in _MARKERS):
                 outcome.flagged[rel] = 1.0
                 break
+    for rel in skipped_links:
+        outcome.incomplete = True
+        outcome.notes.append(f"{rel}: link target missing or outside the repository; not scanned")
     return outcome
 
 
