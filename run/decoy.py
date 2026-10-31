@@ -262,8 +262,6 @@ def run_decoy(
                         "DECOY_TIME_BUDGET", "the decoy exhausted its wall-time budget"
                     ) from exc
                 raise
-            _check_wall()
-            _check_cage(sandbox, deadline)
             if reply.total_tokens:
                 total_prompt += reply.prompt_tokens
                 total_completion += reply.completion_tokens
@@ -285,6 +283,9 @@ def run_decoy(
                 last_backend = str(backend.name)
             elif getattr(backend, "last_backend", None):
                 last_backend = str(backend.last_backend)
+            # Count a late reply's usage before failing on time; its tool calls never run.
+            _check_wall()
+            _check_cage(sandbox, deadline)
             if total_tokens > max_tokens:
                 raise _DecoyFailure("DECOY_TOKEN_BUDGET", "the decoy exhausted its token budget")
             if not reply.tool_calls:

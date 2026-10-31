@@ -264,3 +264,25 @@ def test_stalled_call_past_wall_budget_is_time_budget_not_failed():
     assert sandbox.evidence.components.decoy == State.ERROR
     assert sandbox.evidence.errors[-1].code == "DECOY_TIME_BUDGET"
     assert _verdict(sandbox.evidence).verdict != "ALLOW"
+
+
+def test_late_reply_usage_is_recorded_and_its_tool_calls_never_run():
+    sandbox = FakeSandbox()
+
+    class Late:
+        name = "late"
+
+        def chat(self, messages, tools, *, timeout=None):
+            time.sleep(timeout + 0.05 if timeout else 0.1)
+            return LLMReply(
+                tool_calls=[ToolCall(id="1", name="run_cmd", arguments={"command": "true"})],
+                prompt_tokens=30,
+                completion_tokens=12,
+                total_tokens=42,
+            )
+
+    run_decoy(sandbox, Late(), max_seconds=0.05)
+    assert sandbox.evidence.errors[-1].code == "DECOY_TIME_BUDGET"
+    assert sandbox.evidence.decoy_total_tokens == 42
+    assert sandbox.argv == []
+    assert _verdict(sandbox.evidence).verdict != "ALLOW"
