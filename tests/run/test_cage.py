@@ -148,9 +148,9 @@ def test_offline_install_fails_before_tool_deadline(repo, engine, assert_no_left
     assert result.duration_seconds < SandboxConfig().tool_timeout_seconds
     assert not evidence.errors
     report = fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), evidence)
-    assert report.verdict == "FLAG", report.reason
-    assert "package-registry lookup" in report.reason
-    assert evidence.tls_hits  # SNI-only evidence cannot establish a payload-free hello.
+    assert report.verdict == "ALLOW", report.reason
+    assert evidence.tls_hits
+    assert all(hit.hello_only is True for hit in evidence.tls_hits)
     assert_no_leftovers(evidence)
 
 

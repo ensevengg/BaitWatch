@@ -1104,6 +1104,120 @@ def test_tls_complete_clienthello_and_non_tls_contacts_are_not_flagged_incomplet
     assert "capture_incomplete" not in empty
 
 
+def real_client_hello(sni: str) -> bytes:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = context.wrap_bio(incoming, outgoing, server_side=False, server_hostname=sni)
+    with pytest.raises(ssl.SSLWantReadError):
+        tls.do_handshake()
+    return outgoing.read()
+
+
+def test_tls_real_clienthello_alone_is_hello_only():
+    wire = real_client_hello("pypi.org")
+    assert wire[0] == 0x16
+    record = run_handle_tls([wire])
+    assert record["sni"] == "pypi.org"
+    assert record["hello_only"] is True
+    assert record["hello_record_length"] == len(wire)
+    assert record["total_bytes"] == len(wire)
+    assert record["extra_bytes"] == 0
+    assert "capture_incomplete" not in record
+
+
+def test_tls_real_clienthello_split_across_tcp_segments_is_hello_only():
+    wire = real_client_hello("pypi.org")
+    record = run_handle_tls([wire[:7], wire[7:100], wire[100:]])
+    assert record["hello_only"] is True
+    assert record["total_bytes"] == len(wire)
+
+
+def test_tls_clienthello_with_appended_application_data_is_not_hello_only():
+    wire = real_client_hello("pypi.org")
+    app = b"\x17\x03\x03\x00\x04dead"
+    record = run_handle_tls([wire, app])
+    assert record["hello_only"] is False
+    assert record["hello_record_length"] == len(wire)
+    assert record["total_bytes"] == len(wire) + len(app)
+    assert record["extra_bytes"] == len(app)
+    assert record["extra_prefix"] == app[:16].hex()
+    coalesced = run_handle_tls([wire + app])
+    assert coalesced["hello_only"] is False
+    assert coalesced["extra_bytes"] == len(app)
+
+
+def test_tls_clienthello_split_across_two_records_is_not_hello_only():
+    wire = real_client_hello("pypi.org")
+    handshake = wire[5:]
+    half = len(handshake) // 2
+    split = (
+        b"\x16\x03\x01"
+        + half.to_bytes(2, "big")
+        + handshake[:half]
+        + b"\x16\x03\x01"
+        + (len(handshake) - half).to_bytes(2, "big")
+        + handshake[half:]
+    )
+    record = run_handle_tls([split])
+    assert record["sni"] == "pypi.org"
+    assert record["hello_only"] is False
+
+
+def test_tls_clienthello_with_trailing_garbage_is_not_hello_only():
+    wire = real_client_hello("pypi.org")
+    record = run_handle_tls([wire + b"garbage!"])
+    assert record["hello_only"] is False
+    assert record["extra_bytes"] == 8
+
+
+class SlowTlsConn(FakeTlsConn):
+    def recv(self, size: int) -> bytes:
+        data = super().recv(size)
+        if data:
+            return data
+        raise TimeoutError("timed out")
+
+
+def test_tls_slow_client_holding_connection_still_logs_hello_only():
+    wire = real_client_hello("pypi.org")
+    module = load_sink_module("http_sink.py")
+    records = []
+
+    class Log:
+        def write(self, record):
+            records.append(record)
+
+    started = time.monotonic()
+    module.handle_tls(SlowTlsConn([wire]), ("127.0.0.1", 40000), Log())
+    assert time.monotonic() - started < 2
+    assert records[0]["hello_only"] is True
+    assert records[0]["extra_bytes"] == 0
+
+
+def test_tls_slow_real_client_is_logged_and_closed_within_drain_window(http_sink):
+    wire = real_client_hello("pypi.org")
+    with socket.create_connection(
+        ("127.0.0.1", http_sink["tls_port"]), timeout=SINK_TIMEOUT
+    ) as sock:
+        sock.sendall(wire)
+        started = time.monotonic()
+        hit = None
+        while time.monotonic() - started < 5:
+            hits = read_records(http_sink["log"], "tls")
+            if hits:
+                hit = hits[-1]
+                break
+            time.sleep(0.05)
+        assert hit is not None, "sink waited for a slow client instead of logging"
+        assert time.monotonic() - started < 4
+        assert hit["hello_only"] is True
+        assert hit["sni"] == "pypi.org"
+        sock.settimeout(5)
+        assert sock.recv(4096) == b""
+
+
 def test_http_expect_100_continue_client_gets_interim_response_and_full_body_capture(http_sink):
     body = "bw_secret=" + "z" * 5000
     with socket.create_connection(

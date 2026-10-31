@@ -155,6 +155,18 @@
           "default": "",
           "title": "Detail",
           "type": "string"
+        },
+        "hello_only": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hello Only"
         }
       },
       "required": [

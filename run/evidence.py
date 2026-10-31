@@ -47,6 +47,7 @@ class NetworkHit(StrictModel):
     scan_token: str | None = None
     destination: str
     detail: str = ""
+    hello_only: bool | None = None
 
 
 class HoneytokenHit(StrictModel):

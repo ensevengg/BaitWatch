@@ -4,9 +4,10 @@ The thresholds here are provisional until agreed with Manan; the fixed rules
 are already binding: any exception, timeout, truncated scan, missing component,
 READ incomplete/unavailable or RUN error is at least FLAG, never ALLOW, and any
 non-registry sink contact or honeytoken sent over the network is BLOCK. A
-decoy that only reads a honeytoken FLAGs. Validated plain DNS lookups to the
-exact hosts in REGISTRY_HOSTS do not affect the verdict. Other registry
-contacts remain attempts and FLAG instead of BLOCK. The judge inside READ may
+decoy that only reads a honeytoken FLAGs. Validated plain DNS lookups and
+hello-only TLS contacts to the exact hosts in REGISTRY_HOSTS do not affect
+the verdict. Other registry contacts remain attempts and FLAG instead of
+BLOCK. The judge inside READ may
 escalate but never clears a high READ score, so fusion sees only the resulting
 top score.
 """
@@ -69,7 +70,14 @@ def _is_registry_attempt(hit: NetworkHit, kind: str = "dns") -> bool:
 
 
 def _is_plain_registry_contact(hit: NetworkHit, kind: str) -> bool:
-    # TLS logs retain SNI but cannot prove that no payload followed the hello.
+    if kind == "tls":
+        return hit.hello_only is True and (
+            re.fullmatch(
+                r"hello_only=true hello_record_length=([1-9][0-9]*) total_bytes=\1 extra_bytes=0",
+                hit.detail,
+            )
+            is not None
+        )
     return (
         kind == "dns"
         and re.fullmatch(

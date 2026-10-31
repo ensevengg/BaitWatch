@@ -102,6 +102,71 @@ def test_registry_tls_without_proof_of_hello_only_stays_an_attempt(detail):
     assert fuse(CLEAN, run).verdict == "FLAG"
 
 
+HELLO_ONLY_DETAIL = "hello_only=true hello_record_length=517 total_bytes=517 extra_bytes=0"
+
+
+def hello_hit(destination="pypi.org", detail=HELLO_ONLY_DETAIL, hello_only=True):
+    return NetworkHit(
+        source_ip="192.0.2.20", destination=destination, detail=detail, hello_only=hello_only
+    )
+
+
+def test_hello_only_registry_tls_allows_and_retains_evidence():
+    run = complete_run()
+    run.dns_hits.append(
+        NetworkHit(source_ip="192.0.2.20", destination="pypi.org", detail="qtype=A")
+    )
+    contact = hello_hit()
+    run.tls_hits.append(contact)
+    report = fuse(CLEAN, run)
+    assert report.verdict == "ALLOW"
+    assert report.run.tls_hits == [contact]
+
+
+@pytest.mark.parametrize(
+    "detail,hello_only,expected",
+    [
+        (HELLO_ONLY_DETAIL, None, "FLAG"),
+        (HELLO_ONLY_DETAIL, False, "FLAG"),
+        ("hello_only=false hello_record_length=517 total_bytes=600 extra_bytes=83", True, "FLAG"),
+        ("hello_only=true hello_record_length=517 total_bytes=518 extra_bytes=0", True, "FLAG"),
+        ("hello_only=true hello_record_length=517 total_bytes=517 extra_bytes=1", True, "FLAG"),
+        ("hello_only=true", True, "FLAG"),
+        ("", True, "FLAG"),
+    ],
+)
+def test_registry_tls_exemption_requires_consistent_hello_only_evidence(
+    detail, hello_only, expected
+):
+    run = complete_run()
+    run.tls_hits.append(hello_hit(detail=detail, hello_only=hello_only))
+    assert fuse(CLEAN, run).verdict == expected
+
+
+def test_hello_only_tls_to_non_registry_or_missing_sni_blocks():
+    run = complete_run()
+    run.tls_hits.append(hello_hit(destination="evil.example"))
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+    run = complete_run()
+    run.tls_hits.append(hello_hit(destination="<no sni>"))
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+def test_hello_only_registry_tls_with_capture_incomplete_blocks():
+    run = complete_run()
+    run.tls_hits.append(hello_hit(detail=HELLO_ONLY_DETAIL + " capture_incomplete"))
+    assert fuse(CLEAN, run).verdict == "BLOCK"
+
+
+def test_hello_only_registry_tls_never_clears_network_honeytokens():
+    run = complete_run()
+    run.tls_hits.append(hello_hit())
+    run.honeytoken_hits.append(HoneytokenHit(token_id="fixture", source="tls"))
+    report = fuse(CLEAN, run)
+    assert report.verdict == "BLOCK"
+    assert "honeytoken" in report.reason
+
+
 def test_similar_but_unrelated_hosts_still_block():
     run = complete_run()
     run.dns_hits.append(hit("pypi.org.evil.example"))

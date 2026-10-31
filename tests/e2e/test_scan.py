@@ -116,6 +116,19 @@ def test_benign_fixture_allows(engine):
     assert_no_leftovers(engine, report)
 
 
+def test_registry_dns_and_hello_only_tls_fixture_allows(engine):
+    report = scan_fixture("registry-hello")
+    run = report.run
+    assert report.verdict == "ALLOW", (report.reason, [e.model_dump() for e in run.errors])
+    assert not run.errors
+    assert run.status == "complete"
+    assert any(hit.destination == "pypi.org" for hit in run.dns_hits)
+    tls = [hit for hit in run.tls_hits if hit.destination == "pypi.org"]
+    assert tls and all(hit.hello_only is True for hit in tls)
+    jsonschema.validate(report.model_dump(mode="json"), verdict_schema())
+    assert_no_leftovers(engine, report)
+
+
 def test_cli_scan_end_to_end(monkeypatch, engine, tmp_path):
     # The real CLI path; only the READ model is injected (checkpoint may not exist).
     monkeypatch.setattr("run.scan.default_read_scanner", lambda path, **kwargs: CLEAN_READ)

@@ -90,8 +90,9 @@ partial/truncated statistics prevent ALLOW. READ-skipped directories that RUN co
 build, dist and target) also prevent ALLOW; paths staging already omits are
 handled by fusion, with only top-level `.git` exempt; any sink
 contact outside the package registries is BLOCK; package-registry lookups (the
-exact hosts listed below) are exempt only for validated plain DNS; other
-registry contacts are counted as attempts, not exfiltration. A
+exact hosts listed below) are exempt only for validated plain DNS and
+hello-only TLS; other registry contacts are counted as attempts, not
+exfiltration. A
 honeytoken sent over DNS, HTTP or TLS is BLOCK; a decoy that only read one
 (`tool_log`) is FLAG.
 
@@ -137,13 +138,20 @@ captures still BLOCK, including on a registry host.
 
 Plaintext registry HTTP remains an attempt (FLAG for the existing complete
 GET/HEAD shape; uploads, queries and incomplete captures still BLOCK).
-TLS could be exempt only with proof of an exact registry SNI and a hello-only
-capture. The current sink records SNI and capture-incomplete status but cannot
-distinguish a ClientHello alone from one accompanied by extra payload. All
-registry TLS contacts therefore remain attempts (FLAG), failing closed;
-missing/mismatched SNI and incomplete captures still BLOCK. Even a proven
-hello-only exemption would have a known limit: crafted ClientHello random or
-session fields could carry a few bytes to an exact registry host.
+A registry TLS contact is likewise exempt only with an exact registry SNI, a
+complete capture, and trusted hello-only evidence. The TLS sink records the
+first record length (`hello_record_length`), the total bytes received before
+it closed the connection (`total_bytes`, after a drain window of at most one
+second and 16 KiB past the hello), the count and a bounded hex prefix of any
+bytes after that record, and `hello_only`. `hello_only` is true only when the
+received bytes are exactly one TLS record holding a single complete
+ClientHello; extra records, coalesced or trailing bytes, a hello split across
+records, and unparseable, truncated or oversize captures are false. TLS hits
+carry this as `NetworkHit.hello_only` (also in the JSON schema); records
+without it are never exempt. Registry TLS without that proof remains an
+attempt (FLAG); missing/mismatched SNI and incomplete captures still BLOCK.
+Known limit: a crafted ClientHello random or session field could carry a few
+bytes to an exact registry host even in a hello-only contact.
 
 Non-registry contacts and network honeytoken hits always BLOCK. A honeytoken
 hit over DNS, HTTP or TLS takes precedence over any registry exemption.
@@ -193,6 +201,7 @@ defaults, not security controls. Curl uses its normal behavior: the sinks answer
 HTTP and terminate TLS promptly; there is no curl timeout environment variable.
 Network isolation, sinks, and execution limits remain enforced independently.
 An ordinary install failure is recorded as a nonzero program exit; a real
-deadline kill still yields at least FLAG. Registry contacts also remain FLAG
-under the current verdict policy, and other sink contacts remain BLOCK. Neither
+deadline kill still yields at least FLAG. Registry contacts without a plain
+DNS or hello-only TLS exemption remain FLAG under the current verdict policy,
+and other sink contacts remain BLOCK. Neither
 an install failure nor a registry lookup proves an install lifecycle payload ran.

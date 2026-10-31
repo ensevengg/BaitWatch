@@ -133,6 +133,13 @@ def _http_hit(record) -> NetworkHit:
     )
 
 
+def _tls_count(record, key):
+    value = record.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise SinkLogLineError(f"{key} is not a non-negative int")
+    return value
+
+
 def _tls_hit(record) -> NetworkHit:
     _check_ts(record)
     sni = record.get("sni")
@@ -141,15 +148,46 @@ def _tls_hit(record) -> NetworkHit:
     capture_incomplete = record.get("capture_incomplete", False)
     if not isinstance(capture_incomplete, bool):
         raise SinkLogLineError("capture_incomplete is not a boolean")
+    hello_only = record.get("hello_only")
+    if hello_only is not None and not isinstance(hello_only, bool):
+        raise SinkLogLineError("hello_only is not a boolean")
     notes = []
     if sni is None:
         notes.append("ClientHello without SNI")
     if capture_incomplete:
         notes.append("capture_incomplete")
+    if hello_only is not None:
+        record_length = record.get("hello_record_length")
+        if record_length is not None and (
+            isinstance(record_length, bool)
+            or not isinstance(record_length, int)
+            or record_length <= 0
+        ):
+            raise SinkLogLineError("hello_record_length is not a positive int or null")
+        total = _tls_count(record, "total_bytes")
+        extra = _tls_count(record, "extra_bytes")
+        prefix = record.get("extra_prefix", "")
+        if (
+            not isinstance(prefix, str)
+            or len(prefix) > 32
+            or len(prefix) % 2
+            or any(ch not in "0123456789abcdef" for ch in prefix)
+        ):
+            raise SinkLogLineError("extra_prefix is not a bounded hex string")
+        if hello_only and (capture_incomplete or record_length is None or total != record_length):
+            raise SinkLogLineError("hello_only tls record is inconsistent")
+        if extra != max(0, total - (record_length or 0)) or len(prefix) != 2 * min(extra, 16):
+            raise SinkLogLineError("tls byte counts are inconsistent")
+        notes.append(
+            f"hello_only={'true' if hello_only else 'false'} "
+            f"hello_record_length={record_length} total_bytes={total} extra_bytes={extra}"
+            + (f" extra_prefix={prefix}" if prefix else "")
+        )
     return NetworkHit(
         source_ip=_text(record, "source_ip"),
         destination=sni if sni is not None else "<no sni>",
         detail=" ".join(notes),
+        hello_only=hello_only,
     )
 
 

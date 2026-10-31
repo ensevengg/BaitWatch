@@ -240,6 +240,8 @@ def _record_fields(record: dict) -> list[tuple[str, str]]:
     keys = ("method", "path", "host", "body", "raw", "sni")
     if kind == "dns":
         keys = ("qname", "raw")
+    elif kind == "tls":
+        keys = ("sni", "extra_prefix")
     fields: list[tuple[str, str]] = []
     for key in keys:
         value = record.get(key)

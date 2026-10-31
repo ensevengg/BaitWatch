@@ -24,6 +24,9 @@ BODY_LIMIT = 64 * 1024
 # bound is four maximal plaintext records, and anything past it is flagged
 # capture_incomplete rather than silently read as a null SNI.
 TLS_READ_LIMIT = 64 * 1024
+TLS_DRAIN_SECONDS = 1.0
+TLS_DRAIN_LIMIT = 16 * 1024
+EXTRA_PREFIX_BYTES = 16
 RAW_LIMIT = 200
 POLL_SECONDS = 0.2
 SHUTDOWN_SECONDS = 1.5
@@ -298,6 +301,23 @@ def _log_request(conn, addr, log, lines, parts, body_prefix):
     conn.sendall(RESPONSE)
 
 
+def _first_record_length(data: bytes) -> int | None:
+    if len(data) < 5 or data[0] != 0x16:
+        return None
+    length = 5 + int.from_bytes(data[3:5], "big")
+    return length if length <= len(data) else None
+
+
+def _single_hello_record_length(data: bytes) -> int | None:
+    length = _first_record_length(data)
+    if length is None or length < 9:
+        return None
+    payload = data[5:length]
+    if payload[0] != 0x01 or 4 + int.from_bytes(payload[1:4], "big") != len(payload):
+        return None
+    return length
+
+
 def handle_tls(conn, addr, log):
     conn.settimeout(CONNECTION_TIMEOUT)
     buffer = bytearray()
@@ -311,13 +331,36 @@ def handle_tls(conn, addr, log):
         buffer.extend(chunk)
         if client_hello_done(bytes(buffer)):
             break
+    single_length = _single_hello_record_length(bytes(buffer))
+    if single_length is not None:
+        deadline = time.monotonic() + TLS_DRAIN_SECONDS
+        while len(buffer) < TLS_READ_LIMIT and len(buffer) - single_length < TLS_DRAIN_LIMIT:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            conn.settimeout(remaining)
+            try:
+                chunk = conn.recv(min(4096, TLS_DRAIN_LIMIT - (len(buffer) - single_length)))
+            except OSError:
+                break
+            if not chunk:
+                break
+            buffer.extend(chunk)
     data = bytes(buffer)
+    record_length = _first_record_length(data)
+    extra = data[record_length:] if record_length is not None else data
     record = {
         "kind": "tls",
         "ts": time.time(),
         "source_ip": addr[0],
         "sni": parse_sni(data),
+        "hello_only": single_length is not None and len(data) == single_length,
+        "hello_record_length": record_length,
+        "total_bytes": len(data),
+        "extra_bytes": len(extra),
     }
+    if extra:
+        record["extra_prefix"] = extra[:EXTRA_PREFIX_BYTES].hex()
     # A TLS-looking prefix without a whole ClientHello was cut short by the read
     # limit, a stall or an early end; the SNI may still be recoverable, but the
     # capture cannot pose as complete.
