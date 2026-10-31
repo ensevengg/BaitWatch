@@ -188,3 +188,12 @@ def test_fallback_sends_temperature_and_seed():
         fb = OpenAICompatBackend(fallback.base_url, "llama", temperature=0, seed=0)
         assert FallbackBackend(_backend(primary), fb).chat([], []).text == "ok"
     assert seen["temperature"] == 0 and seen["seed"] == 0
+
+
+def test_primary_reply_without_backend_names_the_primary():
+    primary = _FakeBackend(text="primary")
+    primary.name = "openai:main@x"
+    fallback = _FakeBackend(text="fallback")
+    out = FallbackBackend(primary, fallback).chat([], [])
+    assert out.text == "primary"
+    assert out.backend == "openai:main@x"

@@ -10,7 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -585,7 +585,7 @@ class FallbackBackend:
                 backend=self.last_backend,
             )
         self.last_backend = reply.backend or self.primary_name
-        return reply
+        return replace(reply, backend=self.last_backend)
 
 
 def make_backend_with_fallback(primary_spec: str, fallback_spec: str | None = None) -> LLMBackend:
