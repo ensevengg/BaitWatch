@@ -18,7 +18,7 @@ An empty list means nothing was recorded. It does not mean the component ran. Ev
 - `tool_log` holds one `CommandResult` per executed entry. The plain command records its argv. A decoy tool call records the tool name and arguments as its `command` (for example `["run_cmd", "sh setup.sh"]`) plus the outcome; the underlying cage argv is not repeated there. A call that could not dispatch — unknown tool or malformed arguments — is logged with the model-facing error in `stderr` and no `exit_code`, because nothing executed. Each exec's exit code comes from Docker's own exec record, never from the streaming client: a stream that ends can be a broken connection wearing a clean end, so after the stream closes the record must show the exec finished and its `ExitCode` is the reported one. After each exec, a bounded poll (up to 2.5 seconds, every 0.1 seconds) lets the trusted Busybox timeout watchdog exit while sinks remain active; then every other live cage process except the cage's PID 1 is killed, so forked or backgrounded work cannot outlive its tool call; a sweep that kills live work records `EXEC_LINGERING_KILLED`, and one that cannot confirm the cage is clear records `EXEC_KILL_FAILED`. Both prevent ALLOW. A tool call killed at its deadline is an error (`EXEC_TIMEOUT`) and one whose output passed the byte budget is an error (`EXEC_OUTPUT_TRUNCATED`), though its `tool_log` entry is kept; ordinary nonzero tool exits are results, not errors. A record that cannot be read, still shows the exec running, has no exit code, or disagrees with a stream that broke or with the in-cage start marker (the exec never reached the cage) is an error (`EXEC_TRANSPORT_FAILED`) and the entry is kept.
 - `dns_hits`, `http_hits` and `tls_hits` carry the peer source IP (the cage), the destination (DNS qname, HTTP host+path or TLS SNI) and a bounded detail line: query type and label-decoded secrets, method and body preview, or a raw preview for unparseable TCP contact.
 - `file_diffs` lists added, modified and deleted paths in the disposable staged copy and HOME. Repository paths are relative; HOME paths start with `/cage/home/`. Each diff has `is_repo_file`, true only for a pre-run regular repository file outside build/cache trees and planted bait. `staged_file_count` counts those files for deletion thresholds. Changes to the original repository are impossible to record this way because the original is never mounted.
-- Each scan generates a small set of honeytokens from `secrets`, in obviously fake shapes (`BAITWATCH_FAKE_<lowercase base32>`, canary URLs only under the reserved `.example` TLD) that match no provider's secret format. They are planted only in the staged copy — a fake `.env`, a fake `.env.local`, and a fake `config/credentials` where the repository provides no such file — before the first trace snapshot, so planted files are never the repository's own `file_diffs` and the original repository is never written. After the sinks stop, the DNS names, the HTTP method, host, path (also percent-decoded), header names and values and body, the TLS SNI, the decoded DNS labels and every `tool_log` output are searched for those values in plain, URL-encoded, base64, base64url, base32 and hex forms, including values split across DNS labels, across adjacent queries to one domain, or across wrapped lines, under per-record and total byte bounds. Each match appends `HoneytokenHit(token_id, source, source_ip)` to `honeytoken_hits`. A hit record carries only the token id, never the value; the fake value can still appear in `tool_log` output and sink detail because evidence quotes what the cage emitted, which is harmless because the values are fake and unique to the scan. A `tool_log` hit means the decoy handled a planted value, not that anything left the cage. A detection bound hit records `HONEYTOKEN_SCAN_INCOMPLETE`, so an unscanned remainder can never look clean, and truncated sink records stay incomplete through their own log problems whether or not a token was found. A planted token reaching a sink is the strongest exfil signal: fusion BLOCKs on a `dns`, `http` or `tls` hit and FLAGs a hit that only came from `tool_log` or a transcript, and never ALLOWs while `honeytoken_hits` is non-empty.
+- Each scan generates a small set of honeytokens from `secrets`, in obviously fake shapes (`BAITWATCH_FAKE_<lowercase base32>`, canary URLs only under the reserved `.example` TLD) that match no provider's secret format. They are planted only in the staged copy — a fake `.env`, a fake `.env.local`, and a fake `config/credentials` where the repository provides no such file — before the first trace snapshot, so planted files are never the repository's own `file_diffs` and the original repository is never written. After the sinks stop, the DNS names, the HTTP method, host, path (also percent-decoded), header names and values and body, the TLS SNI and the full bounded TLS capture (logged as `capture_hex`, searched as hex and as decoded bytes, covering the ClientHello and every drained byte after it), the decoded DNS labels and every `tool_log` output are searched for those values in plain, URL-encoded, base64, base64url, base32 and hex forms, including values split across DNS labels, across adjacent queries to one domain, or across wrapped lines, under per-record and total byte bounds. Each match appends `HoneytokenHit(token_id, source, source_ip)` to `honeytoken_hits`. A hit record carries only the token id, never the value; the fake value can still appear in `tool_log` output and sink detail because evidence quotes what the cage emitted, which is harmless because the values are fake and unique to the scan. A `tool_log` hit means the decoy handled a planted value, not that anything left the cage. A detection bound hit records `HONEYTOKEN_SCAN_INCOMPLETE`, so an unscanned remainder can never look clean, and truncated sink records stay incomplete through their own log problems whether or not a token was found. A planted token reaching a sink is the strongest exfil signal: fusion BLOCKs on a `dns`, `http` or `tls` hit and FLAGs a hit that only came from `tool_log` or a transcript, and never ALLOWs while `honeytoken_hits` is non-empty.
 - Setup, timeout, truncation, command and cleanup errors stay in `errors`. A component that is not built yet is `not_run`.
 - If Docker drops whole output frames at a frame boundary while reporting a clean exit, capture cannot detect the loss; this requires a Docker transport fault rather than cage control, and a per-stream end-of-output record is the planned fix.
 - `stdout` and `stderr` share one byte budget. `timed_out` and `output_truncated` are separate fields.
@@ -65,15 +65,27 @@ complete capture, and trusted hello-only evidence. The TLS sink records the
 first record length (`hello_record_length`), the total bytes received before
 it closed the connection (`total_bytes`, after a drain window of at most one
 second and 16 KiB past the hello), the count and a bounded hex prefix of any
-bytes after that record, and `hello_only`. `hello_only` is true only when the
-received bytes are exactly one TLS record holding a single complete
-ClientHello; extra records, coalesced or trailing bytes, a hello split across
+bytes after that record, a hex copy of every received byte (`capture_hex`,
+bounded by the 64 KiB read limit and the drain limit, and marked
+`capture_incomplete` when either limit is hit), and `hello_only`.
+`hello_only` is true only when the received bytes are exactly one TLS record
+holding a single complete ClientHello, the record version is `0x0301` or
+`0x0303`, the record payload is at most 2^14 bytes, the whole record is at
+most 2048 bytes, and the ClientHello body validates: legacy version
+`0x0301`–`0x0303`, a session id of at most 32 bytes, a non-empty even-length
+cipher-suite list, a compression list containing the null method, and an
+extensions block whose lengths exactly consume the body with zero-filled
+padding. Extra records, coalesced or trailing bytes, a hello split across
 records, and unparseable, truncated or oversize captures are false. TLS hits
 carry this as `NetworkHit.hello_only` (also in the JSON schema); records
 without it are never exempt. Registry TLS without that proof remains an
 attempt (FLAG); missing/mismatched SNI and incomplete captures still BLOCK.
-Known limit: a crafted ClientHello random or session field could carry a few
-bytes to an exact registry host even in a hello-only contact.
+Known limit: within the 2048-byte record cap, a crafted ClientHello could
+still carry data to an exact registry host in its 32-byte random, a session
+id of up to 32 bytes, its cipher/compression lists and its extension bytes
+(including unknown or GREASE extensions and key shares); all of those fields
+together are bounded by that cap, and the whole capture is searched for
+honeytokens.
 
 Non-registry contacts and network honeytoken hits always BLOCK. A honeytoken
 hit over DNS, HTTP or TLS takes precedence over any registry exemption.
@@ -155,9 +167,11 @@ symlinks, HOME and files under any `build`, `dist`, `target`, `node_modules`,
 `__pycache__`, `.pytest_cache`, `.cache`, `.venv`, `venv`, `site-packages`,
 `vendor`, `.npm`, `.yarn` or `.pnpm-store` component. A pre-existing repository
 `config/credentials` still counts if no bait was planted there. Sensitive-path
-matching skips those dependency/cache trees, so installing packages containing
-agent files does not BLOCK. `.git/config` and `.git/hooks` remain protected
-even inside those trees. Ordinary setup writes (build output, dependencies, environments, lockfiles and source files) alone
+matching only considers components before the first dependency/cache
+directory component, so installing packages containing agent files does not
+BLOCK, while a control path above such a directory (for example
+`.claude/skills/build/SKILL.md`) still BLOCKs. `.git/config` and `.git/hooks`
+remain protected even inside those trees. Ordinary setup writes (build output, dependencies, environments, lockfiles and source files) alone
 remain eligible for ALLOW with clean READ and a complete executed decoy.
 
 `FileDiff.is_truncated` defaults to false and is set by the runner from the

@@ -26,6 +26,8 @@ BODY_LIMIT = 64 * 1024
 TLS_READ_LIMIT = 64 * 1024
 TLS_DRAIN_SECONDS = 1.0
 TLS_DRAIN_LIMIT = 16 * 1024
+MAX_RECORD_PAYLOAD = 16 * 1024
+MAX_HELLO_ONLY_RECORD = 2048
 EXTRA_PREFIX_BYTES = 16
 RAW_LIMIT = 200
 POLL_SECONDS = 0.2
@@ -308,12 +310,67 @@ def _first_record_length(data: bytes) -> int | None:
     return length if length <= len(data) else None
 
 
+def _valid_client_hello_body(body: bytes) -> bool:
+    if len(body) < 35 or body[:2] not in (b"\x03\x01", b"\x03\x02", b"\x03\x03"):
+        return False
+    pos = 34
+    session_length = body[pos]
+    pos += 1
+    if session_length > 32 or pos + session_length + 2 > len(body):
+        return False
+    pos += session_length
+    cipher_length = int.from_bytes(body[pos : pos + 2], "big")
+    if cipher_length < 2 or cipher_length % 2 or pos + 2 + cipher_length > len(body):
+        return False
+    pos += 2 + cipher_length
+    if pos >= len(body):
+        return False
+    compression_length = body[pos]
+    pos += 1
+    if (
+        compression_length < 1
+        or pos + compression_length > len(body)
+        or 0 not in body[pos : pos + compression_length]
+    ):
+        return False
+    pos += compression_length
+    if pos == len(body):
+        return True
+    if pos + 2 > len(body):
+        return False
+    extensions_length = int.from_bytes(body[pos : pos + 2], "big")
+    if pos + 2 + extensions_length != len(body):
+        return False
+    pos += 2
+    end = pos + extensions_length
+    while pos < end:
+        if pos + 4 > end:
+            return False
+        extension_type = int.from_bytes(body[pos : pos + 2], "big")
+        extension_length = int.from_bytes(body[pos + 2 : pos + 4], "big")
+        if pos + 4 + extension_length > end:
+            return False
+        if extension_type == 21 and any(body[pos + 4 : pos + 4 + extension_length]):
+            return False
+        pos += 4 + extension_length
+    return pos == end
+
+
 def _single_hello_record_length(data: bytes) -> int | None:
     length = _first_record_length(data)
-    if length is None or length < 9:
+    if (
+        length is None
+        or length < 9
+        or length > MAX_HELLO_ONLY_RECORD
+        or length - 5 > MAX_RECORD_PAYLOAD
+    ):
+        return None
+    if data[1:3] not in (b"\x03\x01", b"\x03\x03"):
         return None
     payload = data[5:length]
     if payload[0] != 0x01 or 4 + int.from_bytes(payload[1:4], "big") != len(payload):
+        return None
+    if not _valid_client_hello_body(payload[4:]):
         return None
     return length
 
@@ -358,13 +415,15 @@ def handle_tls(conn, addr, log):
         "hello_record_length": record_length,
         "total_bytes": len(data),
         "extra_bytes": len(extra),
+        "capture_hex": data.hex(),
     }
     if extra:
         record["extra_prefix"] = extra[:EXTRA_PREFIX_BYTES].hex()
-    # A TLS-looking prefix without a whole ClientHello was cut short by the read
-    # limit, a stall or an early end; the SNI may still be recoverable, but the
-    # capture cannot pose as complete.
-    if data[:1] == b"\x16" and not client_hello_done(data):
+    if (
+        (data[:1] == b"\x16" and not client_hello_done(data))
+        or len(data) >= TLS_READ_LIMIT
+        or (single_length is not None and len(data) - single_length >= TLS_DRAIN_LIMIT)
+    ):
         record["capture_incomplete"] = True
     log.write(record)
 

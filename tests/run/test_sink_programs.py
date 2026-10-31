@@ -1148,6 +1148,69 @@ def test_tls_clienthello_with_appended_application_data_is_not_hello_only():
     assert coalesced["extra_bytes"] == len(app)
 
 
+def hello_wire(
+    *,
+    record_version=b"\x03\x01",
+    legacy=b"\x03\x03",
+    session_id=b"",
+    cipher_suites=b"\x13\x01",
+    compression=b"\x00",
+    extensions=(),
+    extension_blob=None,
+    trailing=b"",
+):
+    if extension_blob is None:
+        extension_blob = b"".join(
+            int(kind).to_bytes(2, "big") + len(data).to_bytes(2, "big") + data
+            for kind, data in extensions
+        )
+    body = legacy + bytes(range(32)) + bytes([len(session_id)]) + session_id
+    body += len(cipher_suites).to_bytes(2, "big") + cipher_suites
+    body += bytes([len(compression)]) + compression
+    body += len(extension_blob).to_bytes(2, "big") + extension_blob + trailing
+    handshake = b"\x01" + len(body).to_bytes(3, "big") + body
+    return b"\x16" + record_version + len(handshake).to_bytes(2, "big") + handshake
+
+
+def test_tls_valid_synthetic_clienthello_is_hello_only():
+    wire = hello_wire(extensions=[(43, b"\x02\x03\x04"), (51, b"\x00\x1d\x00\x20" + bytes(32))])
+    record = run_handle_tls([wire])
+    assert record["hello_only"] is True
+    assert record["capture_hex"] == wire.hex()
+
+
+@pytest.mark.parametrize(
+    "wire",
+    [
+        hello_wire(record_version=b"\x03\x00"),
+        hello_wire(record_version=b"\x02\x01"),
+        hello_wire(legacy=b"\x02\x00"),
+        hello_wire(session_id=b"x" * 33),
+        hello_wire(cipher_suites=b"\x13"),
+        hello_wire(cipher_suites=b""),
+        hello_wire(compression=b""),
+        hello_wire(compression=b"\x01"),
+        hello_wire(trailing=b"\x00"),
+        hello_wire(extension_blob=b"\x00\x15\x00\x10\x00"),
+        hello_wire(extensions=[(21, b"A" * 100)]),
+        hello_wire(extensions=[(21, b"\x00" * 3000)]),
+        hello_wire(extensions=[(21, b"\x00" * 17000)]),
+    ],
+)
+def test_tls_malformed_clienthello_is_not_hello_only(wire):
+    record = run_handle_tls([wire])
+    assert record["hello_only"] is False
+
+
+def test_tls_capture_hex_covers_extra_past_sixteen_bytes():
+    wire = real_client_hello("pypi.org")
+    extra = b"f" * 16 + b"BAITWATCH_FAKE_token-after-filler"
+    record = run_handle_tls([wire + extra])
+    assert record["hello_only"] is False
+    assert record["capture_hex"] == (wire + extra).hex()
+    assert record["extra_prefix"] == extra[:16].hex()
+
+
 def test_tls_clienthello_split_across_two_records_is_not_hello_only():
     wire = real_client_hello("pypi.org")
     handshake = wire[5:]

@@ -151,6 +151,14 @@ def _tls_hit(record) -> NetworkHit:
     hello_only = record.get("hello_only")
     if hello_only is not None and not isinstance(hello_only, bool):
         raise SinkLogLineError("hello_only is not a boolean")
+    capture = record.get("capture_hex")
+    if capture is not None and (
+        not isinstance(capture, str)
+        or len(capture) > 2 * 64 * 1024
+        or len(capture) % 2
+        or any(ch not in "0123456789abcdef" for ch in capture)
+    ):
+        raise SinkLogLineError("capture_hex is not a bounded hex string")
     notes = []
     if sni is None:
         notes.append("ClientHello without SNI")
@@ -174,6 +182,13 @@ def _tls_hit(record) -> NetworkHit:
             or any(ch not in "0123456789abcdef" for ch in prefix)
         ):
             raise SinkLogLineError("extra_prefix is not a bounded hex string")
+        capture = record.get("capture_hex")
+        if capture is not None and (
+            not isinstance(capture, str)
+            or len(capture) != 2 * total
+            or any(ch not in "0123456789abcdef" for ch in capture)
+        ):
+            raise SinkLogLineError("capture_hex is not a bounded hex string")
         if hello_only and (capture_incomplete or record_length is None or total != record_length):
             raise SinkLogLineError("hello_only tls record is inconsistent")
         if extra != max(0, total - (record_length or 0)) or len(prefix) != 2 * min(extra, 16):

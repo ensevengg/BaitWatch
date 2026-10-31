@@ -534,6 +534,21 @@ def test_tls_hello_only_record_maps_to_typed_hit(tmp_path):
     ]
 
 
+def test_tls_capture_hex_matching_total_bytes_is_accepted(tmp_path):
+    path = write_log(tmp_path / "sink.jsonl", [tls_hello_record(capture_hex="ab" * 517)])
+    log = read_sink_log(path)
+    assert not log.problems
+    assert log.tls_hits[0].hello_only is True
+
+
+@pytest.mark.parametrize("capture_hex", ["ab", "zz" * 517, "abc" * 345])
+def test_tls_capture_hex_inconsistent_with_total_is_a_problem(tmp_path, capture_hex):
+    path = write_log(tmp_path / "sink.jsonl", [tls_hello_record(capture_hex=capture_hex)])
+    log = read_sink_log(path)
+    assert not log.tls_hits
+    assert any("capture_hex is not a bounded hex string" in entry for entry in log.problems)
+
+
 def test_tls_record_without_hello_facts_stays_unclassified(tmp_path):
     path = write_log(tmp_path / "sink.jsonl", [ready("http"), tls_record()])
     log = read_sink_log(path)
