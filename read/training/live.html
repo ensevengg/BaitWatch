@@ -287,9 +287,9 @@ function render(d) {
 
   const gp = d.gpu;
   $("gpu").innerHTML = gp ? `<div style="color:var(--text-primary)">${gp.name}</div>
-    <div class="progress" title="memory"><div style="width:${100 * gp.mem_used / gp.mem_total}%"></div></div>
-    <div>memory ${(gp.mem_used / 1024).toFixed(1)} / ${(gp.mem_total / 1024).toFixed(1)} GB</div>
-    <div>utilization ${gp.util}% · ${gp.temp} °C${gp.power != null ? " · " + gp.power.toFixed(0) + " W" : ""}</div>` : "nvidia-smi unavailable";
+    ${gp.mem_used != null && gp.mem_total ? `<div class="progress" title="memory"><div style="width:${100 * gp.mem_used / gp.mem_total}%"></div></div>
+    <div>memory ${(gp.mem_used / 1024).toFixed(1)} / ${(gp.mem_total / 1024).toFixed(1)} GB</div>` : ""}
+    <div>utilization ${gp.util ?? "?"}% · ${gp.temp ?? "?"} °C${gp.power != null ? " · " + gp.power.toFixed(0) + " W" : ""}</div>` : "nvidia-smi unavailable";
   $("others").innerHTML = (d.others || []).length ? d.others.map(o => `${o.stage} · pid ${o.pid} · ${fmtDur(o.elapsed_s)}`).join("<br>") : "none";
 
   renderLoss(run);

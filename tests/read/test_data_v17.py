@@ -126,3 +126,33 @@ def test_split_is_deterministic_and_proportional(tmp_path):
 def test_carrier_pools_are_disjoint_from_each_other_and_the_fpr_corpus():
     check_disjoint()
     assert not {r.lower() for r in TRAIN_REPOS} & {r.lower() for r in TEST_REPOS}
+
+
+def test_fpr_corpus_repos_never_train_on_their_agent_files():
+    from read.data.benign_corpus import CORPUS_STARTER
+    from read.data.v17.agentfiles import split_for_repo
+
+    for c in CORPUS_STARTER:
+        repo = c.url.rstrip("/").removeprefix("https://github.com/")
+        assert split_for_repo(repo) == "test_planted", repo
+        assert split_for_repo(repo.upper()) == "test_planted", repo
+
+
+def test_agent_file_local_names_do_not_collide():
+    from read.data.v17.agentfiles import local_name
+
+    names = {local_name("a/b", "c/AGENTS.md"), local_name("a/b__c", "AGENTS.md"),
+             local_name("a/b", "c__AGENTS.md")}
+    assert len(names) == 3
+    assert local_name("a/b", "AGENTS.md") == local_name("a/b", "AGENTS.md")
+
+
+def test_live_gpu_tolerates_unsupported_fields(monkeypatch):
+    import read.training.live as live
+
+    class Proc:
+        stdout = "NVIDIA RTX 5060, 4100, 8151, [Not Supported], 61, [N/A]\n"
+
+    monkeypatch.setattr(live.subprocess, "run", lambda *a, **k: Proc())
+    g = live.gpu()
+    assert g["util"] is None and g["power"] is None and g["mem_used"] == 4100

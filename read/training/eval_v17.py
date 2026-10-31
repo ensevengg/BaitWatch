@@ -171,7 +171,8 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
 
     def block(t: float) -> dict:
         return {
-            "threshold": round(t, 4),
+            # Unrounded: rounding down could flag files the 0.5% budget excludes.
+            "threshold": t,
             "gold_recall": recall_at(gold_attack, t),
             "gold_missed": [r["case"] for r in gold_rows if r["label"] == 1 and r["score"] < t],
             "suite_recall": recall_at(list(suite_attack.values()), t),

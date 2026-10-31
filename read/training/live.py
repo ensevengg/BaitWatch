@@ -96,9 +96,19 @@ def gpu() -> dict | None:
                               capture_output=True, text=True, timeout=5).stdout.strip().splitlines()[0]
     except (OSError, IndexError, subprocess.TimeoutExpired):
         return None
-    name, used, total, util, temp, power = [x.strip() for x in line.split(",")]
-    return {"name": name, "mem_used": int(used), "mem_total": int(total), "util": int(util),
-            "temp": int(temp), "power": None if power in ("[N/A]", "") else float(power)}
+    name, *nums = [x.strip() for x in line.split(",")]
+    if len(nums) != 5:
+        return None
+
+    def num(x: str) -> float | None:     # "[N/A]", "[Not Supported]", ""
+        try:
+            return float(x)
+        except ValueError:
+            return None
+
+    used, total, util, temp, power = map(num, nums)
+    return {"name": name, "mem_used": used, "mem_total": total, "util": util,
+            "temp": temp, "power": power}
 
 
 def gate_reports(reports: Path) -> list[dict]:

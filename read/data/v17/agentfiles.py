@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import subprocess
 import time
@@ -33,11 +34,18 @@ PERMISSIVE = frozenset({"MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "IS
 
 
 def split_for_repo(repo: str, train_repos=(), test_repos=()) -> str:
-    """train / val / test_planted for an agent-file repo, stable across runs."""
+    """train / val / test_planted for an agent-file repo, stable across runs.
+
+    Repos in the FPR corpus are always held out: the gate scores them as
+    harmless, so their agent files must never reach training.
+    """
+    from read.data.benign_corpus import CORPUS_STARTER
     from read.data.v17.snippets import stable_unit
 
     r = repo.lower()
-    if r in {x.lower() for x in test_repos}:
+    corpus = {c.url.rstrip("/").removeprefix("https://github.com/").lower()
+              for c in CORPUS_STARTER}
+    if r in {x.lower() for x in test_repos} or r in corpus:
         return "test_planted"
     if r in {x.lower() for x in train_repos}:
         return "train"
@@ -101,8 +109,17 @@ def repo_infos(repos: list[str], batch: int = 50) -> dict[str, dict]:
     return out
 
 
+def local_name(repo: str, path: str) -> str:
+    """Readable and collision-free: ``a/b/AGENTS.md`` and ``a__b/AGENTS.md``
+    flatten to the same text, so a hash of the real repo:path is appended."""
+    flat = repo.replace("/", "__") + "__" + path.replace("/", "__")
+    return f"{flat}.{hashlib.sha256(f'{repo}:{path}'.encode()).hexdigest()[:10]}"
+
+
 def _fetch_blob(h: dict, files_dir: Path, max_bytes: int) -> tuple[str, str | None]:
-    dest = files_dir / (h["repo"].replace("/", "__") + "__" + h["path"].replace("/", "__"))
+    # Files already in the lock keep the names recorded there; only new
+    # fetches use local_name().
+    dest = files_dir / local_name(h["repo"], h["path"])
     if dest.exists():
         return dest.name, dest.name
     blob = _gh([f'repos/{h["repo"]}/git/blobs/{h["sha"]}'])

@@ -49,10 +49,12 @@ Rules the builder enforces:
   window is label 1 only if it holds the whole span (or 80%+ of a long one);
   windows that cut it are dropped; windows that miss it are label 0.
 - **Minimal pairs.** Each planted attack window also yields the same window
-  from the clean file, and one other window of the same file.
+  from the clean file and, half the time, one other window of the same file
+  that doesn't touch the span.
 - **No label shortcuts.** Snippets use `{host}`/`{ip}`/`{project}`/`{pkg}`
-  placeholders filled from one shared pool of reserved names (RFC 2606/6761),
-  so hostnames carry no signal; attack rows that name themselves (evil,
+  placeholders filled from one shared pool for both labels, half reserved
+  names (RFC 2606/6761) and half real hosting, paste and tunnel platforms, so
+  hostnames carry no signal; attack rows that name themselves (evil,
   malicious, payload, inject…) are dropped; both labels share one markup
   distribution (HTML comment, blockquote, `<details>`, JSON key, comment
   prefixes) and harmless snippets are planted more often so planted windows
@@ -60,8 +62,9 @@ Rules the builder enforces:
   rewritten from the same pool.
 - **Disjoint test.** 20% of snippets (by id) are held out and planted only
   into `sources.TEST_REPOS` carriers → `test_planted.parquet`, reported apart
-  from `test.parquet` because it is generated text. `test.parquet` is the
-  v1.6 test split, byte-identical.
+  from `test.parquet` because it is generated text. `test.parquet` holds
+  exactly the v1.6 test rows (same texts, labels and sources); row order and
+  the extra metadata columns differ.
 - **Leakage.** Train, val and test_planted are checked against the suite
   fixtures, InjecAgent and Aditya's attack-slice payloads; leaked rows are
   dropped and counted in the manifest.
