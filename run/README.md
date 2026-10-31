@@ -169,7 +169,7 @@ except for exact localhost or 127.0.0.1 endpoints.
 
 File-change fusion BLOCKs agent-control and persistence edits, including nested
 agent instructions, settings, MCP configuration and Git hooks. HOME is a fresh
-traced directory at `/home/agent`; shell startup and configuration changes there
+traced directory at `/cage/home`; shell startup and configuration changes there
 BLOCK, while cache writes alone remain eligible for ALLOW. Repository deletions
 FLAG, or BLOCK at 50% of staged regular files or more than 200 files, excluding
 build/cache trees and planted bait. See [file-change rules](CONTRACT.md#file-change-rules).

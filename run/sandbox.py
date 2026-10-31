@@ -37,7 +37,7 @@ from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
 from run.staging import StagingLimits, is_finite, stage_repository
 from run.trace import TraceError, TraceLimits, diff, error_paths, manifest_from_json
-from run.verdict import is_build_cache
+from run.verdict import CAGE_HOME, is_build_cache
 
 SCAN_LABEL = "org.baitwatch.scan-id"
 DEFAULT_SUBNET = "10.13.37.0/24"
@@ -429,7 +429,7 @@ class Sandbox:
             user="65532:65532",
             working_dir=working_dir,
             environment={
-                "HOME": "/home/agent",
+                "HOME": CAGE_HOME,
                 "PYTHONDONTWRITEBYTECODE": "1",
                 # Sinks cannot serve packages; retries must not consume the tool deadline.
                 "PIP_RETRIES": "0",
@@ -716,7 +716,7 @@ class Sandbox:
 
     def _run_trace_helper(self, role: str) -> dict:
         manifest = {}
-        for root, prefix in ((self.staged_path, ""), (self.home_path, "/home/agent/")):
+        for root, prefix in ((self.staged_path, ""), (self.home_path, f"{CAGE_HOME}/")):
             try:
                 entries = self._snapshot_tree(role + ("-home" if prefix else ""), root)
             except Exception as exc:
@@ -831,7 +831,7 @@ class Sandbox:
             path
             for path, entry in self._trace_before.items()
             if entry.kind == "file"
-            and not path.startswith("/home/agent/")
+            and not path.startswith(f"{CAGE_HOME}/")
             and path not in planted
             and path not in self._git_paths
             and not is_build_cache(path)
@@ -915,7 +915,7 @@ class Sandbox:
                 self.cage_ip,
                 mounts=[
                     Mount("/repo", str(self.staged_path), type="bind", read_only=False),
-                    Mount("/home/agent", str(self.home_path), type="bind", read_only=False),
+                    Mount(CAGE_HOME, str(self.home_path), type="bind", read_only=False),
                 ],
                 working_dir="/repo",
             )
@@ -1139,7 +1139,7 @@ class Sandbox:
                 self.cage_ip,
                 mounts=[
                     Mount("/repo", str(self.staged_path), type="bind", read_only=False),
-                    Mount("/home/agent", str(self.home_path), type="bind", read_only=False),
+                    Mount(CAGE_HOME, str(self.home_path), type="bind", read_only=False),
                 ],
                 working_dir="/repo",
             )
@@ -1254,7 +1254,7 @@ class Sandbox:
         """
         roots = [
             (target, root)
-            for target, root in (("/repo", self.staged_path), ("/home/agent", self.home_path))
+            for target, root in (("/repo", self.staged_path), (CAGE_HOME, self.home_path))
             if root.is_dir()
         ]
         cleanup_limits = self._trace_limits(cleanup=True)

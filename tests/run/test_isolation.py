@@ -14,6 +14,7 @@ from docker.errors import NotFound
 
 from run.evidence import State
 from run.sandbox import SCAN_LABEL, Sandbox, SandboxConfig, SandboxError, detonate
+from run.verdict import CAGE_HOME
 
 pytestmark = pytest.mark.docker
 PYTHON_IMAGE = "python:3.12-alpine"
@@ -324,7 +325,7 @@ def test_home_writes_are_traced_and_disposable(repo, engine):
                     ToolCall(
                         name="run_cmd",
                         arguments={
-                            "command": 'test "$HOME" = /home/agent && mkdir -p "$HOME/.cache" && '
+                            "command": 'test "$HOME" = /cage/home && mkdir -p "$HOME/.cache" && '
                             'echo cache > "$HOME/.cache/tool" && echo bad > "$HOME/.bashrc"'
                         },
                     )
@@ -334,7 +335,7 @@ def test_home_writes_are_traced_and_disposable(repo, engine):
     )
     assert report.verdict == "BLOCK", report.reason
     assert report.run.status == "complete", report.run.errors
-    assert {"/home/agent/.bashrc", "/home/agent/.cache/tool"} <= {
+    assert {f"{CAGE_HOME}/.bashrc", f"{CAGE_HOME}/.cache/tool"} <= {
         entry.path for entry in report.run.file_diffs
     }
     assert fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), report.run).verdict == "BLOCK"

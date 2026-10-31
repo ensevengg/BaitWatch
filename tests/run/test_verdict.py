@@ -5,7 +5,7 @@ import pytest
 
 from run.evidence import CommandResult, HoneytokenHit, NetworkHit, RunComponents, RunEvidence, State
 from run.schemas import verdict_schema
-from run.verdict import READ_BLOCK_SCORE, ReadOutcome, fuse
+from run.verdict import CAGE_HOME, READ_BLOCK_SCORE, ReadOutcome, fuse
 
 
 def complete_run() -> RunEvidence:
@@ -559,7 +559,7 @@ def test_sensitive_home_writes_block(path):
     from run.evidence import FileDiff
 
     run = complete_run()
-    run.file_diffs = [FileDiff(path=f"/home/agent/{path}", change="added")]
+    run.file_diffs = [FileDiff(path=f"{CAGE_HOME}/{path}", change="added")]
     assert fuse(CLEAN, run).verdict == "BLOCK"
 
 
@@ -568,7 +568,7 @@ def test_home_cache_writes_allow(path):
     from run.evidence import FileDiff
 
     run = complete_run()
-    run.file_diffs = [FileDiff(path=f"/home/agent/{path}", change="added")]
+    run.file_diffs = [FileDiff(path=f"{CAGE_HOME}/{path}", change="added")]
     assert fuse(CLEAN, run).verdict == "ALLOW"
 
 
@@ -671,7 +671,7 @@ def test_distinct_deleted_files_with_colliding_display_names_still_count():
         ".github/workflows/ci.yml",
     ],
 )
-@pytest.mark.parametrize("prefix", ["pkg/", "/home/agent/"])
+@pytest.mark.parametrize("prefix", ["pkg/", f"{CAGE_HOME}/"])
 def test_dependency_control_files_allow(tree, control, prefix):
     from run.evidence import FileDiff
 
@@ -720,7 +720,7 @@ def test_active_agent_files_and_git_hooks_still_block(path):
 @pytest.mark.parametrize(
     "name", [".claude.json", ".claude.json.backup", ".clinerules", ".aider.conf.yml"]
 )
-@pytest.mark.parametrize("prefix", ["", "pkg/", "/home/agent/"])
+@pytest.mark.parametrize("prefix", ["", "pkg/", f"{CAGE_HOME}/"])
 @pytest.mark.parametrize("change", ["added", "modified", "deleted"])
 def test_single_file_agent_configs_block(name, prefix, change):
     from run.evidence import FileDiff
@@ -737,7 +737,7 @@ def test_single_file_agent_configs_block(name, prefix, change):
         "pkg/.github/workflows/nested/job.yaml",
         ".envrc",
         "pkg/.envrc",
-        "/home/agent/.envrc",
+        f"{CAGE_HOME}/.envrc",
     ],
 )
 @pytest.mark.parametrize("change", ["added", "modified", "deleted"])

@@ -21,6 +21,7 @@ from run.sandbox import (
 )
 from run.staging import StagingLimits
 from run.trace import Entry
+from run.verdict import CAGE_HOME
 
 OVERLAP = "Pool overlaps with other one on this address space"
 
@@ -1444,11 +1445,11 @@ def test_home_writes_share_repository_collection_limits(repo, monkeypatch, bound
     limits = StagingLimits(max_bytes=10, max_entries=2, max_file_bytes=8)
     file = Entry(kind="file", mode=0o666, size=6, sha256="0" * 64)
     if bound == "bytes":
-        after = {"repo.txt": file, "/home/agent/.cache/data": file}
+        after = {"repo.txt": file, f"{CAGE_HOME}/.cache/data": file}
     elif bound == "entries":
-        after = {"/home/agent/.cache/" + str(i): Entry(kind="dir", mode=0o777) for i in range(3)}
+        after = {f"{CAGE_HOME}/.cache/" + str(i): Entry(kind="dir", mode=0o777) for i in range(3)}
     else:
-        after = {"/home/agent/data": Entry(kind="file", mode=0o666, size=8, sha256="0" * 64)}
+        after = {f"{CAGE_HOME}/data": Entry(kind="file", mode=0o666, size=8, sha256="0" * 64)}
     manifests = iter([{}, after])
     monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
     sandbox = Sandbox(repo, SandboxConfig(staging=limits), client_factory=fake_client)
@@ -1457,7 +1458,7 @@ def test_home_writes_share_repository_collection_limits(repo, monkeypatch, bound
         sandbox.trace_after()
     assert any(error.code == "REPO_WRITE_LIMIT" for error in sandbox.evidence.errors)
     assert sandbox.evidence.status == "error"
-    assert any(entry.path.startswith("/home/agent/") for entry in sandbox.evidence.file_diffs)
+    assert any(entry.path.startswith(f"{CAGE_HOME}/") for entry in sandbox.evidence.file_diffs)
 
 
 @pytest.mark.parametrize(
@@ -1510,8 +1511,8 @@ def test_trace_recognizes_empty_file_replacement_and_keeps_exclusions(repo, monk
         target.write_text("")
         target.chmod(0o600)
     after = snapshot(repo)
-    before["/home/agent/data"] = Entry(kind="file", mode=0o666, size=5, sha256="0" * 64)
-    after["/home/agent/data"] = Entry(kind="file", mode=0o666, size=0, sha256="1" * 64)
+    before[f"{CAGE_HOME}/data"] = Entry(kind="file", mode=0o666, size=5, sha256="0" * 64)
+    after[f"{CAGE_HOME}/data"] = Entry(kind="file", mode=0o666, size=0, sha256="1" * 64)
     manifests = iter([before, after])
     monkeypatch.setattr(Sandbox, "_run_trace_helper", lambda self, role: next(manifests))
     sandbox = Sandbox(repo, client_factory=fake_client)
