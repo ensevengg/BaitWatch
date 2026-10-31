@@ -90,7 +90,8 @@ partial/truncated statistics prevent ALLOW. READ-skipped directories that RUN co
 build, dist and target) also prevent ALLOW; paths staging already omits are
 handled by fusion, with only top-level `.git` exempt; any sink
 contact outside the package registries is BLOCK; package-registry lookups (the
-exact hosts listed below) are counted as attempts, not exfiltration. A
+exact hosts listed below) are exempt only for validated plain DNS; other
+registry contacts are counted as attempts, not exfiltration. A
 honeytoken sent over DNS, HTTP or TLS is BLOCK; a decoy that only read one
 (`tool_log`) is FLAG.
 
@@ -115,7 +116,7 @@ assert evidence.status == "incomplete"
 - Honeytokens are generated per scan in shapes no provider's scanner matches, planted only in the staged copy before the first snapshot, and a leak to a sink or into tool output becomes a `HoneytokenHit` that forbids `ALLOW`; a hit carries only the token id, though the fake value can still appear in quoted tool output and sink detail, and a benign scan records none.
 - A tool call that outlives its deadline is killed inside the cage and recorded timed out; forked or backgrounded work from any tool call leaves no live process behind, for compound (`sleep 100; echo done`) and backgrounded (`sleep 100 &`) commands alike.
 - The sandbox records setup failures, cleanup failures and subnet conflicts as errors, and `exec` fails closed on a cage that was never opened, has closed, or has exited.
-- The fusion flags or blocks on every incomplete READ or RUN, blocks on sink contacts outside the package registries, and only allows a clean READ plus a complete, contact-free decoy run — the local attack fixtures block, the benign fixture allows, and every report validates against the schema.
+- The fusion flags or blocks on every incomplete READ or RUN, blocks on sink contacts outside the package registries, and only allows a clean READ plus a complete decoy run without disallowed evidence — the local attack fixtures block, the benign fixture allows, and every report validates against the schema.
 - The schema rejects ALLOW when any evidence is incomplete.
 
 These tests cover the boundary built so far. They do not prove that a container cannot escape, they do not measure prompt-injection detection, and they do not run the whole product. Integration still has to pass on the team's demo machine. The interface stays a proposal until Manan and Aditya review it.
@@ -124,11 +125,29 @@ Literal-IP connections and unlisted ports are a known observation gap: blocked
 network access does not necessarily create a sink hit, so otherwise clean
 scans can still ALLOW them. See [the uncovered channels](SANDBOX.md#known-limits).
 
-Registry downgrades apply only to exact pypi.org, files.pythonhosted.org,
+Plain DNS contacts to exact pypi.org, files.pythonhosted.org,
 registry.npmjs.org, registry.yarnpkg.com, proxy.golang.org, sum.golang.org,
-index.crates.io, static.crates.io, rubygems.org and index.rubygems.org names:
-DNS questions, TLS SNI, or HTTP GET/HEAD with no body, query or incomplete
-capture. Subdomains and uploads BLOCK. Registry-attempt reasons are bounded.
+index.crates.io, static.crates.io, rubygems.org and index.rubygems.org names
+remain in evidence but do not affect the verdict. Matching ignores case and a
+trailing dot. The query type must be a standard type named by the DNS sink;
+unknown types and unclassified evidence remain FLAG. Existing DNS validation
+still requires a single question and no extra sections except one valid EDNS0
+OPT with empty data or one 8-byte client cookie. Odd EDNS and incomplete
+captures still BLOCK, including on a registry host.
+
+Plaintext registry HTTP remains an attempt (FLAG for the existing complete
+GET/HEAD shape; uploads, queries and incomplete captures still BLOCK).
+TLS could be exempt only with proof of an exact registry SNI and a hello-only
+capture. The current sink records SNI and capture-incomplete status but cannot
+distinguish a ClientHello alone from one accompanied by extra payload. All
+registry TLS contacts therefore remain attempts (FLAG), failing closed;
+missing/mismatched SNI and incomplete captures still BLOCK. Even a proven
+hello-only exemption would have a known limit: crafted ClientHello random or
+session fields could carry a few bytes to an exact registry host.
+
+Non-registry contacts and network honeytoken hits always BLOCK. A honeytoken
+hit over DNS, HTTP or TLS takes precedence over any registry exemption.
+Registry-attempt reasons remain bounded.
 
 Cage file writes have an 8 MiB per-file hard limit by default. Post-run
 size/entry checks record errors, but aggregate disk use during execution is

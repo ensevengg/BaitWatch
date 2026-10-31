@@ -49,9 +49,11 @@ def test_http_and_tls_hits_block():
     assert fuse(CLEAN, run).verdict == "BLOCK"
 
 
-def test_registry_lookups_flag_but_do_not_block():
+def test_registry_http_and_unclassified_tls_still_flag():
     run = complete_run()
-    run.dns_hits.append(hit("pypi.org"))
+    run.dns_hits.append(
+        NetworkHit(source_ip="192.0.2.20", destination="pypi.org", detail="qtype=A")
+    )
     run.http_hits.append(
         NetworkHit(
             source_ip="10.13.37.20", destination="registry.npmjs.org/simple/pkg/", detail="GET"
@@ -62,6 +64,42 @@ def test_registry_lookups_flag_but_do_not_block():
     assert report.verdict == "FLAG"
     assert "package-registry" in report.reason
     assert "exfil" not in report.reason
+
+
+@pytest.mark.parametrize("qtype", ["A", "AAAA", "HTTPS", "TXT"])
+def test_plain_registry_dns_allows_and_retains_evidence(qtype):
+    run = complete_run()
+    contact = NetworkHit(source_ip="192.0.2.20", destination="PyPI.org.", detail=f"qtype={qtype}")
+    run.dns_hits.append(contact)
+    report = fuse(CLEAN, run)
+    assert report.verdict == "ALLOW"
+    assert report.run.dns_hits == [contact]
+
+
+@pytest.mark.parametrize("detail", ["", "qtype=unknown", "qtype=65280", "qtype=A decoded: secret"])
+def test_registry_dns_without_plain_query_evidence_stays_an_attempt(detail):
+    run = complete_run()
+    run.dns_hits.append(NetworkHit(source_ip="192.0.2.20", destination="pypi.org", detail=detail))
+    assert fuse(CLEAN, run).verdict == "FLAG"
+
+
+@pytest.mark.parametrize("source", ["dns", "tls", "http"])
+def test_registry_exemption_never_clears_network_honeytokens(source):
+    run = complete_run()
+    run.dns_hits.append(
+        NetworkHit(source_ip="192.0.2.20", destination="pypi.org", detail="qtype=A")
+    )
+    run.honeytoken_hits.append(HoneytokenHit(token_id="fixture", source=source))
+    report = fuse(CLEAN, run)
+    assert report.verdict == "BLOCK"
+    assert "honeytoken" in report.reason
+
+
+@pytest.mark.parametrize("detail", ["", "payload=secret", "application_data"])
+def test_registry_tls_without_proof_of_hello_only_stays_an_attempt(detail):
+    run = complete_run()
+    run.tls_hits.append(NetworkHit(source_ip="192.0.2.20", destination="pypi.org", detail=detail))
+    assert fuse(CLEAN, run).verdict == "FLAG"
 
 
 def test_similar_but_unrelated_hosts_still_block():
@@ -216,9 +254,8 @@ def random_run(rng: random.Random) -> RunEvidence:
 
 
 def test_fuse_never_allows_a_dirty_input():
-    # Fail-closed contract over the whole input domain: anything incomplete,
-    # errored, unknown, or carrying evidence is never ALLOW. Seeded random
-    # stands in for hypothesis, which is not installed.
+    # Generated contacts carry unclassified details; validated plain registry
+    # DNS is covered separately. Seeded random stands in for hypothesis.
     rng = random.Random(20261030)
     clean_cases = non_get_cases = 0
     for _ in range(2000):
@@ -310,8 +347,8 @@ def test_errors_prevent_allow_even_after_status_is_overwritten():
     [
         ("dns", "secret.pypi.org", "", "BLOCK"),
         ("dns", "pypi.org/secret.evil.com", "", "BLOCK"),
-        ("dns", "files.pythonhosted.org", "", "FLAG"),
-        ("dns", "registry.yarnpkg.com", "", "FLAG"),
+        ("dns", "files.pythonhosted.org", "qtype=A", "ALLOW"),
+        ("dns", "registry.yarnpkg.com", "qtype=AAAA", "ALLOW"),
         ("tls", "secret.pypi.org", "", "BLOCK"),
         ("tls", "pypi.org", "", "FLAG"),
         ("http", "pypi.org/upload", "POST body=secret", "BLOCK"),
@@ -343,7 +380,7 @@ def test_only_plain_exact_registry_lookups_are_downgraded(kind, destination, det
 @pytest.mark.parametrize(
     "kind,detail,suffix,expected",
     [
-        ("dns", "", "", "FLAG"),
+        ("dns", "qtype=A", "", "ALLOW"),
         ("tls", "", "", "FLAG"),
         ("http", "GET", "/pkg", "FLAG"),
         ("http", "POST", "/pkg", "BLOCK"),
@@ -685,3 +722,53 @@ def test_read_tools_do_not_rescue_failed_setup():
         CommandResult(command=["run_cmd", "other"], exit_code=127),
     ]
     assert fuse(CLEAN, run).verdict == "FLAG"
+
+
+@pytest.mark.parametrize(
+    "additional,expected",
+    [
+        ("", "ALLOW"),
+        ("00002904d0000000000000", "ALLOW"),
+        ("00002904d000008000000c000a00086162636465666768", "ALLOW"),
+        ("00002904d0000080000008000a000461626364", "BLOCK"),
+        ("00002904d0000000000004000c0000", "BLOCK"),
+        ("00002904d0000100000000", "BLOCK"),
+        ("00002904d0000000000000" * 2, "BLOCK"),
+    ],
+)
+def test_registry_dns_wire_evidence_preserves_edns_rules(additional, expected, tmp_path):
+    import io
+
+    from run.sink_logs import read_sink_log
+    from run.sinks import dns_sink
+
+    count = 0 if not additional else 2 if len(additional) == 44 else 1
+    packet = (
+        bytes.fromhex("12340100000100000000")
+        + count.to_bytes(2, "big")
+        + b"\x04pypi\x03org\0\0\1\0\1"
+        + bytes.fromhex(additional)
+    )
+    output = io.StringIO()
+    dns_sink.log_query(
+        dns_sink.JsonlLog(output), "192.0.2.20", packet, dns_sink.parse_query(packet)
+    )
+    path = tmp_path / "dns.jsonl"
+    path.write_text(output.getvalue())
+    captured = read_sink_log(path)
+    run = complete_run()
+    run.dns_hits = captured.dns_hits
+    assert fuse(CLEAN, run).verdict == expected
+    assert len(run.dns_hits) == 1
+    assert bool(captured.problems) is (expected == "BLOCK")
+
+
+def test_honeytoken_in_registry_dns_name_blocks():
+    run = complete_run()
+    run.dns_hits.append(
+        NetworkHit(source_ip="192.0.2.20", destination="fixture-token.pypi.org", detail="qtype=A")
+    )
+    run.honeytoken_hits.append(HoneytokenHit(token_id="fixture", source="dns"))
+    report = fuse(CLEAN, run)
+    assert report.verdict == "BLOCK"
+    assert "honeytoken" in report.reason

@@ -4,10 +4,11 @@ The thresholds here are provisional until agreed with Manan; the fixed rules
 are already binding: any exception, timeout, truncated scan, missing component,
 READ incomplete/unavailable or RUN error is at least FLAG, never ALLOW, and any
 non-registry sink contact or honeytoken sent over the network is BLOCK. A
-decoy that only reads a honeytoken FLAGs. Package-registry lookups to the
-exact hosts in REGISTRY_HOSTS are network attempts, not exfiltration: they
-FLAG instead of BLOCK. The judge inside READ may escalate but never clears a
-high READ score, so fusion sees only the resulting top score.
+decoy that only reads a honeytoken FLAGs. Validated plain DNS lookups to the
+exact hosts in REGISTRY_HOSTS do not affect the verdict. Other registry
+contacts remain attempts and FLAG instead of BLOCK. The judge inside READ may
+escalate but never clears a high READ score, so fusion sees only the resulting
+top score.
 """
 
 import re
@@ -65,6 +66,19 @@ def _is_registry_attempt(hit: NetworkHit, kind: str = "dns") -> bool:
     else:
         host = hit.destination
     return host.lower().removesuffix(".") in REGISTRY_HOSTS
+
+
+def _is_plain_registry_contact(hit: NetworkHit, kind: str) -> bool:
+    # TLS logs retain SNI but cannot prove that no payload followed the hello.
+    return (
+        kind == "dns"
+        and re.fullmatch(
+            r"qtype=(?:A|NS|CNAME|SOA|PTR|MX|TXT|AAAA|SRV|NAPTR|DNAME|OPT|DS|RRSIG|DNSKEY|HTTPS|ANY)"
+            r"(?: raw=.*)?",
+            hit.detail,
+        )
+        is not None
+    )
 
 
 def _bounded(text: str) -> str:
@@ -200,7 +214,11 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     flags: list[str] = []
     hits = [(kind, hit) for kind in ("dns", "http", "tls") for hit in getattr(run, f"{kind}_hits")]
     exfil = [hit for kind, hit in hits if not _is_registry_attempt(hit, kind)]
-    attempts = [hit for kind, hit in hits if _is_registry_attempt(hit, kind)]
+    attempts = [
+        hit
+        for kind, hit in hits
+        if _is_registry_attempt(hit, kind) and not _is_plain_registry_contact(hit, kind)
+    ]
 
     controls = [change.path for change in run.file_diffs if _agent_control(change.path)]
     if controls:

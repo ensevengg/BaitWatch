@@ -150,7 +150,7 @@ def test_offline_install_fails_before_tool_deadline(repo, engine, assert_no_left
     report = fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), evidence)
     assert report.verdict == "FLAG", report.reason
     assert "package-registry lookup" in report.reason
-    assert evidence.dns_hits or evidence.http_hits or evidence.tls_hits
+    assert evidence.tls_hits  # SNI-only evidence cannot establish a payload-free hello.
     assert_no_leftovers(evidence)
 
 

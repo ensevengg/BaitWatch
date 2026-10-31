@@ -48,11 +48,29 @@ connections. TCP or UDP to literal IPs outside those listeners, and contacts on
 unlisted ports, can fail without a sink hit. A clean READ and otherwise complete
 RUN can still yield ALLOW in that case. See [SANDBOX.md](SANDBOX.md).
 
-Registry downgrades apply only to exact pypi.org, files.pythonhosted.org,
+Plain DNS contacts to exact pypi.org, files.pythonhosted.org,
 registry.npmjs.org, registry.yarnpkg.com, proxy.golang.org, sum.golang.org,
-index.crates.io, static.crates.io, rubygems.org and index.rubygems.org names:
-DNS questions, TLS SNI, or HTTP GET/HEAD with no body, query or incomplete
-capture. Subdomains and uploads BLOCK. Registry-attempt reasons are bounded.
+index.crates.io, static.crates.io, rubygems.org and index.rubygems.org names
+remain in evidence but do not affect the verdict. Matching ignores case and a
+trailing dot. The query type must be a standard type named by the DNS sink;
+unknown types and unclassified evidence remain FLAG. Existing DNS validation
+still requires a single question and no extra sections except one valid EDNS0
+OPT with empty data or one 8-byte client cookie. Odd EDNS and incomplete
+captures still BLOCK, including on a registry host.
+
+Plaintext registry HTTP remains an attempt (FLAG for the existing complete
+GET/HEAD shape; uploads, queries and incomplete captures still BLOCK).
+TLS could be exempt only with proof of an exact registry SNI and a hello-only
+capture. The current sink records SNI and capture-incomplete status but cannot
+distinguish a ClientHello alone from one accompanied by extra payload. All
+registry TLS contacts therefore remain attempts (FLAG), failing closed;
+missing/mismatched SNI and incomplete captures still BLOCK. Even a proven
+hello-only exemption would have a known limit: crafted ClientHello random or
+session fields could carry a few bytes to an exact registry host.
+
+Non-registry contacts and network honeytoken hits always BLOCK. A honeytoken
+hit over DNS, HTTP or TLS takes precedence over any registry exemption.
+Registry-attempt reasons remain bounded.
 
 DNS labels escape every non-LDH byte as `\DDD` (decimal), including embedded
 dots. Names are bounded by DNS wire length and never cut in presentation.
