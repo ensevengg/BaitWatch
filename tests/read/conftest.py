@@ -37,9 +37,18 @@ def local_model_dir() -> Path | None:
 
 @pytest.fixture(scope="session")
 def tokenizer():
-    model_dir = local_model_dir()
-    if model_dir is None:
-        pytest.skip("no local Prompt Guard 2 model dir")
+    # CI has no Prompt Guard 2 weights (gated), so it points
+    # BAITWATCH_TEST_TOKENIZER at the public DeBERTa-v3 tokenizer, which
+    # encodes identically to PG2-22M (same ids and offsets).
+    # BAITWATCH_REQUIRE_TOKENIZER=1 turns a missing tokenizer into a failure
+    # so tokenizer-dependent tests cannot silently skip.
+    override = os.environ.get("BAITWATCH_TEST_TOKENIZER")
+    model_dir = Path(override) if override else local_model_dir()
+    if model_dir is None or not model_dir.exists():
+        msg = f"no tokenizer: {model_dir or 'no local Prompt Guard 2 model dir'}"
+        if os.environ.get("BAITWATCH_REQUIRE_TOKENIZER") == "1":
+            pytest.fail(msg)
+        pytest.skip(msg)
     from transformers import AutoTokenizer
 
     return AutoTokenizer.from_pretrained(str(model_dir))
