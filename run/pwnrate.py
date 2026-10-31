@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -42,6 +43,7 @@ def summarize_repo(repo: str, records: list[dict[str, Any]]) -> dict[str, Any]:
         "tokens_total": sum(r["tokens"] for r in records),
         "tokens_mean": (sum(r["tokens"] for r in records) / runs) if runs else 0.0,
         "fallback_count": sum(r["fallback_count"] for r in records),
+        "suspect_runs": sum(1 for r in records if r.get("suspect")),
         "records": records,
     }
 
@@ -72,6 +74,7 @@ def run_pwnrate(
         for index in range(runs):
             backend = backend_factory()
             before_fb = getattr(backend, "fallback_count", 0) or 0
+            before_calls = getattr(backend, "call_count", 0) or 0
             config = SandboxConfig(
                 image=image,
                 decoy_seconds=max_seconds,
@@ -79,22 +82,22 @@ def run_pwnrate(
                 decoy_max_seconds=max_seconds,
             )
             started = time.monotonic()
-            try:
-                report = scanner(
-                    repo,
-                    config=config,
-                    backend=backend,
-                    max_steps=max_steps,
-                    max_tokens=max_tokens,
-                    max_seconds=max_seconds,
-                )
-            except TypeError:
-                # Injected scan functions in tests may accept fewer kwargs.
-                report = scanner(repo, config=config, backend=backend, max_steps=max_steps)
+            report = scanner(
+                repo,
+                config=config,
+                backend=backend,
+                max_steps=max_steps,
+                max_tokens=max_tokens,
+                max_seconds=max_seconds,
+            )
             latency = time.monotonic() - started
             run_ev = report.run
             after_fb = getattr(backend, "fallback_count", before_fb) or 0
             fallback_count = run_ev.decoy_fallback_count or (after_fb - before_fb)
+            after_calls = getattr(backend, "call_count", before_calls) or 0
+            turns = after_calls - before_calls
+            # All-fallback runs measure the fallback brain, not the primary.
+            suspect = turns > 0 and fallback_count >= turns
             records.append(
                 {
                     "run": index,
@@ -105,6 +108,7 @@ def run_pwnrate(
                     "tokens": run_ev.decoy_total_tokens,
                     "backend": run_ev.decoy_backend or getattr(backend, "last_backend", ""),
                     "fallback_count": fallback_count,
+                    "suspect": suspect,
                     "status": run_ev.status,
                 }
             )
@@ -114,8 +118,8 @@ def run_pwnrate(
 
 def markdown_table(report: dict[str, Any]) -> str:
     lines = [
-        "| repo | runs | pwned | rate | honey | A/F/B | p50 | p95 | tokens | fb |",
-        "|---|---:|---:|---:|---:|---|---:|---:|---:|---:|",
+        "| repo | runs | pwned | rate | honey | A/F/B | p50 | p95 | tokens | fb | suspect |",
+        "|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|",
     ]
     for entry in report["repos"]:
         counts = entry["verdict_counts"]
@@ -124,15 +128,29 @@ def markdown_table(report: dict[str, Any]) -> str:
             f"| {entry['repo']} | {entry['runs']} | {entry['runs_with_sink_hit']} | "
             f"{entry['pwn_rate']:.2f} | {entry['runs_with_honeytoken_hit']} | {verdict_cell} | "
             f"{entry['latency_p50_seconds']:.2f} | {entry['latency_p95_seconds']:.2f} | "
-            f"{entry['tokens_total']} | {entry['fallback_count']} |"
+            f"{entry['tokens_total']} | {entry['fallback_count']} | "
+            f"{'suspect' if entry.get('suspect_runs') else ''} |"
         )
     return "\n".join(lines) + "\n"
+
+
+def _env_runs(parser: argparse.ArgumentParser) -> int:
+    raw = os.environ.get("BAITWATCH_PWNRATE_RUNS")
+    if raw is None:
+        return 10
+    try:
+        runs = int(raw)
+    except ValueError:
+        parser.error("BAITWATCH_PWNRATE_RUNS must be a positive integer")
+    if runs < 1:
+        parser.error("BAITWATCH_PWNRATE_RUNS must be a positive integer")
+    return runs
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="run.pwnrate")
     parser.add_argument("--repo", action="append", required=True, dest="repos")
-    parser.add_argument("--runs", type=int, default=10)
+    parser.add_argument("--runs", type=int, default=None)
     parser.add_argument("--llm", required=True)
     parser.add_argument("--llm-fallback", default=None)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
@@ -142,6 +160,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="pwnrate.json")
     parser.add_argument("--markdown", default=None)
     args = parser.parse_args(argv)
+    if args.runs is None:
+        args.runs = _env_runs(parser)
+    if args.runs < 1:
+        parser.error("--runs must be a positive integer")
     report = run_pwnrate(
         args.repos,
         runs=args.runs,

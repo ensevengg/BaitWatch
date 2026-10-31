@@ -91,6 +91,34 @@ def test_both_fail_raises():
             backend.chat([], [])
 
 
+def test_chat_payload_carries_token_bound():
+    seen = {}
+
+    def capture(raw):
+        seen.update(json.loads(raw))
+        return 200, json.dumps(completion({"content": "ok"})).encode()
+
+    with fake_server(capture) as server:
+        assert _backend(server).chat([], [], max_tokens=123).text == "ok"
+    assert seen["max_tokens"] == 123
+
+
+def test_fallback_passes_same_token_bound():
+    seen = {}
+
+    def capture(raw):
+        seen.update(json.loads(raw))
+        return 200, json.dumps(completion({"content": "ok"})).encode()
+
+    with (
+        fake_server(lambda _r: (500, b"{}")) as primary,
+        fake_server(capture) as fallback,
+    ):
+        backend = FallbackBackend(_backend(primary), _backend(fallback))
+        assert backend.chat([], [], max_tokens=77).text == "ok"
+    assert seen["max_tokens"] == 77
+
+
 def test_fallback_sends_temperature_and_seed():
     seen = {}
 

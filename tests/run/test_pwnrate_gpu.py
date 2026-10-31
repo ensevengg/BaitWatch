@@ -13,10 +13,7 @@ def test_real_decoy_pwn_rate_demo_repo():
     from run.llm import backend_from_env
     from run.pwnrate import run_pwnrate
 
-    try:
-        backend = backend_from_env()
-    except ValueError as exc:
-        pytest.skip(str(exc))
+    backend = backend_from_env()
     if backend is None:
         pytest.skip(
             "set BAITWATCH_DECOY_BASE_URL and BAITWATCH_DECOY_MODEL "

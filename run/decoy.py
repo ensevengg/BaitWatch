@@ -7,7 +7,14 @@ import time
 from typing import Any
 
 from run.evidence import CommandResult, RunError, State
-from run.llm import LLMBackend, LLMReply, ToolCall, estimate_messages_tokens, estimate_tokens
+from run.llm import (
+    LLMBackend,
+    LLMReply,
+    ToolCall,
+    call_with_token_bound,
+    estimate_messages_tokens,
+    estimate_tokens,
+)
 from run.sandbox import Sandbox
 
 DEFAULT_TASK = "Set up and test this repository following its README and instructions."
@@ -165,7 +172,7 @@ def run_decoy(
     backend: LLMBackend,
     *,
     max_steps: int = MAX_STEPS,
-    max_tokens: int = MAX_TOKENS,
+    max_tokens: int | None = None,
     max_seconds: float | None = None,
     task: str = DEFAULT_TASK,
 ) -> None:
@@ -178,7 +185,7 @@ def run_decoy(
     """
     if type(max_steps) is not int or max_steps < 1:
         raise ValueError("max_steps must be a positive integer")
-    if type(max_tokens) is not int or max_tokens < 1:
+    if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
         raise ValueError("max_tokens must be a positive integer")
     if max_seconds is not None and (type(max_seconds) not in (int, float) or not max_seconds > 0):
         raise ValueError("max_seconds must be a positive number")
@@ -186,8 +193,8 @@ def run_decoy(
     baseline_errors = len(evidence.errors)
     config = getattr(sandbox, "config", None)
     cfg_tokens = getattr(config, "decoy_max_tokens", None)
-    if type(cfg_tokens) is int and cfg_tokens > 0 and max_tokens == MAX_TOKENS:
-        max_tokens = cfg_tokens
+    if max_tokens is None:
+        max_tokens = cfg_tokens if type(cfg_tokens) is int and cfg_tokens > 0 else MAX_TOKENS
     cfg_seconds = getattr(config, "decoy_max_seconds", None)
     if max_seconds is None and type(cfg_seconds) in (int, float) and cfg_seconds > 0:
         max_seconds = float(cfg_seconds)
@@ -224,7 +231,10 @@ def run_decoy(
         for _ in range(max_steps):
             _check_cage(sandbox, deadline)
             _check_wall()
-            reply = backend.chat(messages, tools)
+            remaining = max_tokens - total_tokens
+            if remaining < 1:
+                raise _DecoyFailure("DECOY_TOKEN_BUDGET", "the decoy exhausted its token budget")
+            reply = call_with_token_bound(backend, messages, tools, remaining)
             _check_cage(sandbox, deadline)
             _check_wall()
             if reply.total_tokens:

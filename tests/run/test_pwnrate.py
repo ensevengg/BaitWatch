@@ -50,6 +50,38 @@ def test_pwnrate_aggregation_with_fake_scan():
     assert "| repo-a |" in markdown_table(report)
 
 
+def test_scanner_type_error_is_not_retried():
+    calls = {"n": 0}
+
+    def fake_scan(repo, **kwargs):
+        calls["n"] += 1
+        raise TypeError("bug inside scan")
+
+    with pytest.raises(TypeError, match="bug inside scan"):
+        run_pwnrate(["repo-a"], runs=1, backend_factory=lambda: object(), scan_fn=fake_scan)
+    assert calls["n"] == 1
+
+
+def test_all_fallback_run_is_marked_suspect():
+    from types import SimpleNamespace
+
+    def fake_scan(repo, **kwargs):
+        backend = kwargs["backend"]
+        backend.fallback_count = 2
+        backend.call_count = 2
+        report = _report(False)
+        report.run.decoy_fallback_count = 2
+        return report
+
+    factory = lambda: SimpleNamespace(fallback_count=0, call_count=0)  # noqa: E731
+    report = run_pwnrate(["repo-a"], runs=1, backend_factory=factory, scan_fn=fake_scan)
+    entry = report["repos"][0]
+    assert entry["suspect_runs"] == 1
+    assert entry["records"][0]["suspect"] is True
+    assert "suspect" in markdown_table(report)
+    assert entry["pwn_rate"] == 0.0
+
+
 def test_pwnrate_cli_writes_json_and_markdown(tmp_path, monkeypatch):
     import run.pwnrate as module
 
@@ -64,6 +96,35 @@ def test_pwnrate_cli_writes_json_and_markdown(tmp_path, monkeypatch):
     data = json.loads(out.read_text())
     assert data["repos"][0]["pwn_rate"] == 1.0
     assert (tmp_path / "r.md").exists()
+
+
+def test_pwnrate_cli_runs_default_from_env(tmp_path, monkeypatch):
+    import run.pwnrate as module
+
+    monkeypatch.setattr(module, "run_scan", lambda repo, **kw: _report(True))
+    monkeypatch.setenv("BAITWATCH_PWNRATE_RUNS", "2")
+    steps = tmp_path / "steps.json"
+    steps.write_text("[[]]")
+    out = tmp_path / "r.json"
+    rc = module.main(["--repo", str(tmp_path), "--llm", f"scripted:{steps}", "--out", str(out)])
+    assert rc == 0
+    assert json.loads(out.read_text())["repos"][0]["runs"] == 2
+
+
+def test_pwnrate_cli_invalid_env_runs_fails(tmp_path, monkeypatch):
+    import run.pwnrate as module
+
+    monkeypatch.setenv("BAITWATCH_PWNRATE_RUNS", "nope")
+    with pytest.raises(SystemExit):
+        module.main(["--repo", str(tmp_path), "--llm", "scripted:x", "--out", str(tmp_path / "o")])
+
+
+def test_pwnrate_cli_zero_env_runs_fails(tmp_path, monkeypatch):
+    import run.pwnrate as module
+
+    monkeypatch.setenv("BAITWATCH_PWNRATE_RUNS", "0")
+    with pytest.raises(SystemExit):
+        module.main(["--repo", str(tmp_path), "--llm", "scripted:x", "--out", str(tmp_path / "o")])
 
 
 @pytest.mark.docker

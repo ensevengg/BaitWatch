@@ -1,6 +1,7 @@
 """Decoy brain backends. Model calls only ever leave from the host; the cage stays offline."""
 
 import http.client
+import inspect
 import json
 import math
 import os
@@ -60,7 +61,13 @@ class LLMReply:
 class LLMBackend(Protocol):
     """`messages` and `tools` use the OpenAI chat-completions shapes."""
 
-    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMReply: ...
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+    ) -> LLMReply: ...
 
 
 class ScriptedBackend:
@@ -84,7 +91,13 @@ class ScriptedBackend:
 
     name = "scripted"
 
-    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMReply:
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+    ) -> LLMReply:
         prompt = estimate_messages_tokens(messages, tools)
         if self._index >= len(self._steps):
             return LLMReply(
@@ -217,7 +230,15 @@ class OpenAICompatBackend:
             f"api_key_env={self.api_key_env!r})"
         )
 
-    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMReply:
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+    ) -> LLMReply:
+        if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
+            raise LLMError("max_tokens must be a positive integer")
         if self._calls >= self.max_calls:
             raise LLMError(f"LLM call budget of {self.max_calls} is exhausted")
         self._calls += 1
@@ -236,6 +257,8 @@ class OpenAICompatBackend:
             "tool_choice": "auto",
             "temperature": self.temperature,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         if self.seed is not None:
             payload["seed"] = self.seed
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -465,11 +488,31 @@ def _short_reason(value: object) -> str:
     return text[:ERROR_DETAIL_BYTES] if text else type(value).__name__
 
 
+def call_with_token_bound(
+    backend: LLMBackend,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    max_tokens: int | None,
+) -> LLMReply:
+    # Injected backends may predate the bound; only pass it where accepted.
+    if max_tokens is not None:
+        try:
+            params = inspect.signature(backend.chat).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "max_tokens" in params or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            return backend.chat(messages, tools, max_tokens=max_tokens)
+    return backend.chat(messages, tools)
+
+
 class FallbackBackend:
     def __init__(self, primary: LLMBackend, fallback: LLMBackend) -> None:
         self.primary = primary
         self.fallback = fallback
         self.fallback_count = 0
+        self.call_count = 0
         self.last_backend = ""
         self.primary_name = getattr(primary, "name", type(primary).__name__)
         self.fallback_name = getattr(fallback, "name", type(fallback).__name__)
@@ -478,14 +521,21 @@ class FallbackBackend:
     def __repr__(self) -> str:
         return f"FallbackBackend(primary={self.primary!r}, fallback={self.fallback!r})"
 
-    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMReply:
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+    ) -> LLMReply:
+        self.call_count += 1
         try:
-            reply = self.primary.chat(messages, tools)
+            reply = call_with_token_bound(self.primary, messages, tools, max_tokens)
         except LLMError as exc:
             if exc.kind not in RETRYABLE_KINDS:
                 raise
             try:
-                reply = self.fallback.chat(messages, tools)
+                reply = call_with_token_bound(self.fallback, messages, tools, max_tokens)
             except LLMError:
                 raise LLMError(
                     "both primary and fallback LLM backends failed", kind="both_failed"

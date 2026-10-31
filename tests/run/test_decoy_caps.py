@@ -25,8 +25,10 @@ class Backend:
     def __init__(self, *replies):
         self.replies = list(replies)
         self.name = "fake"
+        self.bounds = []
 
-    def chat(self, messages, tools):
+    def chat(self, messages, tools, *, max_tokens=None):
+        self.bounds.append(max_tokens)
         return self.replies.pop(0) if self.replies else LLMReply(text="done")
 
 
@@ -95,6 +97,21 @@ def test_backend_and_tokens_recorded_on_success():
     assert sandbox.evidence.components.decoy == State.COMPLETE
     assert sandbox.evidence.decoy_backend == "openai:m@x"
     assert sandbox.evidence.decoy_total_tokens == 7
+
+
+def test_token_bound_shrinks_as_budget_is_spent():
+    sandbox = FakeSandbox()
+    first = LLMReply(
+        tool_calls=[ToolCall(id="1", name="run_cmd", arguments={"command": "true"})],
+        prompt_tokens=20,
+        completion_tokens=10,
+        total_tokens=30,
+    )
+    second = LLMReply(text="done", prompt_tokens=5, completion_tokens=5, total_tokens=10)
+    backend = Backend(first, second)
+    run_decoy(sandbox, backend, max_tokens=100)
+    assert backend.bounds == [100, 70]
+    assert sandbox.evidence.components.decoy == State.COMPLETE
 
 
 def test_both_backend_failure_is_non_allow():
