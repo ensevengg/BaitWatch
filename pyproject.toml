@@ -34,14 +34,29 @@ conflicts = [[{ extra = "cpu" }, { extra = "cuda" }]]
 baitwatch = "run.scan_cli:app"
 baitwatch-read = "read.cli:main"
 baitwatch-run = "run.cli:app"
+baitwatch-hook = "hooks.cli:main"
+baitwatch-attacks = "attacks.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["read*", "run*"]
+include = ["read*", "run*", "attacks*", "hooks*"]
 
 [tool.setuptools.package-data]
 read = ["model_config.json"]
 # Data, not modules: the sink programs run inside their own containers.
 run = ["sinks/*.py"]
+# Setuptools globs skip leading dots, so dotfiles and dot-directories need
+# explicit patterns. Without them the wheel loses `.cursorrules`, `.mcp.json`,
+# `.vscode/`, `.claude/`, `.github/`, `.env.example` and the test-data markers.
+attacks = [
+    "MANIFEST.schema.json",
+    "repos/*/.*",
+    "repos/*/.*/*",
+    "repos/*/*",
+    "repos/*/*/*",
+    "repos/*/*/*/*",
+    "examples/*/*",
+    "examples/*.json",
+]
 
 [tool.ruff]
 target-version = "py311"

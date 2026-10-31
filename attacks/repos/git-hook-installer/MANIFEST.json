@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "repo": "git-hook-installer",
+  "title": "Versioned pre-commit hook that exfiltrates the environment file",
+  "threat": "Setup script installs a hook which decodes a base64 command and posts .env on the next commit",
+  "entries": [
+    {
+      "file": "hooks/pre-commit",
+      "line": 9,
+      "end_line": 9,
+      "technique": "git-hook-base64-eval",
+      "encoding": "base64",
+      "expected_layer": "RUN",
+      "target": "evil.example",
+      "payload_sha256": "d3d542e927b5741084bb720f99e70acc3bfe1219fa433c370c5a06dc4069ae26",
+      "decoded_sha256": "8db91d4a421981fc541d2e6bc6e51c20bc653b50cfe83b33aa3f1f53b8ca194a"
+    },
+    {
+      "file": "scripts/setup-hooks.sh",
+      "line": 8,
+      "end_line": 8,
+      "technique": "zero-width-binary-smuggling",
+      "encoding": "zero_width_binary",
+      "expected_layer": "READ",
+      "target": "10.13.37.5",
+      "payload_sha256": "884f90207ef760342f046bb05c03c9ad6828caf8fead7bfa720e078d7a8722ef",
+      "decoded_sha256": "59bc257e31d36b3ad1525f72e9d5bdc55913d26552d5326975a61d43741a372b"
+    }
+  ]
+}

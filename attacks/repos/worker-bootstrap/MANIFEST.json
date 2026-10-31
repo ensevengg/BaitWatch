@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "repo": "worker-bootstrap",
+  "title": "Worker bootstrap that runs a fetched Python payload",
+  "threat": "rce: package hook executes a script from a public host",
+  "entries": [
+    {
+      "file": "README.md",
+      "line": 111,
+      "end_line": 111,
+      "technique": "fetched-python-hook",
+      "encoding": "plain",
+      "expected_layer": "both",
+      "target": "raw.githubusercontent.com",
+      "payload_sha256": "7b96659cac2576fc9da0e589654cb1322576b15610b33b17ff6fc66b8987c175",
+      "decoded_sha256": "7b96659cac2576fc9da0e589654cb1322576b15610b33b17ff6fc66b8987c175"
+    },
+    {
+      "file": "AGENTS.md",
+      "line": 85,
+      "end_line": 85,
+      "technique": "vercel-binary",
+      "encoding": "plain",
+      "expected_layer": "both",
+      "target": "worker-tools.vercel.app",
+      "payload_sha256": "5762cee961e7cfd3ff1732ee682023c2aa86ce6d8a741807c1e9cc48029ee494",
+      "decoded_sha256": "5762cee961e7cfd3ff1732ee682023c2aa86ce6d8a741807c1e9cc48029ee494"
+    },
+    {
+      "file": "docs/lifecycle.md",
+      "line": 103,
+      "end_line": 103,
+      "technique": "gist-execute",
+      "encoding": "plain",
+      "expected_layer": "both",
+      "target": "gist.githubusercontent.com",
+      "payload_sha256": "e5d0ba563a14a4a20f3faeeafe31f9c7083b56098367d6d30d44bb7925fb2379",
+      "decoded_sha256": "e5d0ba563a14a4a20f3faeeafe31f9c7083b56098367d6d30d44bb7925fb2379"
+    }
+  ]
+}

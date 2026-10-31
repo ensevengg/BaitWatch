@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "repo": "runtime-eval-chain",
+  "title": "postinstall runtime eval with base64 plus rot13 deobfuscation",
+  "threat": "Package lifecycle script that decodes and evaluates a hidden command when the install looks unhealthy",
+  "entries": [
+    {
+      "file": "scripts/doctor.js",
+      "line": 29,
+      "end_line": 29,
+      "technique": "runtime-eval-chain",
+      "encoding": "js_eval",
+      "expected_layer": "RUN",
+      "target": "evil.example",
+      "payload_sha256": "3ddaa90f902ed4653d6651f259fea94d1f6e96c179d418aa2718b5a1a4e42e13",
+      "decoded_sha256": "c2b1cef4fa934e13aec0aa72854288141ba4036d282aced8722de73972538d6a"
+    },
+    {
+      "file": "docs/operations.md",
+      "line": 8,
+      "end_line": 8,
+      "technique": "base64-cache-key",
+      "encoding": "base64",
+      "expected_layer": "READ",
+      "target": "10.13.37.7",
+      "payload_sha256": "e80f386053894450ec8548279928454b4f2af9de22445e8b24ddffa7c1f9de73",
+      "decoded_sha256": "13853e67054575a72b31919833d8c147036814869c259c60fcc35ac99db24550"
+    }
+  ]
+}

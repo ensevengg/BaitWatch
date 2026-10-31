@@ -32,14 +32,24 @@ from pathlib import Path
 
 import numpy as np
 
-from read.data.schema import (SPLIT_TEST, SPLIT_TRAIN, SPLIT_VAL, Row,
-                              normalize_for_dedupe, read_jsonl,
-                              text_sha256, write_parquet)
+from read.config import default_data_root
+from read.data.schema import (
+    SPLIT_TEST,
+    SPLIT_TRAIN,
+    SPLIT_VAL,
+    Row,
+    normalize_for_dedupe,
+    read_jsonl,
+    text_sha256,
+    write_parquet,
+)
+
+_DATA_ROOT = default_data_root()
 
 DEFAULT_RAW_DIRS = {
-    "prodnull": Path("/mnt/d/hf_datasets/prompt-injection-repo-dataset/train.jsonl"),
-    "llmail": Path("/mnt/d/hf_datasets/microsoft-llmail-inject-challenge/data"),
-    "opencodeinstruct": Path("/mnt/d/hf_datasets/NVIDIA-OpencodeInstruct/data"),
+    "prodnull": _DATA_ROOT / "prompt-injection-repo-dataset" / "train.jsonl",
+    "llmail": _DATA_ROOT / "microsoft-llmail-inject-challenge" / "data",
+    "opencodeinstruct": _DATA_ROOT / "NVIDIA-OpencodeInstruct" / "data",
 }
 
 

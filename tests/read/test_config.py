@@ -61,9 +61,101 @@ def test_quick_preset_uses_pinned_thresholds(monkeypatch, tmp_path):
     assert cfg.walker.max_files == 400
 
 
+def test_judge_defaults_match_the_live_meta_api(monkeypatch):
+    # Checked against api.meta.ai on 2026-10-28: the old llama.com base URL
+    # returns 404 and `muse-spark` returns model_not_found.
+    monkeypatch.delenv("BAITWATCH_JUDGE_BASE_URL", raising=False)
+    monkeypatch.delenv("BAITWATCH_JUDGE_MODEL", raising=False)
+    muse = rc.JudgeConfig().endpoints[0]
+    assert muse["base_url"] == "https://api.meta.ai/v1"
+    assert muse["model"] == "muse-spark-1.3"
+
+
 def test_quick_preset_disables_judge():
     cfg = rc.ReadConfig.quick()
     assert cfg.judge.enabled is False, "the inline hook must not block on judge calls"
+
+
+def test_windows_pin_reports_the_posix_path(monkeypatch, tmp_path):
+    import pytest
+
+    pin = {
+        "checkpoint_path": "/srv/baitwatch/models/v15f_22m",
+        "tag": "v1.5f",
+    }
+    monkeypatch.setattr(rc, "MODEL_CONFIG_PATH", tmp_path / "model_config.json")
+    (tmp_path / "model_config.json").write_text(json.dumps(pin))
+    monkeypatch.delenv("BAITWATCH_MODEL_PATH", raising=False)
+    monkeypatch.setattr(rc, "_IS_WINDOWS", True)
+    with pytest.raises(FileNotFoundError) as exc:
+        rc.resolve_model_path()
+    message = str(exc.value)
+    assert "/srv/baitwatch/models/v15f_22m" in message
+    assert "POSIX" in message
+    assert "BAITWATCH_MODEL_PATH" in message
+
+
+def test_publication_placeholder_pin_is_an_actionable_error(monkeypatch, tmp_path):
+    """The committed pin must not carry a machine path, and must say so."""
+    import pytest
+
+    pin = {"tag": "v1.5f", "checkpoint_path": "<model-dir>/v15f_22m"}
+    monkeypatch.setattr(rc, "MODEL_CONFIG_PATH", tmp_path / "model_config.json")
+    (tmp_path / "model_config.json").write_text(json.dumps(pin))
+    monkeypatch.delenv("BAITWATCH_MODEL_PATH", raising=False)
+    monkeypatch.delenv("BAITWATCH_MODEL_DIR", raising=False)
+    monkeypatch.setattr(rc, "model_dir", lambda: tmp_path / "no-models-here")
+    with pytest.raises(FileNotFoundError) as exc:
+        rc.resolve_model_path()
+    message = str(exc.value)
+    assert "placeholder" in message
+    assert "BAITWATCH_MODEL_PATH" in message
+
+
+def test_placeholder_expands_from_model_dir(monkeypatch, tmp_path):
+    models = tmp_path / "models"
+    checkpoint = models / "v15f_22m"
+    checkpoint.mkdir(parents=True)
+    pin = {"tag": "v1.5f", "checkpoint_path": "<model-dir>/v15f_22m"}
+    monkeypatch.setattr(rc, "MODEL_CONFIG_PATH", tmp_path / "model_config.json")
+    (tmp_path / "model_config.json").write_text(json.dumps(pin))
+    monkeypatch.delenv("BAITWATCH_MODEL_PATH", raising=False)
+    monkeypatch.setenv("BAITWATCH_MODEL_DIR", str(models))
+    assert rc.resolve_model_path() == checkpoint
+
+
+def test_placeholder_default_is_the_shared_model_dir(monkeypatch, tmp_path):
+    monkeypatch.delenv("BAITWATCH_MODEL_DIR", raising=False)
+    monkeypatch.setattr(rc.Path, "home", classmethod(lambda cls: tmp_path))
+    assert rc.model_dir() == tmp_path / ".local" / "share" / "baitwatch" / "models"
+
+
+def test_default_model_dirs_try_home_before_mnt_d():
+    paths = [p.as_posix() for p in rc.DEFAULT_MODEL_DIRS]
+    home = [i for i, p in enumerate(paths) if "hf_models" in p and not p.startswith("/mnt")]
+    mnt = [i for i, p in enumerate(paths) if p.startswith("/mnt/d/hf_models")]
+    assert home and mnt and max(home) < min(mnt)
+
+
+def test_default_data_root_prefers_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("BAITWATCH_DATA_ROOT", str(tmp_path / "datasets"))
+    assert rc.default_data_root() == tmp_path / "datasets"
+
+
+def test_local_Beaconir_uses_the_config_candidates(monkeypatch, tmp_path):
+    from tests.read.conftest import local_model_dir
+
+    candidate = tmp_path / "mnt-models" / "Llama-Prompt-Guard-2-22M"
+    candidate.mkdir(parents=True)
+    monkeypatch.setattr(rc, "DEFAULT_MODEL_DIRS", (tmp_path / "missing", candidate))
+    assert local_model_dir() == candidate
+
+
+def test_committed_pin_has_no_personal_path() -> None:
+    pinned = rc.load_model_config()
+    assert pinned is not None
+    for key in ("checkpoint_path", "base_model"):
+        assert str(pinned[key]).startswith("<model-dir>"), key
 
 
 def test_missing_pinned_checkpoint_fails_loudly(monkeypatch, tmp_path):

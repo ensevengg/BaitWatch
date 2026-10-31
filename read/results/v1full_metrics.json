@@ -1,5 +1,5 @@
 {
-  "checkpoint": "/home/enseven/.local/share/baitwatch/models/v1full_22m",
+  "checkpoint": "<model-dir>/v1full_22m",
   "thresholds": {
     "flag_threshold": 0.84,
     "review_low": 0.565,

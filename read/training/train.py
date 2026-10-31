@@ -22,6 +22,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from read.config import DEFAULT_MODEL_DIRS
 from read.data.schema import SPLIT_TRAIN, SPLIT_VAL, read_parquet
 
 
@@ -240,7 +241,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="read.training.train")
     parser.add_argument("--data-dir",
                         default=str(Path.home() / ".local/share/baitwatch/data"))
-    parser.add_argument("--base-model", default="/mnt/d/hf_models/Llama-Prompt-Guard-2-22M")
+    parser.add_argument("--base-model",
+                        default=str(next(
+                            (p for p in DEFAULT_MODEL_DIRS if p.exists()),
+                            DEFAULT_MODEL_DIRS[0],
+                        )))
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=32)

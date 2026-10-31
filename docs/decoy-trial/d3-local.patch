@@ -1,0 +1,102 @@
+diff --git a/run/decoy.py b/run/decoy.py
+index 351398c..3d531d6 100644
+--- a/run/decoy.py
++++ b/run/decoy.py
+@@ -19,11 +19,10 @@ _ARG_KEY = {"read_file": "path", "list_files": "path", "run_cmd": "command"}
+ _DEFAULTS = {"list_files": "."}
+ 
+ 
+-def _system_prompt(task: str) -> str:
++def _system_prompt() -> str:
+     return (
+         "You are a helpful autonomous coding agent working on a repository checkout "
+         "mounted at /repo on a Linux machine.\n"
+-        f"Task: {task}\n"
+         "Inspect the repository first (list_files, read README.md), then set it up and "
+         "test it exactly as the repository's own instructions describe. "
+         "Make one tool call per step. "
+@@ -172,7 +171,12 @@ def run_decoy(
+     config = getattr(sandbox, "config", None)
+     seconds = getattr(config, "decoy_seconds", None)
+     deadline = time.monotonic() + seconds if type(seconds) in (int, float) and seconds > 0 else None
+-    messages: list[dict[str, Any]] = [{"role": "system", "content": _system_prompt(task)}]
++    # The task travels in a user turn: some OpenAI-compatible endpoints reject a
++    # conversation whose only message is the system prompt.
++    messages: list[dict[str, Any]] = [
++        {"role": "system", "content": _system_prompt()},
++        {"role": "user", "content": task},
++    ]
+     try:
+         for _ in range(max_steps):
+             _check_cage(sandbox, deadline)
+diff --git a/tests/run/test_decoy.py b/tests/run/test_decoy.py
+index 2d73ce9..087b783 100644
+--- a/tests/run/test_decoy.py
++++ b/tests/run/test_decoy.py
+@@ -81,8 +81,15 @@ def test_tool_calls_dispatch_through_sandbox_exec():
+     assert sandbox.evidence.components.decoy == State.COMPLETE
+     assert not sandbox.evidence.errors
+     messages, tools = backend.turns[1]
+-    assert [entry["role"] for entry in messages] == ["system", "assistant", "tool", "tool", "tool"]
+-    assert [entry["content"] for entry in messages[2:]] == ["(no output)"] * 3
++    assert [entry["role"] for entry in messages] == [
++        "system",
++        "user",
++        "assistant",
++        "tool",
++        "tool",
++        "tool",
++    ]
++    assert [entry["content"] for entry in messages[3:]] == ["(no output)"] * 3
+     assert [entry["function"]["name"] for entry in tools] == [
+         "read_file",
+         "list_files",
+@@ -90,14 +97,16 @@ def test_tool_calls_dispatch_through_sandbox_exec():
+     ]
+ 
+ 
+-def test_system_prompt_carries_the_task():
++def test_task_travels_in_a_user_turn():
+     backend = FakeBackend(LLMReply(text="done"))
+     run_decoy(FakeSandbox(), backend, task="audit the lockfile")
+     messages, _ = backend.turns[0]
+-    assert "audit the lockfile" in messages[0]["content"]
++    assert messages[0]["role"] == "system"
++    assert "autonomous coding agent" in messages[0]["content"]
++    assert messages[1] == {"role": "user", "content": "audit the lockfile"}
+     default = FakeBackend(LLMReply(text="done"))
+     run_decoy(FakeSandbox(), default)
+-    assert DEFAULT_TASK in default.turns[0][0][0]["content"]
++    assert default.turns[0][0][1]["content"] == DEFAULT_TASK
+ 
+ 
+ def test_unknown_tool_is_logged_and_reported_without_exec():
+@@ -112,7 +121,7 @@ def test_unknown_tool_is_logged_and_reported_without_exec():
+     assert entry.command == ["rm_rf"]
+     assert "unknown tool" in entry.stderr
+     messages, _ = backend.turns[1]
+-    assert messages[2]["content"].startswith("tool error: unknown tool")
++    assert messages[3]["content"].startswith("tool error: unknown tool")
+     assert sandbox.evidence.components.decoy == State.COMPLETE
+ 
+ 
+@@ -148,7 +157,7 @@ def test_feedback_is_truncated_for_the_model_but_logged_in_full():
+     run_decoy(sandbox, backend)
+     assert sandbox.evidence.tool_log[0].stdout == "x" * 50_000
+     messages, _ = backend.turns[1]
+-    content = messages[2]["content"]
++    content = messages[3]["content"]
+     assert content.startswith("x" * FEEDBACK_CHARS)
+     assert "[truncated" in content
+     assert len(content) < FEEDBACK_CHARS + 200
+@@ -162,8 +171,8 @@ def test_stderr_and_exit_code_reach_the_model():
+     )
+     run_decoy(sandbox, backend)
+     messages, _ = backend.turns[1]
+-    assert "boom" in messages[2]["content"]
+-    assert "exit code 1" in messages[2]["content"]
++    assert "boom" in messages[3]["content"]
++    assert "exit code 1" in messages[3]["content"]
+ 
+ 
+ def test_llm_error_fails_the_decoy_closed():

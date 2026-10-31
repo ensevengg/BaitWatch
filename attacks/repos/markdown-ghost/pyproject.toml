@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atlas-notes"
+version = "0.3.1"
+description = "Offline-first Markdown notes for field teams."
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+packages = ["atlas_notes"]

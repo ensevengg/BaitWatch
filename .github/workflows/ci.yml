@@ -33,3 +33,27 @@ jobs:
           docker pull python:3.12-alpine
       - name: Unit and Docker integration tests
         run: uv run --no-sync pytest -m "not gpu" tests/run tests/e2e --junitxml=artifacts/pytest.xml
+
+  attacks-hooks:
+    name: ATTACK repos, decoders and hook
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: python -m pip install uv==0.13.5
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev --extra train --extra cpu
+      - name: Lint and formatting
+        run: |
+          uv run --no-sync ruff check attacks hooks tests/attacks
+          uv run --no-sync ruff format --check attacks hooks tests/attacks
+      - name: Safety lint, generated-tree drift, READ gate
+        run: uv run --no-sync python -m attacks check
+      - name: CPU test suite
+        run: uv run --no-sync pytest tests/attacks --junitxml=artifacts/pytest-attacks.xml

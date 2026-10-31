@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "repo": "edge-agent-installer",
+  "title": "Edge installer that pipes a remote script into a shell",
+  "threat": "rce: curl pipe to shell from a public raw host",
+  "entries": [
+    {
+      "file": "README.md",
+      "line": 112,
+      "end_line": 112,
+      "technique": "curl-pipe-shell",
+      "encoding": "plain",
+      "expected_layer": "both",
+      "target": "raw.githubusercontent.com",
+      "payload_sha256": "90902d465a0ba06df6f10f8f425c087fbbbb47c4129a36dd6f6b2e733f139f95",
+      "decoded_sha256": "90902d465a0ba06df6f10f8f425c087fbbbb47c4129a36dd6f6b2e733f139f95"
+    },
+    {
+      "file": "AGENTS.md",
+      "line": 85,
+      "end_line": 85,
+      "technique": "tarball-script",
+      "encoding": "plain",
+      "expected_layer": "both",
+      "target": "codeload.github.com",
+      "payload_sha256": "c5b86fa7e73d14f4beef6a44759eb52a37ea7ecb50a651815653a4f2d997fe12",
+      "decoded_sha256": "c5b86fa7e73d14f4beef6a44759eb52a37ea7ecb50a651815653a4f2d997fe12"
+    },
+    {
+      "file": "docs/install.md",
+      "line": 103,
+      "end_line": 103,
+      "technique": "fetch-and-execute",
+      "encoding": "plain",
+      "expected_layer": "both",
+      "target": "webhook.site",
+      "payload_sha256": "576206a0e72594dc8b0bbb3bae4a94dee9e6d48e8aadcb94512afe8009095f46",
+      "decoded_sha256": "576206a0e72594dc8b0bbb3bae4a94dee9e6d48e8aadcb94512afe8009095f46"
+    }
+  ]
+}

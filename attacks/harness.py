@@ -1,0 +1,481 @@
+"""Per-repo detection harness: the answer key meets an actual scanner.
+
+For every generated repo the harness:
+
+1. stages a copy **without** ``MANIFEST.json`` (the scanner must never see the
+   answer key);
+2. runs a scanner over the staged copy;
+3. compares the flagged files with the manifest: every ``READ``/``both`` entry
+   must be found, and no file outside the manifest may be flagged;
+4. checks that the decoder layer recovers every payload from its file.
+
+Two scanners ship here:
+
+``keyword``
+    Deterministic, CPU-only, no model download. It decodes every hidden view
+    with the real decoder registry and matches a small set of attack markers.
+    This is the CI scanner and the demo's fast path.
+
+``read``
+    The real ``read.scan`` with ``ReadConfig.quick()``. It needs torch and a
+    Prompt Guard checkpoint, so it is the GPU/regression scanner:
+    ``python -m attacks.harness --scanner read``.
+
+    python -m attacks.harness                    # all repos, READ gate
+    python -m attacks.harness --layer RUN        # manifest coverage for RUN
+    python -m attacks.harness --scanner read     # real detector
+    python -m attacks.harness --json
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from attacks.decoderlib import builtin_decoders, external_decoders, produce_views
+from attacks.manifests import (
+    MANIFEST_NAME,
+    ManifestError,
+    all_entry_files,
+    expected_files,
+    hash_text,
+    load_manifest,
+    validate_manifest,
+    verify_hashes,
+)
+
+__all__ = [
+    "GateReport",
+    "ScanOutcome",
+    "evaluate",
+    "keyword_scanner",
+    "main",
+    "read_scanner",
+    "recover_generated",
+    "run_all",
+    "run_repo",
+    "stage_repo",
+]
+
+PACKAGE_DIR = Path(__file__).resolve().parent
+REPOS_DIR = PACKAGE_DIR / "repos"
+# Mirrors READ's walker default (read/config.py: max_file_bytes).  A larger
+# file is scanned as a prefix and marked incomplete, never read whole: the
+# hook runs this scanner on arbitrary checkouts.
+MAX_SCAN_BYTES = 262_144
+_SKIP_DIRS = {
+    ".git",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    ".tox",
+    ".ruff_cache",
+    ".pytest_cache",
+}
+_BINARY_SUFFIXES = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".ico",
+    ".pdf",
+    ".zip",
+    ".gz",
+    ".tar",
+    ".whl",
+    ".so",
+    ".dll",
+    ".exe",
+    ".pyc",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".parquet",
+    ".arrow",
+    ".sqlite",
+    ".db",
+}
+
+Scanner = Callable[[Path], "ScanOutcome"]
+
+# Markers broad enough to catch every seed in seeds.py, narrow enough that the
+# benign shell of a repo never matches. Credential filenames are matched by
+# name rather than by a bare ``.env``: a README may legitimately say
+# "copy .env.example", and a marker that cannot tell those apart is useless.
+_MARKERS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"ignore (?:all )?(?:the )?(?:previous|prior) instructions",
+        r"ignore prior rules",
+        r"ignora (?:las |los )?(?:instrucciones|reglas) (?:anteriores|previas)",
+        r"ignore[rz]? (?:les |toutes )?instructions (?:pr[ée]c[ée]dentes|ant[ée]rieures)",
+        r"disregard (?:the|your|all)",
+        r"system override",
+        r"system\s*:",
+        r"maintenance mode",
+        r"assistant\s*:",
+        r"the user has approved",
+        r"run_command",
+        r"call the tool",
+        r"when you open this repository",
+        r"print the system prompt",
+        r"do not mention this",
+        r"evil\.example",
+        r"10\.13\.37\.\d{1,3}",
+        r"id_rsa",
+        r"\.ssh\b",
+        r"\.aws\b",
+        r"\.netrc\b",
+        r"eval\(",
+        r"base64 -d",
+        r"xxd -r -p",
+    )
+)
+
+
+@dataclass
+class ScanOutcome:
+    flagged: dict[str, float] = field(default_factory=dict)
+    incomplete: bool = False
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def files(self) -> set[str]:
+        return set(self.flagged)
+
+
+@dataclass
+class GateReport:
+    repo: str
+    layer: str
+    expected: set[str]
+    flagged: set[str]
+    missed: set[str]
+    extra: set[str]
+    incomplete: bool
+    recovered: int
+    recoverable: int
+    scanner: str
+
+    @property
+    def ok(self) -> bool:
+        return (
+            not self.missed
+            and not self.extra
+            and not self.incomplete
+            and self.recovered == self.recoverable
+        )
+
+    def as_dict(self) -> dict:
+        return {
+            "repo": self.repo,
+            "layer": self.layer,
+            "scanner": self.scanner,
+            "ok": self.ok,
+            "expected": sorted(self.expected),
+            "flagged": sorted(self.flagged),
+            "missed": sorted(self.missed),
+            "extra": sorted(self.extra),
+            "incomplete": self.incomplete,
+            "recovered": self.recovered,
+            "recoverable": self.recoverable,
+        }
+
+
+def stage_repo(repo_dir: str | Path, dest: str | Path) -> Path:
+    """Copy a repo without its manifest or VCS metadata."""
+    repo_dir, dest = Path(repo_dir), Path(dest)
+    ignore = shutil.ignore_patterns(
+        MANIFEST_NAME,
+        "__pycache__",
+        ".git",
+        "node_modules",
+        ".ruff_cache",
+        ".pytest_cache",
+        "*.pyc",
+    )
+    shutil.copytree(repo_dir, dest, ignore=ignore)
+    return dest
+
+
+def _iter_files(root: Path, skipped: list[str] | None = None) -> Iterator[tuple[str, Path]]:
+    resolved_root = root.resolve()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(name for name in dirnames if name not in _SKIP_DIRS)
+        for name in sorted(filenames):
+            path = Path(dirpath) / name
+            if path.is_symlink():
+                try:
+                    target = path.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    if skipped is not None:
+                        skipped.append(path.relative_to(root).as_posix())
+                    continue
+                if target != resolved_root and resolved_root not in target.parents:
+                    if skipped is not None:
+                        skipped.append(path.relative_to(root).as_posix())
+                    continue
+            if path.suffix.lower() in _BINARY_SUFFIXES:
+                continue
+            try:
+                with path.open("rb") as handle:
+                    if b"\x00" in handle.read(4096):
+                        continue
+            except OSError:
+                continue
+            yield path.relative_to(root).as_posix(), path
+
+
+def _read_scan_text(path: Path) -> tuple[str, bool]:
+    """Read at most ``MAX_SCAN_BYTES``; the flag reports a skipped tail."""
+    with path.open("rb") as handle:
+        raw = handle.read(MAX_SCAN_BYTES + 1)
+    truncated = len(raw) > MAX_SCAN_BYTES
+    if truncated:
+        raw = raw[:MAX_SCAN_BYTES]
+    # A cut prefix may end mid-character, so only that case tolerates it.
+    return raw.decode("utf-8", errors="ignore" if truncated else "strict"), truncated
+
+
+def keyword_scanner(root: str | Path) -> ScanOutcome:
+    """Deterministic CPU scanner over decoded views (the CI stand-in)."""
+    root = Path(root)
+    decoders = builtin_decoders() + external_decoders()
+    outcome = ScanOutcome()
+    skipped_links: list[str] = []
+    for rel, path in _iter_files(root, skipped=skipped_links):
+        if path.name == MANIFEST_NAME:
+            continue  # answer key, never evidence
+        try:
+            text, truncated = _read_scan_text(path)
+        except (OSError, UnicodeDecodeError) as exc:
+            outcome.incomplete = True
+            outcome.notes.append(f"{rel}: unreadable ({exc})")
+            continue
+        if truncated:
+            outcome.incomplete = True
+            outcome.notes.append(f"{rel}: larger than {MAX_SCAN_BYTES} bytes; scanned a prefix")
+        errors: list[tuple[str, str]] = []
+        overflow: list[int] = []
+        views = produce_views(text, decoders, errors=errors, overflow=overflow)
+        detail = [f"{name}: {message}" for name, message in errors[:3]]
+        if overflow:
+            detail.append(f"{sum(overflow)} segment(s) dropped past the view limit")
+        if detail:
+            outcome.incomplete = True
+            outcome.notes.append(f"{rel}: decoder coverage incomplete ({'; '.join(detail)})")
+        for view in views:
+            if any(marker.search(view.text) for marker in _MARKERS):
+                outcome.flagged[rel] = 1.0
+                break
+    for rel in skipped_links:
+        outcome.incomplete = True
+        outcome.notes.append(f"{rel}: link target missing or outside the repository; not scanned")
+    return outcome
+
+
+def read_scanner(root: str | Path) -> ScanOutcome:
+    """The real READ scanner; imports torch lazily so CI never needs it."""
+    try:
+        from read.config import ReadConfig
+        from read.scan import scan
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            f"the READ scanner is missing a dependency ({exc}); install "
+            "torch and transformers, or use --scanner keyword on CPU"
+        ) from exc
+    cfg = ReadConfig.quick()
+    cfg.judge.enabled = False  # deterministic, no network in harness
+    try:
+        result = scan(Path(root), cfg=cfg)
+    except FileNotFoundError as exc:  # pragma: no cover - needs the checkpoint
+        raise RuntimeError(
+            f"READ checkpoint unavailable ({exc}). The keyword scanner needs no "
+            "model; use --scanner keyword for the CPU gate."
+        ) from exc
+    outcome = ScanOutcome(
+        flagged={finding.file: finding.score for finding in result.flagged},
+        # A flagged finding wins the verdict ("attack"), which must not hide
+        # coverage gaps: interrupted evidence stays visible to the gate.
+        incomplete=result.read_verdict == "incomplete" or bool(result.stats.incomplete_reasons),
+        notes=list(result.stats.incomplete_reasons),
+    )
+    return outcome
+
+
+def evaluate(outcome: ScanOutcome, manifest: dict, layer: str, scanner: str) -> GateReport:
+    if str(manifest.get("threat", "")).startswith("none:"):
+        # Harmless twin: no layer expects a flag, and any flag is a false
+        # positive, so its own files do not count as allowed either.
+        expected: set[str] = set()
+        allowed: set[str] = set()
+    else:
+        expected = expected_files(manifest, layer)
+        allowed = all_entry_files(manifest)
+    flagged = outcome.files
+    return GateReport(
+        repo=manifest.get("repo", "<unknown>"),
+        layer=layer,
+        expected=expected,
+        flagged=flagged,
+        missed=expected - flagged,
+        extra=flagged - allowed,
+        incomplete=outcome.incomplete,
+        recovered=0,
+        recoverable=0,
+        scanner=scanner,
+    )
+
+
+def recover_generated(
+    repo_name: str,
+    repo_dir: str | Path | None = None,
+    manifest: dict | None = None,
+) -> tuple[int, int]:
+    """How many payloads the decoder layer recovers from the scanned files.
+
+    With ``repo_dir`` the views come from that repository's own bytes, so a
+    caller cannot be credited for a payload that only exists in the
+    regenerated spec.  ``manifest`` supplies the expected ``decoded_sha256``:
+    a spec payload that no longer matches it is not counted as recovered.
+    """
+    from attacks.synth.generate import build_examples, build_repos
+
+    if repo_name == "examples":
+        pairs = [
+            (entry, example.content) for example in build_examples() for entry in example.entries
+        ]
+    else:
+        repo = build_repos().get(repo_name)
+        if repo is None:
+            if manifest is not None:
+                raise ManifestError(f"{repo_name}: no generated spec to recover against")
+            return 0, 0
+        pairs = [(entry, repo.files[entry.file]) for entry in repo.entries]
+    digests: dict[tuple[object, object], object] = {}
+    if manifest is not None:
+        digests = {
+            (entry.get("file"), entry.get("line")): entry.get("decoded_sha256")
+            for entry in manifest.get("entries", [])
+        }
+    decoders = builtin_decoders() + external_decoders()
+    views_by_file: dict[str, list] = {}
+    recovered = 0
+    for entry, generated_text in pairs:
+        if manifest is not None and digests.get((entry.file, entry.line)) != hash_text(
+            entry.payload
+        ):
+            continue
+        if repo_dir is None:
+            views = produce_views(generated_text, decoders)
+        else:
+            if entry.file not in views_by_file:
+                try:
+                    text, _ = _read_scan_text(Path(repo_dir) / entry.file)
+                except (OSError, UnicodeDecodeError):
+                    text = ""
+                views_by_file[entry.file] = produce_views(text, decoders)
+            views = views_by_file[entry.file]
+        if any(entry.payload in view.text for view in views):
+            recovered += 1
+    return recovered, len(pairs)
+
+
+def run_repo(
+    repo_dir: str | Path, scanner: Scanner, layer: str = "READ", scanner_name: str = "keyword"
+) -> GateReport:
+    repo_dir = Path(repo_dir)
+    manifest = load_manifest(repo_dir / MANIFEST_NAME)
+    validate_manifest(manifest)
+    problems = verify_hashes(repo_dir, manifest)
+    if problems:
+        raise ManifestError("; ".join(problems))
+    with tempfile.TemporaryDirectory(prefix="baitwatch-stage-") as tmp:
+        staged = stage_repo(repo_dir, Path(tmp) / repo_dir.name)
+        outcome = scanner(staged)
+    report = evaluate(outcome, manifest, layer, scanner_name)
+    report.recovered, report.recoverable = recover_generated(report.repo, repo_dir, manifest)
+    return report
+
+
+def run_all(
+    scanner: Scanner | None = None,
+    layer: str = "READ",
+    scanner_name: str = "keyword",
+    repos: set[str] | None = None,
+) -> list[GateReport]:
+    scanner = scanner or keyword_scanner
+    requested = set(repos or ())
+    available = {path.name for path in REPOS_DIR.iterdir() if path.is_dir()}
+    unknown = requested - available
+    if unknown:
+        raise ValueError(f"unknown repo name(s): {', '.join(sorted(unknown))}")
+    reports: list[GateReport] = []
+    for repo_dir in sorted(path for path in REPOS_DIR.iterdir() if path.is_dir()):
+        if requested and repo_dir.name not in requested:
+            continue
+        reports.append(run_repo(repo_dir, scanner, layer, scanner_name))
+    return reports
+
+
+def _table(reports: list[GateReport]) -> str:
+    header = (
+        f"{'repo':30} {'layer':5} {'ok':3} {'want':5} {'got':5} "
+        f"{'miss':5} {'extra':5} {'rec':5} scanner"
+    )
+    lines = [header, "-" * len(header)]
+    for report in reports:
+        lines.append(
+            f"{report.repo:30} {report.layer:5} {'yes' if report.ok else 'NO':3} "
+            f"{len(report.expected):5} {len(report.flagged):5} "
+            f"{len(report.missed):5} {len(report.extra):5} "
+            f"{report.recovered}/{report.recoverable:<3} {report.scanner}"
+        )
+        for missed in sorted(report.missed):
+            lines.append(f"    missed: {missed}")
+        for extra in sorted(report.extra):
+            lines.append(f"    extra:  {extra}")
+        if report.incomplete:
+            lines.append("    incomplete evidence")
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m attacks.harness")
+    parser.add_argument("--scanner", choices=("keyword", "read"), default="keyword")
+    parser.add_argument("--layer", choices=("READ", "RUN"), default="READ")
+    parser.add_argument(
+        "--repo", action="append", default=[], help="only these repo names (repeatable)"
+    )
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    scanner = read_scanner if args.scanner == "read" else keyword_scanner
+    try:
+        reports = run_all(scanner, args.layer, args.scanner, set(args.repo) or None)
+    except (RuntimeError, ValueError) as exc:  # ManifestError is a ValueError
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        payload = {
+            "ok": all(report.ok for report in reports),
+            "reports": [report.as_dict() for report in reports],
+        }
+        print(json.dumps(payload, indent=2))
+    else:
+        print(_table(reports))
+    return 0 if all(report.ok for report in reports) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
