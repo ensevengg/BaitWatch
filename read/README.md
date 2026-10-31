@@ -111,7 +111,7 @@ Fail-closed semantics the engine can rely on:
 
 ## Detector
 
-Fine-tuned Llama Prompt Guard 2 (22M v1; 86M is the D4 v2 candidate). The
+Fine-tuned Llama Prompt Guard 2 86M (pinned `v1.7`; v1.5 was the 22M). The
 base model ships no label names, so index→name mapping is pinned in code:
 **0 = benign, 1 = injection** (`read/detector.py`, asserted in tests).
 
@@ -119,8 +119,9 @@ base model ships no label names, so index→name mapping is pinned in code:
   (`~/.local/share/baitwatch/models/`), pinned by SHA-256 in
   `read/model_config.json` together with the operating thresholds — that file
   is what `scan()` reads, and what `tests/read/test_metrics.py` guards.
-- Thresholds are chosen on the **validation** split only
-  (`python -m read.training.tune_threshold`), never on test.
+- v1.7's flag threshold comes from the v1.7 gate (`read.training.eval_v17`):
+  the lowest cutoff that keeps held-out harmless files at ≤0.5% flagged.
+  Numbers and known misses: `read/docs/MODEL_CARD.md`.
 - Model path resolution: explicit arg → `BAITWATCH_MODEL_PATH` → pinned
   config → `$HOME/hf_models/Llama-Prompt-Guard-2-22M|86M`.
 

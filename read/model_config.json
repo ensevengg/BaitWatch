@@ -1,24 +1,24 @@
 {
-  "tag": "v1.5f",
-  "checkpoint_path": "<model-dir>/v15f_22m",
-  "checkpoint_sha256": "f13b23ec19774b29fe122953a0c3f03a687c7da19076fd792be2dac17a98e222",
-  "base_model": "<model-dir>/Llama-Prompt-Guard-2-22M",
-  "base_model_sha256": "5120e30bcd536ce285345d9ec104bea6bd6e8f94365b99a340c764f417ea5fa1",
+  "tag": "v1.7",
+  "checkpoint_path": "<model-dir>/v17c_86m_soup",
+  "checkpoint_sha256": "496a37812b88de4e24357fea0dcda13c27c18c149a1bbf0d35fbf49f891c2479",
+  "base_model": "<model-dir>/Llama-Prompt-Guard-2-86M",
+  "base_model_sha256": "e72017dbbe89c1232dcbc4a74ce0c389db5b468c42afd05850347b2a8c5f6b09",
   "mode": "full",
-  "trained_at": "2026-10-27T06:18:09+0530",
+  "trained_at": "2026-10-30T23:29:44+0530",
   "smoke": false,
   "thresholds": {
-    "flag_threshold": 0.85,
-    "review_low": 0.521,
-    "hard_high": 0.9
+    "flag_threshold": 0.9965,
+    "review_low": 0.85,
+    "hard_high": 0.9965
   },
   "quality_gates": {
     "measured": {
-      "recall_injected_response": 0.6101,
-      "file_fpr": 0.0572
+      "recall_injected_response": 0.796,
+      "file_fpr": 0.0049
     },
-    "min_recall_injected_response": 0.59,
-    "max_benign_file_fpr": 0.065
+    "min_recall_injected_response": 0.6101,
+    "max_benign_file_fpr": 0.0572
   },
-  "pinned_at": "2026-10-27T06:20:11+0530"
+  "pinned_at": "2026-10-31T13:28:56+0530"
 }

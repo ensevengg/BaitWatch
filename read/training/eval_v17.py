@@ -205,6 +205,10 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
         "held_out_recall_at_gate": recall_at(held_out, t_gate),
         "gate_pass": bool(recall_at(held_out, t_gate) >= TARGET_RECALL),
         "gold_scores": gold_rows,
+        # Per-file max scores, so review-band sizes can be read at any cutoff.
+        "file_scores": {"corpus": corpus_files, "agent_files": agent_files,
+                        "suite_benign": suite_benign_files, "suite_attack": suite_attack,
+                        "aditya": aditya},
         "elapsed_s": round(time.time() - started, 1),
     }
     if own_threshold is not None:
