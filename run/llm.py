@@ -1,6 +1,7 @@
 """Decoy brain backends. Model calls only ever leave from the host; the cage stays offline."""
 
 import http.client
+import inspect
 import json
 import math
 import os
@@ -18,7 +19,25 @@ RESPONSE_CHUNK_BYTES = 64 * 1024
 
 
 class LLMError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, kind: str = "other") -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
+RETRYABLE_KINDS = frozenset({"http_5xx", "http_429", "timeout", "connection", "missing_key"})
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, (len(text) + 1) // 2) if text else 0
+
+
+def estimate_messages_tokens(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> int:
+    total = 0
+    for item in messages:
+        total += estimate_tokens(json.dumps(item, ensure_ascii=True, default=str))
+    if tools:
+        total += estimate_tokens(json.dumps(tools, ensure_ascii=True, default=str))
+    return total
 
 
 @dataclass(frozen=True)
@@ -32,12 +51,24 @@ class ToolCall:
 class LLMReply:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    prompt_tokens: int = field(default=0, compare=False)
+    completion_tokens: int = field(default=0, compare=False)
+    total_tokens: int = field(default=0, compare=False)
+    usage_estimated: bool = field(default=False, compare=False)
+    backend: str = field(default="", compare=False)
 
 
 class LLMBackend(Protocol):
     """`messages` and `tools` use the OpenAI chat-completions shapes."""
 
-    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMReply: ...
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> LLMReply: ...
 
 
 class ScriptedBackend:
@@ -59,9 +90,26 @@ class ScriptedBackend:
         self._index = 0
         self._next_id = 0
 
-    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMReply:
+    name = "scripted"
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> LLMReply:
+        prompt = estimate_messages_tokens(messages, tools)
         if self._index >= len(self._steps):
-            return LLMReply(text="done")
+            return LLMReply(
+                text="done",
+                prompt_tokens=prompt,
+                completion_tokens=estimate_tokens("done"),
+                total_tokens=prompt + estimate_tokens("done"),
+                usage_estimated=True,
+                backend=self.name,
+            )
         step = self._steps[self._index]
         self._index += 1
         calls: list[ToolCall] = []
@@ -74,7 +122,15 @@ class ScriptedBackend:
                 )
             )
             self._next_id += 1
-        return LLMReply(tool_calls=calls)
+        completion = estimate_tokens(json.dumps([c.name for c in calls]))
+        return LLMReply(
+            tool_calls=calls,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+            usage_estimated=True,
+            backend=self.name,
+        )
 
     @classmethod
     def from_json(cls, path: str | Path) -> "ScriptedBackend":
@@ -166,13 +222,30 @@ class OpenAICompatBackend:
         else:
             self._opener = urllib.request.build_opener(_NoRedirects())
 
+    @property
+    def name(self) -> str:
+        return f"openai:{self.model}@{self.base_url}"
+
     def __repr__(self) -> str:
         return (
             f"{type(self).__name__}(base_url={self.base_url!r}, model={self.model!r}, "
             f"api_key_env={self.api_key_env!r})"
         )
 
-    def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> LLMReply:
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> LLMReply:
+        if max_tokens is not None and (type(max_tokens) is not int or max_tokens < 1):
+            raise LLMError("max_tokens must be a positive integer")
+        if timeout is not None and (
+            type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0
+        ):
+            raise LLMError("timeout must be a positive number", kind="timeout")
         if self._calls >= self.max_calls:
             raise LLMError(f"LLM call budget of {self.max_calls} is exhausted")
         self._calls += 1
@@ -191,6 +264,8 @@ class OpenAICompatBackend:
             "tool_choice": "auto",
             "temperature": self.temperature,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         if self.seed is not None:
             payload["seed"] = self.seed
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -202,40 +277,75 @@ class OpenAICompatBackend:
             headers=headers,
             method="POST",
         )
-        return _parse_reply(self._post(request))
+        effective_timeout = (
+            min(self.timeout_seconds, timeout) if timeout is not None else self.timeout_seconds
+        )
+        reply = _parse_reply(self._post(request, effective_timeout))
+        if reply.total_tokens:
+            return LLMReply(
+                text=reply.text,
+                tool_calls=reply.tool_calls,
+                prompt_tokens=reply.prompt_tokens,
+                completion_tokens=reply.completion_tokens,
+                total_tokens=reply.total_tokens,
+                usage_estimated=False,
+                backend=self.name,
+            )
+        prompt = estimate_messages_tokens(messages, tools)
+        completion_text = reply.text + json.dumps(
+            [{"name": c.name, "arguments": c.arguments} for c in reply.tool_calls]
+        )
+        completion = estimate_tokens(completion_text)
+        return LLMReply(
+            text=reply.text,
+            tool_calls=reply.tool_calls,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+            usage_estimated=True,
+            backend=self.name,
+        )
 
     def _api_key(self) -> str | None:
         if self.api_key_env is None:
             return None
         key = os.environ.get(self.api_key_env)
         if not key or any(ord(char) < 0x20 or ord(char) == 0x7F for char in key):
-            raise LLMError(f"API key environment variable {self.api_key_env} is missing or invalid")
+            raise LLMError(
+                f"API key environment variable {self.api_key_env} is missing or invalid",
+                kind="missing_key",
+            )
         return key
 
-    def _post(self, request: urllib.request.Request) -> bytes:
+    def _post(self, request: urllib.request.Request, timeout_seconds: float | None = None) -> bytes:
+        effective = self.timeout_seconds if timeout_seconds is None else timeout_seconds
         # The socket timeout bounds one operation, so a body that drips a byte at
         # a time would never hit it; this deadline bounds the whole exchange.
-        deadline = time.monotonic() + self.timeout_seconds
+        deadline = time.monotonic() + effective
         try:
-            with self._opener.open(request, timeout=self.timeout_seconds) as response:
+            with self._opener.open(request, timeout=effective) as response:
                 raw = _read_bounded(response, self.max_response_bytes, deadline)
         except urllib.error.HTTPError as exc:
             exc.close()
-            raise LLMError(f"LLM endpoint returned HTTP {exc.code}") from None
+            kind = "http_429" if exc.code == 429 else "http_5xx" if exc.code >= 500 else "http_4xx"
+            raise LLMError(f"LLM endpoint returned HTTP {exc.code}", kind=kind) from None
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
-                raise LLMError(f"LLM request timed out after {self.timeout_seconds}s") from None
-            raise LLMError(f"LLM request failed: {_short_reason(exc.reason)}") from None
+                raise LLMError(
+                    f"LLM request timed out after {effective}s", kind="timeout"
+                ) from None
+            raise LLMError(
+                f"LLM request failed: {_short_reason(exc.reason)}", kind="connection"
+            ) from None
         except TimeoutError:
-            raise LLMError(f"LLM request timed out after {self.timeout_seconds}s") from None
+            raise LLMError(f"LLM request timed out after {effective}s", kind="timeout") from None
         except http.client.HTTPException as exc:
-            raise LLMError(f"LLM request failed: {type(exc).__name__}") from None
+            raise LLMError(f"LLM request failed: {type(exc).__name__}", kind="connection") from None
         except ValueError as exc:
-            # Invalid header values (for example a non-ASCII key) can include the
-            # value in their message, so only the exception type is reported.
             raise LLMError(f"LLM request failed: {type(exc).__name__}") from None
         except OSError as exc:
-            raise LLMError(f"LLM request failed: {_short_reason(exc)}") from None
+            kind = "timeout" if isinstance(exc, TimeoutError) else "connection"
+            raise LLMError(f"LLM request failed: {_short_reason(exc)}", kind=kind) from None
         if len(raw) > self.max_response_bytes:
             raise LLMError(f"LLM response exceeds {self.max_response_bytes} bytes")
         return raw
@@ -297,7 +407,24 @@ def _parse_reply(raw: bytes) -> LLMReply:
     calls = [_parse_tool_call(call) for call in raw_calls]
     if not calls and finish_reason == "tool_calls":
         raise LLMError("LLM response promised tool calls but carried none")
-    return LLMReply(text=text, tool_calls=calls)
+    prompt_tokens = completion_tokens = total_tokens = 0
+    usage = data.get("usage")
+    if isinstance(usage, dict):
+
+        def _int(key: str) -> int:
+            value = usage.get(key)
+            return value if type(value) is int and value >= 0 else 0
+
+        prompt_tokens = _int("prompt_tokens")
+        completion_tokens = _int("completion_tokens")
+        total_tokens = _int("total_tokens") or (prompt_tokens + completion_tokens)
+    return LLMReply(
+        text=text,
+        tool_calls=calls,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
 
 
 def _parse_tool_call(raw: object) -> ToolCall:
@@ -368,6 +495,126 @@ def _positive_int(name: str, value: object) -> int:
 def _short_reason(value: object) -> str:
     text = str(value).strip()
     return text[:ERROR_DETAIL_BYTES] if text else type(value).__name__
+
+
+def call_with_token_bound(
+    backend: LLMBackend,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    max_tokens: int | None,
+    *,
+    timeout: float | None = None,
+) -> LLMReply:
+    # Injected backends may predate the bounds; only pass each where accepted.
+    kwargs: dict[str, Any] = {}
+    if max_tokens is not None or timeout is not None:
+        try:
+            params = inspect.signature(backend.chat).parameters
+        except (TypeError, ValueError):
+            params = {}
+
+        def accepts(name: str) -> bool:
+            return name in params or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+
+        if max_tokens is not None and accepts("max_tokens"):
+            kwargs["max_tokens"] = max_tokens
+        if timeout is not None and accepts("timeout"):
+            kwargs["timeout"] = timeout
+    return backend.chat(messages, tools, **kwargs)
+
+
+class FallbackBackend:
+    def __init__(self, primary: LLMBackend, fallback: LLMBackend) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.fallback_count = 0
+        self.call_count = 0
+        self.last_backend = ""
+        self.primary_name = getattr(primary, "name", type(primary).__name__)
+        self.fallback_name = getattr(fallback, "name", type(fallback).__name__)
+        self.name = f"fallback:{self.primary_name}->{self.fallback_name}"
+
+    def __repr__(self) -> str:
+        return f"FallbackBackend(primary={self.primary!r}, fallback={self.fallback!r})"
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> LLMReply:
+        self.call_count += 1
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        try:
+            reply = call_with_token_bound(
+                self.primary, messages, tools, max_tokens, timeout=timeout
+            )
+        except LLMError as exc:
+            if exc.kind not in RETRYABLE_KINDS:
+                raise
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                fallback_timeout: float | None = remaining
+            else:
+                fallback_timeout = None
+            try:
+                reply = call_with_token_bound(
+                    self.fallback, messages, tools, max_tokens, timeout=fallback_timeout
+                )
+            except LLMError as fallback_exc:
+                raise LLMError(
+                    "both primary and fallback LLM backends failed "
+                    f"(primary={exc.kind}, fallback={fallback_exc.kind})",
+                    kind="both_failed",
+                ) from None
+            self.fallback_count += 1
+            self.last_backend = reply.backend or self.fallback_name
+            return LLMReply(
+                text=reply.text,
+                tool_calls=reply.tool_calls,
+                prompt_tokens=reply.prompt_tokens,
+                completion_tokens=reply.completion_tokens,
+                total_tokens=reply.total_tokens,
+                usage_estimated=reply.usage_estimated,
+                backend=self.last_backend,
+            )
+        self.last_backend = reply.backend or self.primary_name
+        return reply
+
+
+def make_backend_with_fallback(primary_spec: str, fallback_spec: str | None = None) -> LLMBackend:
+    primary = make_backend(primary_spec)
+    if not fallback_spec:
+        return primary
+    return FallbackBackend(primary, make_backend(fallback_spec))
+
+
+def backend_from_env(prefix: str = "BAITWATCH_DECOY") -> LLMBackend | None:
+    base_url = os.environ.get(f"{prefix}_BASE_URL")
+    model = os.environ.get(f"{prefix}_MODEL")
+    if not base_url and not model:
+        return None
+    if not base_url or not model:
+        raise ValueError(f"{prefix}_BASE_URL and {prefix}_MODEL must be set together")
+    primary = OpenAICompatBackend(
+        base_url, model, api_key_env=os.environ.get(f"{prefix}_API_KEY_ENV") or None
+    )
+    fb_url = os.environ.get(f"{prefix}_FALLBACK_BASE_URL")
+    fb_model = os.environ.get(f"{prefix}_FALLBACK_MODEL")
+    if not fb_url and not fb_model:
+        return primary
+    if not fb_url or not fb_model:
+        raise ValueError(
+            f"{prefix}_FALLBACK_BASE_URL and {prefix}_FALLBACK_MODEL must be set together"
+        )
+    fallback = OpenAICompatBackend(fb_url, fb_model, temperature=0, seed=0)
+    return FallbackBackend(primary, fallback)
 
 
 def make_backend(spec: str) -> LLMBackend:

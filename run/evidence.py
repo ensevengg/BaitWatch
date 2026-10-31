@@ -100,6 +100,12 @@ class RunEvidence(StrictModel):
     file_diffs: list[FileDiff] = Field(default_factory=list)
     tool_log: list[CommandResult] = Field(default_factory=list)
     errors: list[RunError] = Field(default_factory=list)
+    decoy_prompt_tokens: int = Field(default=0, ge=0)
+    decoy_completion_tokens: int = Field(default=0, ge=0)
+    decoy_total_tokens: int = Field(default=0, ge=0)
+    decoy_tokens_estimated: bool = False
+    decoy_backend: str = ""
+    decoy_fallback_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def validate_completion(self) -> Self:

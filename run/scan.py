@@ -140,6 +140,8 @@ def run_scan(
     config: SandboxConfig | None = None,
     backend=None,
     max_steps: int = 20,
+    max_tokens: int | None = None,
+    max_seconds: float | None = None,
     read_scanner: ReadScanner | None = None,
 ) -> VerdictReport:
     """Scan one repository and return the fused report.
@@ -156,7 +158,14 @@ def run_scan(
     except Exception as exc:  # noqa: BLE001 - an injected scanner is untrusted too
         read = ReadOutcome(status=State.ERROR, reason=f"READ scanner failed: {exc}")
     try:
-        run = detonate(repo, config=config or SandboxConfig(), backend=backend, max_steps=max_steps)
+        extra: dict = {}
+        if max_tokens is not None:
+            extra["max_tokens"] = max_tokens
+        if max_seconds is not None:
+            extra["max_seconds"] = max_seconds
+        run = detonate(
+            repo, config=config or SandboxConfig(), backend=backend, max_steps=max_steps, **extra
+        )
     except Exception as exc:  # noqa: BLE001 - fail closed over the RUN layer too
         run = RunEvidence(
             errors=[RunError(code="SCAN_ABORTED", message=str(exc)[:1000] or "scan aborted")]
