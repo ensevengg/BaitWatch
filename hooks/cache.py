@@ -198,6 +198,7 @@ def scanner_signature() -> str:
         "BAITWATCH_HOOK_SCANNER",
         "BAITWATCH_HOOK_JUDGE",
         "BAITWATCH_MODEL_PATH",
+        "BAITWATCH_MODEL_DIR",
         "BAITWATCH_ON_ERROR",
     ):
         digest.update(f"{key}={os.environ.get(key, '')}\0".encode())

@@ -243,6 +243,12 @@ def test_cache_key_changes_with_scanner_configuration(
     monkeypatch.setenv("BAITWATCH_HOOK_JUDGE", "1")
     assert cache.key(repo) != off
 
+    monkeypatch.setenv("BAITWATCH_HOOK_JUDGE", "0")
+    monkeypatch.setenv("BAITWATCH_MODEL_DIR", str(tmp_path / "models-a"))
+    first = cache.key(repo)
+    monkeypatch.setenv("BAITWATCH_MODEL_DIR", str(tmp_path / "models-b"))
+    assert cache.key(repo) != first
+
 
 def test_cache_key_is_none_when_the_tree_cannot_be_fingerprinted(tmp_path: Path) -> None:
     # Missing directory: "unknown", never "unchanged".

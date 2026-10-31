@@ -232,6 +232,31 @@ def test_read_scanner_reports_a_missing_dependency(monkeypatch, tmp_path: Path) 
         harness.read_scanner(tmp_path)
 
 
+def test_read_scanner_keeps_incomplete_evidence_visible_with_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    config = types.ModuleType("read.config")
+    config.ReadConfig = types.SimpleNamespace(
+        quick=lambda: types.SimpleNamespace(judge=types.SimpleNamespace(enabled=True))
+    )
+    finding = types.SimpleNamespace(file="README.md", score=0.97)
+    stats = types.SimpleNamespace(incomplete_reasons=["file cap: 2 file(s) not scanned"])
+    scan_module = types.ModuleType("read.scan")
+    scan_module.scan = lambda *_args, **_kwargs: types.SimpleNamespace(
+        flagged=[finding], stats=stats, read_verdict="attack", max_score=0.97
+    )
+    monkeypatch.setitem(sys.modules, "read.config", config)
+    monkeypatch.setitem(sys.modules, "read.scan", scan_module)
+
+    outcome = harness.read_scanner(tmp_path)
+    assert outcome.flagged == {"README.md": 0.97}
+    assert outcome.incomplete
+    assert outcome.notes == ["file cap: 2 file(s) not scanned"]
+
+
 def test_cli_json_report(capsys: pytest.CaptureFixture[str]) -> None:
     code = harness.main(["--json", "--repo", "readme-bait-curl"])
     assert code == 0

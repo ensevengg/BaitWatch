@@ -304,7 +304,9 @@ def read_scanner(root: str | Path) -> ScanOutcome:
         ) from exc
     outcome = ScanOutcome(
         flagged={finding.file: finding.score for finding in result.flagged},
-        incomplete=result.read_verdict == "incomplete",
+        # A flagged finding wins the verdict ("attack"), which must not hide
+        # coverage gaps: interrupted evidence stays visible to the gate.
+        incomplete=result.read_verdict == "incomplete" or bool(result.stats.incomplete_reasons),
         notes=list(result.stats.incomplete_reasons),
     )
     return outcome
