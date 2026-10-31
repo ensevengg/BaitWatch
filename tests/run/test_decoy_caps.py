@@ -1,7 +1,8 @@
 import copy
 import json
-import time
 from types import SimpleNamespace
+
+import pytest
 
 from run.decoy import TURN_TOKENS, run_decoy
 from run.evidence import CommandResult, RunEvidence, State
@@ -13,6 +14,24 @@ def _prompt_estimate(messages, tools):
     return estimate_tokens(json.dumps(messages, ensure_ascii=True, default=str)) + estimate_tokens(
         json.dumps(tools, ensure_ascii=True, default=str)
     )
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    fake = FakeClock()
+    monkeypatch.setattr("run.decoy.time", fake)
+    return fake
 
 
 class FakeSandbox:
@@ -77,14 +96,14 @@ def test_token_estimate_cap_is_non_allow():
     assert _verdict(sandbox.evidence).verdict != "ALLOW"
 
 
-def test_time_cap_is_non_allow():
+def test_time_cap_is_non_allow(clock):
     sandbox = FakeSandbox()
 
     class Slow:
         name = "slow"
 
         def chat(self, messages, tools):
-            time.sleep(0.05)
+            clock.sleep(0.05)
             return LLMReply(text="done")
 
     run_decoy(sandbox, Slow(), max_seconds=0.01)
@@ -92,7 +111,7 @@ def test_time_cap_is_non_allow():
     assert _verdict(sandbox.evidence).verdict != "ALLOW"
 
 
-def test_wall_budget_wins_over_dead_cage():
+def test_wall_budget_wins_over_dead_cage(clock):
     class DyingSandbox(FakeSandbox):
         alive = True
 
@@ -106,7 +125,7 @@ def test_wall_budget_wins_over_dead_cage():
 
         def chat(self, messages, tools):
             sandbox.alive = False
-            time.sleep(0.05)
+            clock.sleep(0.05)
             return LLMReply(text="done")
 
     run_decoy(sandbox, Slow(), max_seconds=0.01)
@@ -235,12 +254,12 @@ def test_exhausted_budget_fails_before_the_next_request():
     assert _verdict(sandbox.evidence).verdict != "ALLOW"
 
 
-def test_call_timeout_shrinks_with_elapsed_time():
+def test_call_timeout_shrinks_with_elapsed_time(clock):
     sandbox = FakeSandbox()
 
     class TimedBackend(Backend):
         def chat(self, messages, tools, *, max_tokens=None, timeout=None):
-            time.sleep(0.02)
+            clock.sleep(0.02)
             return super().chat(messages, tools, max_tokens=max_tokens, timeout=timeout)
 
     first = LLMReply(tool_calls=[ToolCall(id="1", name="run_cmd", arguments={"command": "true"})])
@@ -250,14 +269,14 @@ def test_call_timeout_shrinks_with_elapsed_time():
     assert 0 < backend.timeouts[1] < backend.timeouts[0] <= 5
 
 
-def test_stalled_call_past_wall_budget_is_time_budget_not_failed():
+def test_stalled_call_past_wall_budget_is_time_budget_not_failed(clock):
     sandbox = FakeSandbox()
 
     class Stalled:
         name = "stalled"
 
         def chat(self, messages, tools, *, timeout=None):
-            time.sleep(timeout + 0.05 if timeout else 0.1)
+            clock.sleep(timeout + 0.05 if timeout else 0.1)
             raise LLMError("LLM request timed out", kind="timeout")
 
     run_decoy(sandbox, Stalled(), max_seconds=0.05)
@@ -266,14 +285,14 @@ def test_stalled_call_past_wall_budget_is_time_budget_not_failed():
     assert _verdict(sandbox.evidence).verdict != "ALLOW"
 
 
-def test_late_reply_usage_is_recorded_and_its_tool_calls_never_run():
+def test_late_reply_usage_is_recorded_and_its_tool_calls_never_run(clock):
     sandbox = FakeSandbox()
 
     class Late:
         name = "late"
 
         def chat(self, messages, tools, *, timeout=None):
-            time.sleep(timeout + 0.05 if timeout else 0.1)
+            clock.sleep(timeout + 0.05 if timeout else 0.1)
             return LLMReply(
                 tool_calls=[ToolCall(id="1", name="run_cmd", arguments={"command": "true"})],
                 prompt_tokens=30,
