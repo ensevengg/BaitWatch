@@ -3,6 +3,7 @@ name: CI
 on:
   pull_request:
   push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -57,3 +58,41 @@ jobs:
         run: uv run --no-sync python -m attacks check
       - name: CPU test suite
         run: uv run --no-sync pytest tests/attacks --junitxml=artifacts/pytest-attacks.xml
+
+  read:
+    name: READ CPU tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: python -m pip install uv==0.13.5
+      - name: Install locked dependencies
+        run: uv sync --frozen --extra dev --extra train --extra cpu
+      # Prompt Guard 2 is gated, so tokenizer tests use the public DeBERTa-v3
+      # tokenizer at a pinned revision; it encodes identically to PG2-22M.
+      - name: Provision test tokenizer
+        env:
+          TOKENIZER_REVISION: 4b419818330868dff6a60ad3e6b1c730f8b8c0c6
+        run: |
+          uv run --no-sync --with sentencepiece==0.2.2 --with protobuf==7.36.2 python -I -c '
+          import os
+          from huggingface_hub import snapshot_download
+          from transformers import AutoTokenizer
+          src = snapshot_download("microsoft/deberta-v3-xsmall", revision=os.environ["TOKENIZER_REVISION"],
+                                  allow_patterns=["spm.model", "tokenizer_config.json", "config.json"])
+          AutoTokenizer.from_pretrained(src).save_pretrained(os.environ["RUNNER_TEMP"] + "/test-tokenizer")
+          '
+      # Model-weight and InjecAgent tests skip; GPU tests are deselected; a
+      # missing tokenizer fails the job. Lint is not gated here yet.
+      - name: CPU test suite
+        env:
+          BAITWATCH_REQUIRE_TOKENIZER: "1"
+        run: |
+          export BAITWATCH_TEST_TOKENIZER="$RUNNER_TEMP/test-tokenizer"
+          uv run --no-sync pytest -m "not gpu" tests/read -rs --junitxml=artifacts/pytest-read.xml

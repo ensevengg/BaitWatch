@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from read.findings import STATUS_FLAGGED, STATUS_REVIEWED, system_finding
 from read.scan import scan
 
@@ -517,6 +519,12 @@ def test_system_finding_keeps_chunk_evidence():
 def test_cli_accepts_gate_form_without_subcommand(tmp_path, capsys):
     """Roadmap D2 gate: `python -m read.scan <path>` with no subcommand."""
     from read.cli import main
+    from read.config import resolve_model_path
+
+    try:
+        resolve_model_path()
+    except FileNotFoundError as e:
+        pytest.skip(f"pinned READ checkpoint not available: {e}")
 
     repo = tmp_path / "r"
     repo.mkdir()
