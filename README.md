@@ -27,8 +27,10 @@ untrusted repo
 | `demo/` | three-minute beat sheet (`demo/run_demo.sh`) | all |
 | `docs/` | shared contracts (`verdict.schema.json`) and `HOOKS.md` | all |
 
-Status: READ and RUN in progress; the ATTACK side, decoder plugin and agent
-hook are implemented and tested on CPU.
+Status: READ, RUN and the ATTACK slice are implemented and merged; CI runs the
+RUN, ATTACK and READ CPU suites. Measured results, the pinned detector and
+known gaps are recorded in [`read/docs/MODEL_CARD.md`](read/docs/MODEL_CARD.md)
+and [`docs/ATTACKS_REPORT.md`](docs/ATTACKS_REPORT.md).
 
 **Known result — decoy trial failed.** On 2026-10-28, Muse Spark was run ten
 times against repo #1 (`readme-bait-curl`) through the decoy loop in PR #12. It
