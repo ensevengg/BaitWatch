@@ -121,13 +121,15 @@ logs or reports), `BAITWATCH_DECOY_FALLBACK_BASE_URL`,
 `BAITWATCH_DECOY_FALLBACK_MODEL`, and `BAITWATCH_PWNRATE_RUNS` (default 10).
 The report JSON and markdown table give, per repo: runs, runs with any sink
 hit, runs with honeytoken hits, verdict counts, pwn rate, p50/p95 latency,
-tokens used and fallback count. Repository code only runs inside the cage;
+tokens used and fallback count. A run is marked `suspect` when the fallback
+answered every turn, so its numbers belong to the fallback model. Repository code only runs inside the cage;
 model calls leave only from the host.
 
 Spend caps (per scan, configurable on `baitwatch scan`, `baitwatch-run decoy`
 and `run.pwnrate`): `--max-steps` (turns and total tool calls, default 20),
 `--max-tokens` (prompt+completion, from the API `usage` field when present,
-else a conservative character estimate; default 100000) and `--max-seconds`
+else a conservative character estimate; default 100000; each request asks for
+at most the remaining budget, capped at 4096 completion tokens) and `--max-seconds`
 (decoy wall time, default 120). Hitting any cap records
 `DECOY_STEP_BUDGET`, `DECOY_TOKEN_BUDGET` or `DECOY_TIME_BUDGET`, marks the
 decoy component `error`, and can never ALLOW — matching step-budget

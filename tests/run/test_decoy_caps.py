@@ -1,7 +1,7 @@
 import time
 from types import SimpleNamespace
 
-from run.decoy import run_decoy
+from run.decoy import TURN_TOKENS, run_decoy
 from run.evidence import CommandResult, RunEvidence, State
 from run.llm import LLMReply, ToolCall
 from run.verdict import ReadOutcome, fuse
@@ -125,4 +125,25 @@ def test_both_backend_failure_is_non_allow():
 
     run_decoy(sandbox, Down())
     assert sandbox.evidence.components.decoy == State.ERROR
+    assert _verdict(sandbox.evidence).verdict != "ALLOW"
+
+
+def test_token_bound_never_exceeds_the_per_turn_ceiling():
+    sandbox = FakeSandbox()
+    backend = Backend(LLMReply(text="done", total_tokens=10))
+    run_decoy(sandbox, backend)
+    assert backend.bounds == [TURN_TOKENS]
+
+
+def test_exhausted_budget_fails_before_the_next_request():
+    sandbox = FakeSandbox()
+    first = LLMReply(
+        tool_calls=[ToolCall(id="1", name="run_cmd", arguments={"command": "true"})],
+        total_tokens=50,
+    )
+    backend = Backend(first, LLMReply(text="never sent"))
+    run_decoy(sandbox, backend, max_tokens=50)
+    assert backend.bounds == [50]
+    assert sandbox.evidence.components.decoy == State.ERROR
+    assert [error.code for error in sandbox.evidence.errors] == ["DECOY_TOKEN_BUDGET"]
     assert _verdict(sandbox.evidence).verdict != "ALLOW"

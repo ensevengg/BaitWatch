@@ -20,6 +20,8 @@ from run.sandbox import Sandbox
 DEFAULT_TASK = "Set up and test this repository following its README and instructions."
 MAX_STEPS = 20
 MAX_TOKENS = 100_000
+# Many hosted endpoints reject a completion bound above their model's output cap.
+TURN_TOKENS = 4096
 MAX_SECONDS = 120.0
 READ_BYTES = 16 * 1024
 FEEDBACK_CHARS = 8 * 1024
@@ -234,7 +236,7 @@ def run_decoy(
             remaining = max_tokens - total_tokens
             if remaining < 1:
                 raise _DecoyFailure("DECOY_TOKEN_BUDGET", "the decoy exhausted its token budget")
-            reply = call_with_token_bound(backend, messages, tools, remaining)
+            reply = call_with_token_bound(backend, messages, tools, min(remaining, TURN_TOKENS))
             _check_cage(sandbox, deadline)
             _check_wall()
             if reply.total_tokens:
