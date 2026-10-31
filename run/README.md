@@ -151,8 +151,18 @@ Before the first trace snapshot, a trusted, network-disabled helper creates an
 empty Git repository in the staged copy with templates disabled. The original
 `.git` stays excluded from staging. Unchanged synthetic metadata is baseline,
 not a repository file or growth; subsequent `.git/hooks` and `.git/config`
-changes remain traced and BLOCK. The image trusts only `/repo` for Git ownership checks because the staging
-owner differs from the cage uid. A failed initialization keeps the scan non-ALLOW.
+changes remain traced and BLOCK. The image trusts only `/repo` for Git ownership
+checks because the staging owner differs from the cage uid. A failed initialization keeps the scan non-ALLOW.
 A `run_cmd` that exits 126/127 or emits a shell command-not-found diagnostic does
 not establish execution coverage. If no setup program ran, fusion FLAGs; ordinary
 program failures (such as failing tests) still count as executed.
+
+Common executables do not imply installed project dependencies. For example,
+`python -m pytest` can start Python and fail because pytest is absent; this
+still counts as a program execution. A missing or non-executable setup command
+followed by such a real program failure can therefore remain eligible for
+ALLOW. Source executable bits are preserved. To exercise a readable shell
+script without its executable bit, the decoy can invoke `sh script.sh` inside
+the cage. Package installs can hit the existing deadline in the isolated cage;
+that is an error and yields at least FLAG; it does not prove that an install
+lifecycle payload ran.
