@@ -17,7 +17,7 @@ _ENTRY_FIELDS = frozenset({"kind", "mode", "size", "sha256", "target", "error"})
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _MAX_PATH_KEY = 65_536
 _MAX_ERROR = 64
-USAGE = "usage: trace.py snapshot ROOT | trace.py unlock ROOT"
+USAGE = "usage: trace.py snapshot ROOT [--limits JSON] | trace.py unlock ROOT"
 
 
 class TraceError(RuntimeError):
@@ -332,16 +332,23 @@ def _entry_from_json(path: str, fields: object) -> Entry:
 
 def main(argv: Sequence[str]) -> int:
     """Entry point for helper containers: snapshot ROOT | unlock ROOT."""
-    if len(argv) != 2 or argv[0] not in {"snapshot", "unlock"}:
+    if not (
+        len(argv) == 2
+        and argv[0] in {"snapshot", "unlock"}
+        or len(argv) == 4
+        and argv[0] == "snapshot"
+        and argv[2] == "--limits"
+    ):
         print(USAGE, file=sys.stderr)
         return 2
     action, root = argv[0], Path(argv[1])
     try:
         if action == "snapshot":
-            print(manifest_to_json(snapshot(root)))
+            limits = TraceLimits(**json.loads(argv[3])) if len(argv) == 4 else DEFAULT_LIMITS
+            print(manifest_to_json(snapshot(root, limits)))
             return 0
         failures = unlock(root)
-    except TraceError as exc:
+    except (TraceError, ValueError, TypeError) as exc:
         print(f"trace error: {exc}", file=sys.stderr)
         return 1
     if failures:

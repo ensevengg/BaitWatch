@@ -187,6 +187,36 @@ def test_cli_snapshot_matches_the_in_process_snapshot(repo: Path):
     assert manifest_from_json(completed.stdout) == snapshot(repo)
 
 
+@pytest.mark.parametrize(
+    "limits",
+    ['{"max_entries": 1}', '{"max_bytes": 1}', '{"max_file_bytes": 1}'],
+)
+def test_cli_enforces_supplied_snapshot_limits(repo: Path, limits: str):
+    (repo / "extra").touch()
+    completed = subprocess.run(
+        [sys.executable, str(TRACE_CLI), "snapshot", str(repo), "--limits", limits],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 1
+    assert "limit" in completed.stderr
+    assert completed.stdout == ""
+
+
+@pytest.mark.parametrize("limits", ["{", "[]", '{"max_bytes": 0}', '{"unknown": 1}'])
+def test_cli_rejects_invalid_snapshot_limits(repo: Path, limits: str):
+    completed = subprocess.run(
+        [sys.executable, str(TRACE_CLI), "snapshot", str(repo), "--limits", limits],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 1
+    assert "trace error" in completed.stderr
+    assert completed.stdout == ""
+
+
 def test_cli_reports_failures_on_stderr(tmp_path: Path):
     completed = subprocess.run(
         [sys.executable, str(TRACE_CLI), "snapshot", str(tmp_path / "absent")],

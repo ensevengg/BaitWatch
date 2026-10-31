@@ -222,6 +222,7 @@ class Sandbox:
         self._sinks_collected: set[str] = set()
         self._honeytokens: tuple[Honeytoken, ...] = ()
         self._planted_paths: frozenset[str] = frozenset()
+        self._planted_bytes = 0
         self._honeytoken_scanned = False
         self._trace_before: dict | None = None
 
@@ -343,6 +344,11 @@ class Sandbox:
             # limits; a path the repository already had stays charged.
             self._planted_paths = frozenset(
                 path for path in planned - existing if os.path.lexists(self.staged_path / path)
+            )
+            self._planted_bytes = sum(
+                len(file.content.encode("utf-8"))
+                for file in token_set.files
+                if file.path in self._planted_paths
             )
             self._subnet = self._create_network()
             self._open = True
@@ -640,7 +646,24 @@ class Sandbox:
         self._scan_honeytokens()
 
     def _run_trace_helper(self, role: str) -> dict:
-        command = ["python", "-I", "/trace/trace.py", "snapshot", "/repo"]
+        limits = self.config.staging
+        command = [
+            "python",
+            "-I",
+            "/trace/trace.py",
+            "snapshot",
+            "/repo",
+            "--limits",
+            json.dumps(
+                {
+                    "max_entries": limits.max_entries + len(self._planted_paths),
+                    "max_bytes": limits.max_bytes + self._planted_bytes,
+                    "max_file_bytes": limits.max_file_bytes,
+                    "max_depth": limits.max_depth,
+                    "timeout_seconds": limits.timeout_seconds,
+                }
+            ),
+        ]
         container = self._create(
             self.config.sink_image,
             command,

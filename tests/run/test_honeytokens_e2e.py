@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from run.evidence import RunComponents, State, VerdictReport
 from run.llm import LLMReply, ToolCall
 from run.sandbox import SCAN_LABEL, Sandbox, SandboxConfig, detonate
+from run.staging import StagingLimits
 
 pytestmark = pytest.mark.docker
 PYTHON_IMAGE = "python:3.12-alpine"
@@ -71,6 +72,68 @@ def test_planted_files_are_not_file_diffs_and_the_host_repo_is_untouched(repo: P
     assert not (repo / ".env.local").exists()
     assert not (repo / "config").exists()
     assert_no_leftovers(engine, evidence)
+
+
+@pytest.mark.parametrize("boundary", ["entries", "bytes"])
+@pytest.mark.parametrize("configured", [False, True], ids=["default", "custom"])
+def test_trace_at_staging_limit_with_planted_tokens(
+    tmp_path: Path, engine, boundary: str, configured: bool
+):
+    repo = tmp_path / "boundary-repo"
+    repo.mkdir()
+    limits = StagingLimits(max_entries=3, max_bytes=1024) if configured else StagingLimits()
+    if boundary == "entries":
+        for index in range(limits.max_entries):
+            (repo / f"file-{index}").touch()
+    else:
+        remaining = limits.max_bytes
+        index = 0
+        while remaining:
+            size = min(remaining, limits.max_file_bytes)
+            (repo / f"file-{index}").write_bytes(b"x" * size)
+            remaining -= size
+            index += 1
+    sandbox = Sandbox(repo, SandboxConfig(staging=limits))
+    with sandbox:
+        assert sandbox.honeytokens
+        assert sandbox.trace_before(), sandbox.evidence.errors
+        sandbox.trace_after()
+    assert not sandbox.evidence.errors
+    assert sandbox.evidence.components.trace == State.COMPLETE
+    assert sandbox.evidence.file_diffs == []
+    assert_no_leftovers(engine, sandbox.evidence)
+
+
+@pytest.mark.parametrize(
+    ("boundary", "command", "error_code"),
+    [
+        ("entries", "touch extra", "TRACE_FAILED"),
+        ("entries", "rm .env; touch extra", "REPO_WRITE_LIMIT"),
+        ("bytes", "printf x > extra", "TRACE_FAILED"),
+        ("bytes", "rm .env; printf x > extra", "REPO_WRITE_LIMIT"),
+        ("bytes", "printf x > .env", "REPO_WRITE_LIMIT"),
+    ],
+)
+def test_cage_cannot_use_planted_headroom_for_repository_growth(
+    repo: Path, engine, boundary: str, command: str, error_code: str
+):
+    (repo / "README.md").write_bytes(b"x" * 1024)
+    limits = (
+        StagingLimits(max_entries=1) if boundary == "entries" else StagingLimits(max_bytes=1024)
+    )
+    sandbox = Sandbox(repo, SandboxConfig(staging=limits))
+    with sandbox:
+        assert sandbox.trace_before(), sandbox.evidence.errors
+        result = sandbox.run_command(["sh", "-c", command])
+        assert result.exit_code == 0, result
+        sandbox.trace_after()
+    assert error_code in {error.code for error in sandbox.evidence.errors}
+    assert sandbox.evidence.status == "error"
+    with pytest.raises(ValidationError):
+        VerdictReport(
+            verdict="ALLOW", reason="bad", read={"status": "complete"}, run=sandbox.evidence
+        )
+    assert_no_leftovers(engine, sandbox.evidence)
 
 
 EXFIL_CODE = r"""
