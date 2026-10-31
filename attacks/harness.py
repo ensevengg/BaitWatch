@@ -46,7 +46,9 @@ from attacks.manifests import (
     ManifestError,
     all_entry_files,
     expected_files,
+    hash_text,
     load_manifest,
+    validate_manifest,
     verify_hashes,
 )
 
@@ -65,6 +67,10 @@ __all__ = [
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPOS_DIR = PACKAGE_DIR / "repos"
+# Mirrors READ's walker default (read/config.py: max_file_bytes).  A larger
+# file is scanned as a prefix and marked incomplete, never read whole: the
+# hook runs this scanner on arbitrary checkouts.
+MAX_SCAN_BYTES = 262_144
 _SKIP_DIRS = {
     ".git",
     "__pycache__",
@@ -221,11 +227,23 @@ def _iter_files(root: Path, skipped: list[str] | None = None) -> Iterator[tuple[
             if path.suffix.lower() in _BINARY_SUFFIXES:
                 continue
             try:
-                if b"\x00" in path.read_bytes()[:4096]:
-                    continue
+                with path.open("rb") as handle:
+                    if b"\x00" in handle.read(4096):
+                        continue
             except OSError:
                 continue
             yield path.relative_to(root).as_posix(), path
+
+
+def _read_scan_text(path: Path) -> tuple[str, bool]:
+    """Read at most ``MAX_SCAN_BYTES``; the flag reports a skipped tail."""
+    with path.open("rb") as handle:
+        raw = handle.read(MAX_SCAN_BYTES + 1)
+    truncated = len(raw) > MAX_SCAN_BYTES
+    if truncated:
+        raw = raw[:MAX_SCAN_BYTES]
+    # A cut prefix may end mid-character, so only that case tolerates it.
+    return raw.decode("utf-8", errors="ignore" if truncated else "strict"), truncated
 
 
 def keyword_scanner(root: str | Path) -> ScanOutcome:
@@ -238,11 +256,14 @@ def keyword_scanner(root: str | Path) -> ScanOutcome:
         if path.name == MANIFEST_NAME:
             continue  # answer key, never evidence
         try:
-            text = path.read_text(encoding="utf-8")
+            text, truncated = _read_scan_text(path)
         except (OSError, UnicodeDecodeError) as exc:
             outcome.incomplete = True
             outcome.notes.append(f"{rel}: unreadable ({exc})")
             continue
+        if truncated:
+            outcome.incomplete = True
+            outcome.notes.append(f"{rel}: larger than {MAX_SCAN_BYTES} bytes; scanned a prefix")
         errors: list[tuple[str, str]] = []
         overflow: list[int] = []
         views = produce_views(text, decoders, errors=errors, overflow=overflow)
@@ -313,26 +334,58 @@ def evaluate(outcome: ScanOutcome, manifest: dict, layer: str, scanner: str) -> 
     )
 
 
-def recover_generated(repo_name: str) -> tuple[int, int]:
-    """How many generated payloads the decoder layer recovers from the file."""
+def recover_generated(
+    repo_name: str,
+    repo_dir: str | Path | None = None,
+    manifest: dict | None = None,
+) -> tuple[int, int]:
+    """How many payloads the decoder layer recovers from the scanned files.
+
+    With ``repo_dir`` the views come from that repository's own bytes, so a
+    caller cannot be credited for a payload that only exists in the
+    regenerated spec.  ``manifest`` supplies the expected ``decoded_sha256``:
+    a spec payload that no longer matches it is not counted as recovered.
+    """
     from attacks.synth.generate import build_examples, build_repos
 
     if repo_name == "examples":
-        specs = [
-            (example.content, entry) for example in build_examples() for entry in example.entries
+        pairs = [
+            (entry, example.content) for example in build_examples() for entry in example.entries
         ]
     else:
         repo = build_repos().get(repo_name)
         if repo is None:
+            if manifest is not None:
+                raise ManifestError(f"{repo_name}: no generated spec to recover against")
             return 0, 0
-        specs = [(repo.files[entry.file], entry) for entry in repo.entries]
+        pairs = [(entry, repo.files[entry.file]) for entry in repo.entries]
+    digests: dict[tuple[object, object], object] = {}
+    if manifest is not None:
+        digests = {
+            (entry.get("file"), entry.get("line")): entry.get("decoded_sha256")
+            for entry in manifest.get("entries", [])
+        }
     decoders = builtin_decoders() + external_decoders()
+    views_by_file: dict[str, list] = {}
     recovered = 0
-    for text, entry in specs:
-        views = produce_views(text, decoders)
+    for entry, generated_text in pairs:
+        if manifest is not None and digests.get((entry.file, entry.line)) != hash_text(
+            entry.payload
+        ):
+            continue
+        if repo_dir is None:
+            views = produce_views(generated_text, decoders)
+        else:
+            if entry.file not in views_by_file:
+                try:
+                    text, _ = _read_scan_text(Path(repo_dir) / entry.file)
+                except (OSError, UnicodeDecodeError):
+                    text = ""
+                views_by_file[entry.file] = produce_views(text, decoders)
+            views = views_by_file[entry.file]
         if any(entry.payload in view.text for view in views):
             recovered += 1
-    return recovered, len(specs)
+    return recovered, len(pairs)
 
 
 def run_repo(
@@ -340,6 +393,7 @@ def run_repo(
 ) -> GateReport:
     repo_dir = Path(repo_dir)
     manifest = load_manifest(repo_dir / MANIFEST_NAME)
+    validate_manifest(manifest)
     problems = verify_hashes(repo_dir, manifest)
     if problems:
         raise ManifestError("; ".join(problems))
@@ -347,7 +401,7 @@ def run_repo(
         staged = stage_repo(repo_dir, Path(tmp) / repo_dir.name)
         outcome = scanner(staged)
     report = evaluate(outcome, manifest, layer, scanner_name)
-    report.recovered, report.recoverable = recover_generated(report.repo)
+    report.recovered, report.recoverable = recover_generated(report.repo, repo_dir, manifest)
     return report
 
 
@@ -358,9 +412,14 @@ def run_all(
     repos: set[str] | None = None,
 ) -> list[GateReport]:
     scanner = scanner or keyword_scanner
+    requested = set(repos or ())
+    available = {path.name for path in REPOS_DIR.iterdir() if path.is_dir()}
+    unknown = requested - available
+    if unknown:
+        raise ValueError(f"unknown repo name(s): {', '.join(sorted(unknown))}")
     reports: list[GateReport] = []
     for repo_dir in sorted(path for path in REPOS_DIR.iterdir() if path.is_dir()):
-        if repos and repo_dir.name not in repos:
+        if requested and repo_dir.name not in requested:
             continue
         reports.append(run_repo(repo_dir, scanner, layer, scanner_name))
     return reports
@@ -401,7 +460,7 @@ def main(argv: list[str] | None = None) -> int:
     scanner = read_scanner if args.scanner == "read" else keyword_scanner
     try:
         reports = run_all(scanner, args.layer, args.scanner, set(args.repo) or None)
-    except (ManifestError, RuntimeError) as exc:
+    except (RuntimeError, ValueError) as exc:  # ManifestError is a ValueError
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
