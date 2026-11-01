@@ -34,6 +34,16 @@ list_labelled() {
 echo "==> Preflight"
 [ "$(uname -s)" = "Linux" ] || fail "Linux is required (found $(uname -s))"
 command -v docker >/dev/null 2>&1 || fail "docker is not on PATH; install Docker Engine 28 or later"
+# The sandbox connects through DOCKER_HOST or the default socket and ignores CLI contexts,
+# so every docker command here must reach that same daemon.
+if [ -n "${DOCKER_HOST:-}" ]; then
+  [ -z "${DOCKER_CONTEXT:-}" ] || [ "$DOCKER_CONTEXT" = default ] \
+    || fail "DOCKER_CONTEXT ('$DOCKER_CONTEXT') overrides DOCKER_HOST for the docker CLI but not for the sandbox; unset DOCKER_CONTEXT"
+else
+  DOCKER_CONTEXT_NAME="$(docker context show)" || fail "could not read the active Docker context"
+  [ "$DOCKER_CONTEXT_NAME" = default ] \
+    || fail "the active Docker context is '$DOCKER_CONTEXT_NAME', but the sandbox ignores contexts; set DOCKER_HOST to its endpoint or run 'docker context use default'"
+fi
 docker info >/dev/null 2>&1 || fail "the Docker daemon is not reachable (docker info failed)"
 SERVER_VERSION="$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
 [ -n "$SERVER_VERSION" ] || fail "could not read the Docker server version"
@@ -42,12 +52,6 @@ case "$SERVER_MAJOR" in
   ''|*[!0-9]*) fail "could not parse the Docker server version: $SERVER_VERSION" ;;
 esac
 [ "$SERVER_MAJOR" -ge 28 ] || fail "Docker Engine 28 or later is required (found server $SERVER_VERSION)"
-# The sandbox connects through DOCKER_HOST or the default socket and ignores CLI contexts.
-if [ -z "${DOCKER_HOST:-}" ]; then
-  DOCKER_CONTEXT_NAME="$(docker context show)" || fail "could not read the active Docker context"
-  [ "$DOCKER_CONTEXT_NAME" = default ] \
-    || fail "the active Docker context is '$DOCKER_CONTEXT_NAME', but the sandbox ignores contexts; set DOCKER_HOST to its endpoint or run 'docker context use default'"
-fi
 command -v uv >/dev/null 2>&1 || fail "uv is not on PATH; install it from https://docs.astral.sh/uv/ and re-run"
 
 echo "==> Installing locked dependencies"
@@ -85,32 +89,38 @@ if [ "$SCAN_STATUS" -ne 5 ]; then
   fi
   fail "smoke scan expected exit 5 (BLOCK), got $SCAN_STATUS"
 fi
-uv run --no-sync python -I - "$REPORT" <<'PY'
+# Collect every problem before failing, so a cleanup error still lists leftovers.
+REPORT_CHECK="$(uv run --no-sync python -I - "$REPORT" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     report = json.load(handle)
+run = report["run"]
+print(run["scan_id"])
 if report.get("verdict") != "BLOCK":
-    raise SystemExit(f"smoke scan verdict is {report.get('verdict')!r}, expected 'BLOCK'")
-if not report.get("run", {}).get("http_hits"):
-    raise SystemExit("smoke scan recorded no HTTP sink hits")
-codes = {error.get("code") for error in report.get("run", {}).get("errors", [])}
-if "STAGING_CLEANUP" in codes:
-    raise SystemExit("smoke scan could not remove its staged copy (STAGING_CLEANUP)")
+    print(f"smoke scan verdict is {report.get('verdict')!r}, expected 'BLOCK'")
+if not run.get("http_hits"):
+    print("smoke scan recorded no HTTP sink hits")
+if "STAGING_CLEANUP" in {error.get("code") for error in run.get("errors", [])}:
+    print("smoke scan could not remove its staged copy (STAGING_CLEANUP)")
 PY
-SCAN_ID="$(uv run --no-sync python -I - "$REPORT" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    print(json.load(handle)["run"]["scan_id"])
-PY
-)"
+)" || fail "could not read the smoke scan report"
+SCAN_ID="${REPORT_CHECK%%$'\n'*}"
+[[ "$SCAN_ID" =~ ^[0-9a-f-]+$ ]] || fail "smoke scan report has no valid scan_id"
+PROBLEMS="$(printf '%s\n' "$REPORT_CHECK" | tail -n +2)"
 LEFT_CONTAINERS="$(list_labelled containers "$SCAN_LABEL=$SCAN_ID")"
-[ -z "$LEFT_CONTAINERS" ] || fail "smoke scan left containers behind ($SCAN_LABEL=$SCAN_ID)"
 LEFT_NETWORKS="$(list_labelled networks "$SCAN_LABEL=$SCAN_ID")"
-[ -z "$LEFT_NETWORKS" ] || fail "smoke scan left networks behind ($SCAN_LABEL=$SCAN_ID)"
+[ -z "$LEFT_CONTAINERS" ] \
+  || PROBLEMS+=$'\n'"smoke scan left containers behind ($SCAN_LABEL=$SCAN_ID): ${LEFT_CONTAINERS//$'\n'/ }"
+[ -z "$LEFT_NETWORKS" ] \
+  || PROBLEMS+=$'\n'"smoke scan left networks behind ($SCAN_LABEL=$SCAN_ID): ${LEFT_NETWORKS//$'\n'/ }"
+if [ -n "${PROBLEMS//$'\n'/}" ]; then
+  while IFS= read -r problem; do
+    [ -z "$problem" ] || echo "setup: $problem" >&2
+  done <<< "$PROBLEMS"
+  exit 1
+fi
 rm -rf "$SMOKE_DIR"
 trap - EXIT
 

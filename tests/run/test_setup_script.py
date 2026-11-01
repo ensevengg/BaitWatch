@@ -29,6 +29,7 @@ def test_preflight_rejects_docker_27_without_running_anything_else(tmp_path):
         """#!/usr/bin/env bash
 case "$1" in
   info) exit 0 ;;
+  context) echo default ;;
   version) echo "27.0.7" ;;
   *) echo "unexpected docker call: $*" >&2; exit 1 ;;
 esac
@@ -42,6 +43,8 @@ exit 0
 """,
     )
     env = dict(os.environ)
+    env.pop("DOCKER_HOST", None)
+    env.pop("DOCKER_CONTEXT", None)
     env["PATH"] = f"{bindir}:{env['PATH']}"
     result = subprocess.run(
         ["bash", str(SETUP)],
@@ -75,9 +78,8 @@ def _fake_toolchain(
 ) -> dict:
     report = tmp_path / "report.json"
     report.write_text(
-        '{"verdict": "BLOCK", "run": {"scan_id": "s1", "http_hits": [{}], "errors": '
-        + errors
-        + "}}",
+        '{"verdict": "BLOCK", "run": {"scan_id": "f17259df-5d9d-4dc3-a3c6-a33ec952e61d", '
+        '"http_hits": [{}], "errors": ' + errors + "}}",
         encoding="utf-8",
     )
     bindir = tmp_path / "bin"
@@ -111,6 +113,8 @@ exec "{shutil.which("python") or "python3"}" "$@"
 """,
     )
     env = dict(os.environ)
+    env.pop("DOCKER_HOST", None)
+    env.pop("DOCKER_CONTEXT", None)
     env["PATH"] = f"{bindir}:{env['PATH']}"
     return env
 
@@ -161,3 +165,22 @@ def test_docker_host_skips_the_context_check(tmp_path):
     env["DOCKER_HOST"] = "unix:///run/docker-test.sock"
     result = _run_setup(env)
     assert result.returncode == 0, result.stderr
+
+
+def test_docker_context_overriding_docker_host_fails_before_any_docker_call(tmp_path):
+    env = _fake_toolchain(tmp_path, docker_ps="exit 0")
+    env["DOCKER_HOST"] = "unix:///run/docker-test.sock"
+    env["DOCKER_CONTEXT"] = "remote"
+    result = _run_setup(env)
+    assert result.returncode != 0
+    assert "DOCKER_CONTEXT ('remote') overrides DOCKER_HOST" in result.stderr
+
+
+def test_staging_cleanup_error_still_lists_leftovers(tmp_path):
+    errors = '[{"code": "STAGING_CLEANUP", "message": "x"}]'
+    result = _run_setup(_fake_toolchain(tmp_path, docker_ps="echo abc123", errors=errors))
+    assert result.returncode != 0
+    assert "STAGING_CLEANUP" in result.stderr
+    assert "left containers behind" in result.stderr
+    assert "abc123" in result.stderr
+    assert "unexpected docker call" not in result.stderr
