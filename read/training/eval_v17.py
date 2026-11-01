@@ -105,7 +105,8 @@ def threshold_at_fpr(benign_scores: np.ndarray, target: float) -> float:
     k = int(np.floor(target * len(s)))       # allowed false positives
     if k >= len(s):
         return 0.0
-    return float(np.nextafter(s[k], 1.0)) if k < len(s) else 0.0
+    # Toward inf: when s[k] is 1.0 the cutoff must still sit above it.
+    return float(np.nextafter(s[k], np.inf)) if k < len(s) else 0.0
 
 
 def recall_at(scores: list[float], t: float) -> float:
@@ -231,7 +232,8 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
         "unscanned": unscanned,
         "at_gate_threshold": gate,
         "held_out_recall_at_gate": recall_at(held_out, t_gate),
-        "gate_pass": bool(recall_at(held_out, t_gate) >= TARGET_RECALL),
+        "gate_pass": bool(recall_at(held_out, t_gate) >= TARGET_RECALL
+                          and gate["all_benign_fpr"] <= TARGET_FPR),
         "gold_scores": gold_rows,
         # Per-file max scores, so review-band sizes can be read at any cutoff.
         "file_scores": {"corpus": corpus_files, "agent_files": agent_files,

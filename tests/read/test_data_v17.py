@@ -179,3 +179,16 @@ def test_clone_repo_ids_use_full_repo_identity(tmp_path):
     ids = clone_repo_ids(tmp_path)
     assert ids == {"cli": "httpie/cli", "astral-sh__ruff": "astral-sh/ruff"}
     assert clone_repo_ids(tmp_path / "missing") == {}
+
+
+def test_gate_threshold_stays_within_fpr_when_scores_saturate():
+    import numpy as np
+
+    from read.training.eval_v17 import threshold_at_fpr
+
+    benign = np.array([1.0] * 3 + [0.1] * 997)     # 0.3% at the top score, budget 0.5%
+    t = threshold_at_fpr(benign, 0.005)
+    assert t <= 1.0 and np.mean(benign >= t) <= 0.005
+    saturated = np.array([1.0] * 10 + [0.1] * 990)  # 1% at 1.0: cannot meet 0.5%
+    t = threshold_at_fpr(saturated, 0.005)
+    assert t > 1.0 and np.mean(saturated >= t) == 0.0
