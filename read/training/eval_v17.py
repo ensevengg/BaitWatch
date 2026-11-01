@@ -164,10 +164,12 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
     for root in (HOME / "benign-corpus", HOME / "v17_raw/carriers/test"):
         ids = clone_repo_ids(root)
         for repo in sorted(p for p in root.iterdir() if p.is_dir()):
+            if repo.name not in ids:
+                # Without its owner/name the agent-file dedupe below cannot see it.
+                raise SystemExit(f"{repo} has no entry in its lock file; re-clone it")
             for f, s in file_scores(repo, det, corpus_cfg).items():
                 corpus_files[f"{repo.name}:{f}"] = s
-                if repo.name in ids:
-                    scanned.add(f"{ids[repo.name]}:{f}".lower())
+                scanned.add(f"{ids[repo.name]}:{f}".lower())
 
     # Held-out real agent files (repos never trained on): the harmless voice
     # users hit most, scored one file at a time.
