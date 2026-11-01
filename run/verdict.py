@@ -11,7 +11,6 @@ attempts and FLAG instead of BLOCK. The judge inside READ may escalate but
 never clears a high READ score, so fusion sees only the resulting top score.
 """
 
-import importlib.util
 import json
 import math
 import re
@@ -21,20 +20,30 @@ from pathlib import Path
 from run.evidence import CommandResult, NetworkHit, ReadEvidence, RunEvidence, State, VerdictReport
 
 READ_BLOCK_FALLBACK = 0.9
+# The sibling package's file, never one found through sys.path: a scanned repo
+# in the working directory could otherwise supply its own pin.
+READ_MODEL_CONFIG = Path(__file__).resolve().parents[1] / "read" / "model_config.json"
+_PIN_MAX_BYTES = 64 * 1024
 
 
-def pinned_read_block_score() -> float:
+def pinned_read_block_score(path: Path = READ_MODEL_CONFIG) -> float:
     """READ's pinned `hard_high`, or the lower fallback if the pin is missing or invalid.
 
     Read as plain JSON: importing the `read` package loads torch.
     """
-    spec = importlib.util.find_spec("read")
-    if spec is None or not spec.submodule_search_locations:
-        return READ_BLOCK_FALLBACK
-    path = Path(next(iter(spec.submodule_search_locations))) / "model_config.json"
     try:
-        value = float(json.loads(path.read_text(encoding="utf-8"))["thresholds"]["hard_high"])
-    except (OSError, ValueError, KeyError, TypeError):
+        with path.open("rb") as handle:
+            raw = handle.read(_PIN_MAX_BYTES + 1)
+        if len(raw) > _PIN_MAX_BYTES:
+            return READ_BLOCK_FALLBACK
+        value = json.loads(raw)["thresholds"]["hard_high"]
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return READ_BLOCK_FALLBACK
+    if type(value) not in (int, float):
+        return READ_BLOCK_FALLBACK
+    try:
+        value = float(value)
+    except OverflowError:
         return READ_BLOCK_FALLBACK
     return value if math.isfinite(value) and 0.0 < value <= 1.0 else READ_BLOCK_FALLBACK
 

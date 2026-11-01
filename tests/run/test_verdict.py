@@ -1,4 +1,8 @@
+import os
 import random
+import subprocess
+import sys
+from pathlib import Path
 
 import jsonschema
 import pytest
@@ -6,6 +10,8 @@ import pytest
 from run.evidence import CommandResult, HoneytokenHit, NetworkHit, RunComponents, RunEvidence, State
 from run.schemas import verdict_schema
 from run.verdict import CAGE_HOME, READ_BLOCK_SCORE, ReadOutcome, fuse
+
+ROOT = Path(__file__).parents[2]
 
 
 def complete_run() -> RunEvidence:
@@ -872,20 +878,57 @@ def test_read_block_score_is_the_pinned_hard_high():
         '{"thresholds": {"hard_high": NaN}}',
         '{"thresholds": {"hard_high": 0}}',
         '{"thresholds": {"hard_high": 1.5}}',
+        '{"thresholds": {"hard_high": true}}',
+        '{"thresholds": {"hard_high": 1' + "0" * 400 + "}}",
+        "[" * 5000 + "]" * 5000,
+        '{"pad": "' + "x" * 70_000 + '", "thresholds": {"hard_high": 0.95}}',
+        b"\xff\xfe",
         "[]",
     ],
 )
-def test_missing_or_invalid_pin_falls_back_to_the_lower_cutoff(tmp_path, monkeypatch, content):
-    import importlib.machinery
+def test_missing_or_invalid_pin_falls_back_to_the_lower_cutoff(tmp_path, content):
+    from run.verdict import READ_BLOCK_FALLBACK, pinned_read_block_score
 
-    import run.verdict as verdict
+    path = tmp_path / "model_config.json"
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    elif content is not None:
+        path.write_text(content, encoding="utf-8")
+    assert pinned_read_block_score(path) == READ_BLOCK_FALLBACK
 
-    if content is not None:
-        (tmp_path / "model_config.json").write_text(content, encoding="utf-8")
-    spec = importlib.machinery.ModuleSpec("read", None, is_package=True)
-    spec.submodule_search_locations = [str(tmp_path)]
-    monkeypatch.setattr(verdict.importlib.util, "find_spec", lambda name: spec)
-    assert verdict.pinned_read_block_score() == verdict.READ_BLOCK_FALLBACK
+
+def test_a_directory_in_place_of_the_pin_falls_back(tmp_path):
+    from run.verdict import READ_BLOCK_FALLBACK, pinned_read_block_score
+
+    (tmp_path / "model_config.json").mkdir()
+    assert pinned_read_block_score(tmp_path / "model_config.json") == READ_BLOCK_FALLBACK
+
+
+def test_a_valid_pin_sets_the_cutoff(tmp_path):
+    from run.verdict import pinned_read_block_score
+
+    path = tmp_path / "model_config.json"
+    path.write_text('{"thresholds": {"hard_high": 0.95}}', encoding="utf-8")
+    assert pinned_read_block_score(path) == 0.95
+
+
+def test_the_pin_ignores_a_read_package_in_the_working_directory(tmp_path):
+    shadow = tmp_path / "read"
+    shadow.mkdir()
+    (shadow / "__init__.py").write_text("", encoding="utf-8")
+    (shadow / "model_config.json").write_text(
+        '{"thresholds": {"hard_high": 1.0}}', encoding="utf-8"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", "from run.verdict import READ_BLOCK_SCORE; print(READ_BLOCK_SCORE)"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert float(result.stdout) == READ_BLOCK_SCORE != 1.0
 
 
 def test_a_judge_escalated_attack_below_the_cutoff_flags():
