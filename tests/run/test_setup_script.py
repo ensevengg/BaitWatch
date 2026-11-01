@@ -65,7 +65,9 @@ def test_setup_script_shellcheck_if_available():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def _fake_toolchain(tmp_path: Path, *, docker_ps: str, errors: str = "[]") -> dict:
+def _fake_toolchain(
+    tmp_path: Path, *, docker_ps: str, errors: str = "[]", scan_exit: int = 5
+) -> dict:
     report = tmp_path / "report.json"
     report.write_text(
         '{"verdict": "BLOCK", "run": {"scan_id": "s1", "http_hits": [{}], "errors": '
@@ -96,7 +98,7 @@ if [ "$1" = baitwatch ]; then
     if [ "$1" = --json ]; then cp "{report}" "$2"; fi
     shift
   done
-  exit 5
+  exit {scan_exit}
 fi
 [ "$1" = python ] && shift
 exec "{shutil.which("python") or "python3"}" "$@"
@@ -129,3 +131,11 @@ def test_staging_cleanup_error_fails_setup(tmp_path):
     result = _run_setup(_fake_toolchain(tmp_path, docker_ps="exit 0", errors=errors))
     assert result.returncode != 0
     assert "STAGING_CLEANUP" in result.stderr
+
+
+def test_failed_scan_reports_labelled_leftovers_without_removing_them(tmp_path):
+    result = _run_setup(_fake_toolchain(tmp_path, docker_ps="echo abc123", scan_exit=3))
+    assert result.returncode != 0
+    assert "scan-labelled resources exist" in result.stderr
+    assert "expected exit 5 (BLOCK), got 3" in result.stderr
+    assert "unexpected docker call" not in result.stderr

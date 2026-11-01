@@ -71,8 +71,12 @@ uv run --no-sync baitwatch scan tests/e2e/fixtures/http-exfil \
 SCAN_LABEL="$(uv run --no-sync python -I -c 'from run.sandbox import SCAN_LABEL; print(SCAN_LABEL)')"
 if [ "$SCAN_STATUS" -ne 5 ]; then
   # Report only: another scan may own these, so nothing is removed here.
-  STRAY="$(list_labelled containers "$SCAN_LABEL")$(list_labelled networks "$SCAN_LABEL")"
-  [ -z "$STRAY" ] || echo "setup: scan-labelled containers or networks exist; inspect with: docker ps -a --filter label=$SCAN_LABEL" >&2
+  STRAY_CONTAINERS="$(list_labelled containers "$SCAN_LABEL")"
+  STRAY_NETWORKS="$(list_labelled networks "$SCAN_LABEL")"
+  if [ -n "$STRAY_CONTAINERS$STRAY_NETWORKS" ]; then
+    echo "setup: scan-labelled resources exist; inspect with: docker ps -a --filter label=$SCAN_LABEL" \
+      "and docker network ls --filter label=$SCAN_LABEL" >&2
+  fi
   fail "smoke scan expected exit 5 (BLOCK), got $SCAN_STATUS"
 fi
 uv run --no-sync python -I - "$REPORT" <<'PY'
