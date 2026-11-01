@@ -2,7 +2,7 @@
 
 BaitWatch checks a repository for attacks aimed at coding agents before a developer lets an agent work in it. The planned product has two parts. READ runs a detector over the files. RUN executes the repository as a decoy inside an isolated Docker network and records what it tries to reach.
 
-This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, the Day 4 fused scan, and Day 5 honeytokens. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, plants per-scan fake credentials in the staged copy and detects them in sink and tool output, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not yet include model transcript scanning, the agreed verdict thresholds, or agent hooks.
+This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, the Day 4 fused scan, and Day 5 honeytokens. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, plants per-scan fake credentials in the staged copy and detects them in sink and tool output, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not yet include model transcript scanning or agent hooks.
 
 ## Setup on Linux
 

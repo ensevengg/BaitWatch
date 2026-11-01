@@ -961,3 +961,13 @@ def test_scores_far_from_the_cutoff_keep_four_decimals(monkeypatch):
         ReadOutcome(status=State.COMPLETE, verdict="attack", max_score=0.95), complete_run()
     )
     assert "top score 0.9500" in report.reason
+
+
+def test_the_block_reason_prints_the_exact_cutoff(monkeypatch):
+    import run.verdict as verdict
+
+    monkeypatch.setattr(verdict, "READ_BLOCK_SCORE", 0.1234499)
+    read = ReadOutcome(status=State.COMPLETE, verdict="attack", max_score=0.1234499)
+    report = fuse(read, complete_run())
+    assert report.verdict == "BLOCK"
+    assert "block cutoff 0.1234499" in report.reason

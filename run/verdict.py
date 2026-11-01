@@ -307,7 +307,7 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     if read.verdict == "attack" and read.max_score >= READ_BLOCK_SCORE:
         blockers.append(
             f"READ top score {_read_score(read.max_score)} reaches the block cutoff "
-            f"{READ_BLOCK_SCORE:g}"
+            f"{READ_BLOCK_SCORE!r}"
         )
 
     if read.status is not State.COMPLETE:
