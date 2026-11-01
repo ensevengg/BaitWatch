@@ -940,17 +940,23 @@ def test_a_judge_escalated_attack_below_the_cutoff_flags():
 
 
 @pytest.mark.parametrize("offset", [-1e-5, -1e-9])
-def test_a_flag_just_below_the_cutoff_does_not_print_the_cutoff(offset):
-    score = READ_BLOCK_SCORE + offset
+def test_a_flag_just_below_the_cutoff_does_not_print_the_cutoff(monkeypatch, offset):
+    import run.verdict as verdict
+
+    monkeypatch.setattr(verdict, "READ_BLOCK_SCORE", 0.9965)
+    score = 0.9965 + offset
     report = fuse(
         ReadOutcome(status=State.COMPLETE, verdict="attack", max_score=score), complete_run()
     )
     assert report.verdict == "FLAG"
     assert repr(score) in report.reason
-    assert f"top score {READ_BLOCK_SCORE:.4f}" not in report.reason
+    assert "top score 0.9965" not in report.reason
 
 
-def test_scores_far_from_the_cutoff_keep_four_decimals():
+def test_scores_far_from_the_cutoff_keep_four_decimals(monkeypatch):
+    import run.verdict as verdict
+
+    monkeypatch.setattr(verdict, "READ_BLOCK_SCORE", 0.9965)
     report = fuse(
         ReadOutcome(status=State.COMPLETE, verdict="attack", max_score=0.95), complete_run()
     )
