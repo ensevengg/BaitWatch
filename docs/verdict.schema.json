@@ -332,6 +332,40 @@
           },
           "title": "Errors",
           "type": "array"
+        },
+        "decoy_prompt_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Decoy Prompt Tokens",
+          "type": "integer"
+        },
+        "decoy_completion_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Decoy Completion Tokens",
+          "type": "integer"
+        },
+        "decoy_total_tokens": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Decoy Total Tokens",
+          "type": "integer"
+        },
+        "decoy_tokens_estimated": {
+          "default": false,
+          "title": "Decoy Tokens Estimated",
+          "type": "boolean"
+        },
+        "decoy_backend": {
+          "default": "",
+          "title": "Decoy Backend",
+          "type": "string"
+        },
+        "decoy_fallback_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Decoy Fallback Count",
+          "type": "integer"
         }
       },
       "title": "RunEvidence",

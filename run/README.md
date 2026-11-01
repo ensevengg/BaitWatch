@@ -96,6 +96,59 @@ exfiltration. A
 honeytoken sent over DNS, HTTP or TLS is BLOCK; a decoy that only read one
 (`tool_log`) is FLAG.
 
+## Measuring the decoy pwn rate
+
+On the demo machine (Manan's laptop), with Docker and the cage image ready:
+
+```bash
+export BAITWATCH_DECOY_BASE_URL="https://<primary-endpoint>/v1"   # e.g. Muse Spark endpoint
+export BAITWATCH_DECOY_MODEL="<primary-model>"
+export BAITWATCH_DECOY_API_KEY_ENV="BAITWATCH_DECOY_API_KEY"      # NAME of the env var holding the key
+export BAITWATCH_DECOY_API_KEY="..."                              # value lives only in the environment
+export BAITWATCH_DECOY_FALLBACK_BASE_URL="http://127.0.0.1:11434/v1"  # local llama-server/Ollama
+export BAITWATCH_DECOY_FALLBACK_MODEL="llama3.1:8b"
+uv run --no-sync python -m run.pwnrate --repo attacks/repos/readme-bait-curl --runs 10 \
+  --llm "openai:${BAITWATCH_DECOY_BASE_URL}#${BAITWATCH_DECOY_MODEL}#${BAITWATCH_DECOY_API_KEY_ENV}" \
+  --llm-fallback "ollama:${BAITWATCH_DECOY_FALLBACK_MODEL}" \
+  --max-steps 20 --max-tokens 100000 --max-seconds 120 \
+  --out pwnrate.json --markdown pwnrate.md
+uv run --no-sync pytest -m gpu tests/run/test_pwnrate_gpu.py -q   # same env; skips when unset
+```
+
+Env var names: `BAITWATCH_DECOY_BASE_URL`, `BAITWATCH_DECOY_MODEL`,
+`BAITWATCH_DECOY_API_KEY_ENV` (a variable *name*, never a key value in specs,
+logs or reports), `BAITWATCH_DECOY_FALLBACK_BASE_URL`,
+`BAITWATCH_DECOY_FALLBACK_MODEL`, and `BAITWATCH_PWNRATE_RUNS` (default 10).
+The report JSON and Markdown table give, per repo: runs, runs with a counted
+sink hit, runs with honeytoken hits, verdict counts, pwn rate, p50/p95 latency,
+tokens used and fallback count. A counted sink hit is a contact that verdict fusion
+counts (exfiltration or a registry attempt): validated plain registry DNS and
+hello-only registry TLS do not count, while registry HTTP and non-plain
+registry contacts do. A run is marked `suspect` when the fallback
+answered every turn, so its numbers belong to the fallback model. Repository code only runs inside the cage;
+model calls leave only from the host.
+
+Spend caps (per scan, configurable on `baitwatch scan`, `baitwatch-run decoy`
+and `run.pwnrate`): `--max-steps` (turns and total tool calls, default 20),
+`--max-tokens` (prompt+completion, from the API `usage` field when present,
+else a conservative character estimate; default 100000; each request reserves
+the estimated prompt tokens and asks for at most the remaining budget after
+that reserve, capped at 4096 completion tokens, and each request is bounded
+by the remaining wall time) and `--max-seconds`
+(decoy wall time, default 120). Hitting any cap records
+`DECOY_STEP_BUDGET`, `DECOY_TOKEN_BUDGET` or `DECOY_TIME_BUDGET`, marks the
+decoy component `error`, and can never ALLOW — matching step-budget
+exhaustion. Evidence records `decoy_total_tokens`, `decoy_backend` and
+`decoy_fallback_count`.
+
+Fallback: `--llm-fallback SPEC` wraps the primary backend. On connection
+error, HTTP 5xx, HTTP 429, timeout or a missing key it retries the same turn
+on the fallback (temperature 0, fixed seed 0 for the local Llama backend via
+`ollama:`/`openai:` specs), only if wall time remains, and the fallback gets
+the time left rather than the original timeout. A fallback answer is recorded in
+`decoy_backend`/`decoy_fallback_count` and is not by itself an error; if both
+backends fail the decoy records `DECOY_FAILED` and the scan stays non-ALLOW.
+
 ## Library interface
 
 ```python

@@ -127,6 +127,8 @@ class SandboxConfig:
     sink_ready_seconds: float = 15
     # The decoy cage's overall lifetime and the per-tool-call deadline.
     decoy_seconds: float = 120
+    decoy_max_tokens: int = 100_000
+    decoy_max_seconds: float = 120.0
     tool_timeout_seconds: float = 10
     max_output_bytes: int = 64 * 1024
     staging: StagingLimits = field(default_factory=StagingLimits)
@@ -162,8 +164,11 @@ class SandboxConfig:
             self.sink_ready_seconds
         ):
             raise ValueError("sink_ready_seconds must be a finite int or float")
+        if type(self.decoy_max_tokens) is not int or self.decoy_max_tokens < 1:
+            raise ValueError("decoy_max_tokens must be a positive integer")
         for name, value in (
             ("decoy_seconds", self.decoy_seconds),
+            ("decoy_max_seconds", self.decoy_max_seconds),
             ("tool_timeout_seconds", self.tool_timeout_seconds),
         ):
             if type(value) not in (int, float) or not is_finite(value):
@@ -181,6 +186,7 @@ class SandboxConfig:
                     self.timeout_seconds,
                     self.sink_ready_seconds,
                     self.decoy_seconds,
+                    self.decoy_max_seconds,
                     self.tool_timeout_seconds,
                     self.max_output_bytes,
                 )
@@ -1371,6 +1377,8 @@ def detonate(
     config: SandboxConfig | None = None,
     backend: LLMBackend | None = None,
     max_steps: int = 20,
+    max_tokens: int | None = None,
+    max_seconds: float | None = None,
 ) -> RunEvidence:
     """With a backend, run the decoy instead of the plain command.
 
@@ -1391,7 +1399,12 @@ def detonate(
                     # Imported here: run.decoy imports this module for Sandbox.
                     from run.decoy import run_decoy
 
-                    run_decoy(sandbox, backend, max_steps=max_steps)
+                    kwargs: dict = {"max_steps": max_steps}
+                    if max_tokens is not None:
+                        kwargs["max_tokens"] = max_tokens
+                    if max_seconds is not None:
+                        kwargs["max_seconds"] = max_seconds
+                    run_decoy(sandbox, backend, **kwargs)
                     # A failed decoy must never be upgraded: only a clean loop
                     # that left the sandbox component untouched proves the cage ran.
                     if (
