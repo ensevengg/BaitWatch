@@ -49,6 +49,16 @@ def pinned_read_block_score(path: Path = READ_MODEL_CONFIG) -> float:
 
 
 READ_BLOCK_SCORE = pinned_read_block_score()
+
+
+def _read_score(score: float) -> str:
+    """Four decimals, or the exact value when rounding would cross the block cutoff."""
+    text = f"{score:.4f}"
+    if (float(text) >= READ_BLOCK_SCORE) != (score >= READ_BLOCK_SCORE):
+        return repr(score)
+    return text
+
+
 CAGE_HOME = "/cage/home"
 REGISTRY_HOSTS = (
     "pypi.org",
@@ -296,7 +306,8 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         blockers.append(_bounded(f"honeytoken hit(s) sent over the network: {tokens}"))
     if read.verdict == "attack" and read.max_score >= READ_BLOCK_SCORE:
         blockers.append(
-            f"READ top score {read.max_score:.4f} reaches the block cutoff {READ_BLOCK_SCORE:.4f}"
+            f"READ top score {_read_score(read.max_score)} reaches the block cutoff "
+            f"{READ_BLOCK_SCORE:g}"
         )
 
     if read.status is not State.COMPLETE:
@@ -304,7 +315,7 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     elif read.verdict == "clean":
         pass
     elif read.verdict == "attack":
-        flags.append(f"READ flagged injection content with top score {read.max_score:.4f}")
+        flags.append(f"READ flagged injection content with top score {_read_score(read.max_score)}")
     elif read.verdict == "incomplete":
         flags.append(_bounded(f"READ coverage is incomplete: {read.reason}"))
     else:
