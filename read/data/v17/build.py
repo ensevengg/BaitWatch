@@ -114,14 +114,17 @@ def plant_snippet(out: Out, chunker: Chunker, snip, pool: CarrierPool, split: st
         meta = dict(sid=snip.sid, intent=snip.intent, voice=snip.voice, lang=snip.lang,
                     kind=kind, carrier=f"{carrier.repo}:{carrier.rel}", plant=k)
         span = b - a
-        hit, others = None, []
+        full, partial, others = None, None, []
         for c in chunks:
             ov = max(0, min(b, c.end_char) - max(a, c.start_char))
-            if ov >= span or (span > 0 and ov / span >= SPAN_MIN_FRACTION):
-                if hit is None:
-                    hit = c
+            if ov >= span:
+                full = full or c
+            elif span > 0 and ov / span >= SPAN_MIN_FRACTION:
+                partial = partial or c
             elif ov == 0:
                 others.append(c)
+        # A window holding the whole span beats an earlier one holding 80% of it.
+        hit = full or partial
         if hit is None:
             stats["span_not_windowed"] += 1
             continue
