@@ -126,7 +126,7 @@ pytest tests/attacks -q
 Extra packages for the full path: `torch` (CPU wheel is enough),
 `transformers>=5.0`, `pyarrow` (parquet leakage check) and `scikit-learn`
 (training extras). The real scanner additionally needs the pinned
-`v15f_22m` checkpoint; without it the harness prints an error and the hook
+`v17c_86m_soup` checkpoint (v1.7); without it the harness prints an error and the hook
 fails closed. See `docs/HOOKS.md`.
 
 The keyword scanner is a deterministic CPU stand-in: it runs the real decoder

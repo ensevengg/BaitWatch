@@ -29,6 +29,72 @@ Planned additions (roadmap D2/D3):
   muse_spark rows never enter the test split.
 - **Aditya's obfuscation rows** (+5k, `source=attack_obfuscation`).
 
+## Data v1.7 (`read/data/v17/`)
+
+v1.6 trained on emails and one-line prompts: under 5% of its attack rows looked
+like a repo file, and 15% of its attack rows were cut off at 512 tokens. v1.7
+trains on what the scanner actually scores: 448/64-token windows of real repo
+files, cut by the scanner's own `Chunker` after the scanner's blob masking.
+
+| Part | Where it comes from | Label |
+|---|---|---|
+| Snippets | 18 generated batches (Muse Wonder): 12 attacker goals × 120 rows, 6 harmless lookalike voices × 150 rows; ~30% non-English in both labels | 1 / 0 |
+| Carriers | shallow clones of 42 permissively licensed repos (`sources.TRAIN_REPOS`) | 0 |
+| Agent files | real AGENTS.md / CLAUDE.md / cursor rules / copilot instructions / SKILL.md from permissively licensed repos (GitHub code search, ≥10 stars), screened by hand | 0 |
+| Old sources | prodnull, llmail (≤448 tokens, capped), OpenCodeInstruct, patch_v16, harmless short snippets | as before |
+| Noise | reversed / ROT13 / base32 / hex / identifier soup / minified JS | 0 |
+
+Rules the builder enforces:
+- **Exact labels.** A snippet is planted at a recorded character span. A
+  window is label 1 only if it holds the whole span (or 80%+ of a long one);
+  windows that cut it are dropped; windows that miss it are label 0.
+- **Minimal pairs.** Each planted attack window also yields the same window
+  from the clean file and, half the time, one other window of the same file
+  that doesn't touch the span.
+- **No label shortcuts.** Snippets use `{host}`/`{ip}`/`{project}`/`{pkg}`
+  placeholders filled from one shared pool for both labels, half reserved
+  names (RFC 2606/6761) and half real hosting, paste and tunnel platforms, so
+  hostnames carry no signal; attack rows that name themselves (evil,
+  malicious, payload, inject…) are dropped; both labels share one markup
+  distribution (HTML comment, blockquote, `<details>`, JSON key, comment
+  prefixes) and harmless snippets are planted more often so planted windows
+  split evenly. Old attack rows have loaded hostnames (`evil.example`…)
+  rewritten from the same pool.
+- **Disjoint test.** 20% of snippets (by id) are held out and planted only
+  into `sources.TEST_REPOS` carriers → `test_planted.parquet`, reported apart
+  from `test.parquet` because it is generated text. `test.parquet` holds
+  exactly the v1.6 test rows (same texts, labels and sources); row order and
+  the extra metadata columns differ.
+- **Leakage.** Train, val and test_planted are checked against the suite
+  fixtures, InjecAgent and Aditya's attack-slice payloads; leaked rows are
+  dropped and counted in the manifest.
+
+Build: `python -m read.data.v17.sources` (clones + license lock),
+`python -m read.data.v17.agentfiles`, then
+`python -m read.data.v17.build --tokenizer <base model>` (windows depend on
+the tokenizer, so build once per base model).
+
+### v1.7 gate (`read.training.eval_v17`)
+
+Target: **≥96% of held-out attack files caught at ≤0.5% of held-out harmless
+files flagged**, detector + decoders, judge off, every set run through
+`read.scan`.
+- Attacks: the hand-written gold set (`read.data.v17.gold`: 120 attacks over
+  12 goals plus 12 encoded variants, different author and host pool from the
+  training snippets, planted into TEST_REPOS files) and Aditya's five
+  attack-slice repos (answer keys removed). The suite is reported but is a
+  dev set.
+- Harmless: the FPR corpus (10 repos) + TEST_REPOS files + the held-out 20%
+  of fetched agent files (repos never trained on; `agentfiles.split_for_repo`)
+  + gold lookalikes + suite benign files. The gate threshold is the lowest one
+  that keeps the pooled set at ≤0.5%; per-set rates (agent files, for example)
+  can be higher and are reported separately.
+
+Agent files are screened before use (`read.data.v17.screen`): pattern hits
+and the highest-scoring files are read by hand and anything hostile goes into
+`agentfiles_exclude.json`. The 2026-10-29 screen of 1,836 files excluded none
+(notes in `v17_raw/agentfiles_review.md`).
+
 ## Frozen evaluation sets (never trained on)
 
 | Set | Source | License | Role |

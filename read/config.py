@@ -141,7 +141,9 @@ class ReadConfig:
     flag_threshold: float = 0.8            # >= flagged by the model alone
     review_low: float = 0.3                # [review_low, flag_threshold) goes to the judge
     hard_high: float = 0.9                 # informational: judge explanation never clears these
-    batch_size: int = 64
+    # 16 keeps the 86M detector at ~1.1 GiB peak VRAM (64: 2.9, 128: 5.2) at the
+    # same scan speed, leaving room for the decoy model on an 8 GB GPU.
+    batch_size: int = 16
     max_length: int = 512
     window_tokens: int = 448               # content tokens per chunk (<= max_length - 2 specials)
     overlap_tokens: int = 64
@@ -181,7 +183,6 @@ class ReadConfig:
         cfg.walker.max_files = 400
         cfg.max_chunks_per_file = 8
         cfg.max_file_tokens = 8_000
-        cfg.batch_size = 128
         # The inline hook must not block on judge round-trips: detector-only.
         # Review-band chunks it surfaces are reported as unjudged/incomplete
         # (see read/scan.py), never silently clean.

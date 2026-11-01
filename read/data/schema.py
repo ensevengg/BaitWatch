@@ -23,6 +23,9 @@ VALID_SOURCES = frozenset({
     "prodnull", "llmail", "opencodeinstruct", "muse_spark",
     "attack_obfuscation",     # Aditya's +5k obfuscated rows (D3)
     "synthetic",              # fixtures and tests
+    # data v1.7 (read/data/v17): planted windows, bare snippets, real carrier
+    # windows, real agent files, encoded-noise negatives
+    "v17_planted", "v17_bare", "v17_carrier", "v17_agentfile", "v17_noise",
 })
 
 MAX_ROW_CHARS = 6_000   # 512 tokens ~ 2k chars; 6k is a generous ceiling
