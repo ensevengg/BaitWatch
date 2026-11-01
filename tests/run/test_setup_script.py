@@ -66,7 +66,12 @@ def test_setup_script_shellcheck_if_available():
 
 
 def _fake_toolchain(
-    tmp_path: Path, *, docker_ps: str, errors: str = "[]", scan_exit: int = 5
+    tmp_path: Path,
+    *,
+    docker_ps: str,
+    errors: str = "[]",
+    scan_exit: int = 5,
+    context: str = "default",
 ) -> dict:
     report = tmp_path / "report.json"
     report.write_text(
@@ -84,6 +89,7 @@ case "$1" in
   info|pull|image|network|build) exit 0 ;;
   version) echo "29.1.3" ;;
   ps) {docker_ps} ;;
+  context) echo "{context}" ;;
   *) echo "unexpected docker call: $*" >&2; exit 1 ;;
 esac
 """,
@@ -139,3 +145,19 @@ def test_failed_scan_reports_labelled_leftovers_without_removing_them(tmp_path):
     assert "scan-labelled resources exist" in result.stderr
     assert "expected exit 5 (BLOCK), got 3" in result.stderr
     assert "unexpected docker call" not in result.stderr
+
+
+def test_non_default_context_without_docker_host_fails_early(tmp_path):
+    env = _fake_toolchain(tmp_path, docker_ps="exit 0", context="remote")
+    env.pop("DOCKER_HOST", None)
+    result = _run_setup(env)
+    assert result.returncode != 0
+    assert "context is 'remote'" in result.stderr
+    assert "setup: OK" not in result.stdout
+
+
+def test_docker_host_skips_the_context_check(tmp_path):
+    env = _fake_toolchain(tmp_path, docker_ps="exit 0", context="remote")
+    env["DOCKER_HOST"] = "unix:///run/docker-test.sock"
+    result = _run_setup(env)
+    assert result.returncode == 0, result.stderr

@@ -42,6 +42,12 @@ case "$SERVER_MAJOR" in
   ''|*[!0-9]*) fail "could not parse the Docker server version: $SERVER_VERSION" ;;
 esac
 [ "$SERVER_MAJOR" -ge 28 ] || fail "Docker Engine 28 or later is required (found server $SERVER_VERSION)"
+# The sandbox connects through DOCKER_HOST or the default socket and ignores CLI contexts.
+if [ -z "${DOCKER_HOST:-}" ]; then
+  DOCKER_CONTEXT_NAME="$(docker context show)" || fail "could not read the active Docker context"
+  [ "$DOCKER_CONTEXT_NAME" = default ] \
+    || fail "the active Docker context is '$DOCKER_CONTEXT_NAME', but the sandbox ignores contexts; set DOCKER_HOST to its endpoint or run 'docker context use default'"
+fi
 command -v uv >/dev/null 2>&1 || fail "uv is not on PATH; install it from https://docs.astral.sh/uv/ and re-run"
 
 echo "==> Installing locked dependencies"
