@@ -63,3 +63,69 @@ def test_setup_script_shellcheck_if_available():
         pytest.skip("shellcheck is not installed")
     result = subprocess.run([shellcheck, str(SETUP)], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _fake_toolchain(tmp_path: Path, *, docker_ps: str, errors: str = "[]") -> dict:
+    report = tmp_path / "report.json"
+    report.write_text(
+        '{"verdict": "BLOCK", "run": {"scan_id": "s1", "http_hits": [{}], "errors": '
+        + errors
+        + "}}",
+        encoding="utf-8",
+    )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    _write_executable(
+        bindir / "docker",
+        f"""#!/usr/bin/env bash
+case "$1" in
+  info|pull|image|network|build) exit 0 ;;
+  version) echo "29.1.3" ;;
+  ps) {docker_ps} ;;
+  *) echo "unexpected docker call: $*" >&2; exit 1 ;;
+esac
+""",
+    )
+    _write_executable(
+        bindir / "uv",
+        f"""#!/usr/bin/env bash
+[ "$1" = sync ] && exit 0
+shift 2
+if [ "$1" = baitwatch ]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --json ]; then cp "{report}" "$2"; fi
+    shift
+  done
+  exit 5
+fi
+[ "$1" = python ] && shift
+exec "{shutil.which("python") or "python3"}" "$@"
+""",
+    )
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}:{env['PATH']}"
+    return env
+
+
+def _run_setup(env: dict) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", str(SETUP)], capture_output=True, text=True, timeout=60, env=env)
+
+
+def test_setup_passes_with_a_clean_block_report(tmp_path):
+    result = _run_setup(_fake_toolchain(tmp_path, docker_ps="exit 0"))
+    assert result.returncode == 0, result.stderr
+    assert "setup: OK" in result.stdout
+
+
+def test_leftover_check_fails_when_docker_cannot_list(tmp_path):
+    result = _run_setup(_fake_toolchain(tmp_path, docker_ps="exit 1"))
+    assert result.returncode != 0
+    assert "could not list containers" in result.stderr
+    assert "setup: OK" not in result.stdout
+
+
+def test_staging_cleanup_error_fails_setup(tmp_path):
+    errors = '[{"code": "STAGING_CLEANUP", "message": "x"}]'
+    result = _run_setup(_fake_toolchain(tmp_path, docker_ps="exit 0", errors=errors))
+    assert result.returncode != 0
+    assert "STAGING_CLEANUP" in result.stderr
