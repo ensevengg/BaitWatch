@@ -13,6 +13,20 @@ def test_default_cage_image():
     assert SandboxConfig().image == "baitwatch-cage:1"
 
 
+def test_sink_image_matches_cage_dockerfile():
+    from run.cage import SINK_IMAGE
+
+    dockerfile = Path(__file__).parents[2] / "run" / "cage" / "Dockerfile"
+    from_line = next(
+        line.split(None, 1)[1].strip()
+        for line in dockerfile.read_text(encoding="utf-8").splitlines()
+        if line.startswith("FROM ")
+    )
+    assert from_line == SINK_IMAGE
+    assert SandboxConfig().sink_image == SINK_IMAGE
+    assert "@sha256:" in SINK_IMAGE
+
+
 def test_missing_cage_image_fails_closed(repo):
     client = fake_client()
     client.images.get.side_effect = ImageNotFound("missing")

@@ -15,7 +15,7 @@ import docker
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 from docker.types import IPAMConfig, IPAMPool, LogConfig, Mount, Ulimit
 
-from run.cage import DEFAULT_IMAGE
+from run.cage import DEFAULT_IMAGE, SINK_IMAGE
 from run.capture import capture_attached, capture_exec
 from run.evidence import (
     CommandResult,
@@ -111,7 +111,7 @@ class SandboxError(RuntimeError):
 @dataclass(frozen=True)
 class SandboxConfig:
     image: str = DEFAULT_IMAGE
-    sink_image: str = "python:3.12-alpine"
+    sink_image: str = SINK_IMAGE
     # None tries DEFAULT_SUBNET, then other 10.13.X.0/24 pools on overlap.
     # An explicit subnet never falls back.
     subnet: str | None = None
