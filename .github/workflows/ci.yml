@@ -32,6 +32,7 @@ jobs:
         run: |
           docker pull alpine:3.20
           docker pull python:3.12-alpine
+          docker pull "$(uv run --no-sync python -I -c 'from run.cage import SINK_IMAGE; print(SINK_IMAGE)')"
       - name: Build trusted cage image
         run: uv run --no-sync python -m run.cage build
       - name: Unit and Docker integration tests
