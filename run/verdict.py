@@ -304,7 +304,7 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
     elif read.verdict == "clean":
         pass
     elif read.verdict == "attack":
-        flags.append(f"READ flagged injection content with top score {read.max_score:.2f}")
+        flags.append(f"READ flagged injection content with top score {read.max_score:.4f}")
     elif read.verdict == "incomplete":
         flags.append(_bounded(f"READ coverage is incomplete: {read.reason}"))
     else:

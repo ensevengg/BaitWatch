@@ -917,7 +917,7 @@ def test_the_pin_ignores_a_read_package_in_the_working_directory(tmp_path):
     shadow.mkdir()
     (shadow / "__init__.py").write_text("", encoding="utf-8")
     (shadow / "model_config.json").write_text(
-        '{"thresholds": {"hard_high": 1.0}}', encoding="utf-8"
+        '{"thresholds": {"hard_high": 0.123}}', encoding="utf-8"
     )
     result = subprocess.run(
         [sys.executable, "-c", "from run.verdict import READ_BLOCK_SCORE; print(READ_BLOCK_SCORE)"],
@@ -928,7 +928,7 @@ def test_the_pin_ignores_a_read_package_in_the_working_directory(tmp_path):
         env={**os.environ, "PYTHONPATH": str(ROOT)},
     )
     assert result.returncode == 0, result.stderr
-    assert float(result.stdout) == READ_BLOCK_SCORE != 1.0
+    assert float(result.stdout) == READ_BLOCK_SCORE != 0.123
 
 
 def test_a_judge_escalated_attack_below_the_cutoff_flags():
