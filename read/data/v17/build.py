@@ -131,9 +131,13 @@ def plant_snippet(out: Out, chunker: Chunker, snip, pool: CarrierPool, split: st
         if out.add(hit.text, snip.label, "v17_planted", split, role="planted", **meta):
             stats[f"planted_{snip.label}"] += 1
         if snip.label == 1:
-            # Minimal pair: the clean file's window over the same spot.
+            # Minimal pair: the clean file's window over the same spot. The
+            # text before the plant is unchanged, so the window that starts
+            # where the hit starts is the twin; else the one containing it.
             clean_chunks, _ = chunker.chunk(clean, carrier.rel, line_offset=None, max_chunks=10_000)
-            twin = next((c for c in clean_chunks if c.start_char <= a < c.end_char), None)
+            twin = next((c for c in clean_chunks if c.start_char == hit.start_char), None)
+            if twin is None:
+                twin = next((c for c in clean_chunks if c.start_char <= a < c.end_char), None)
             if twin is None and clean_chunks:
                 twin = clean_chunks[-1]
             if twin is not None and out.add(twin.text, 0, "v17_planted", split,
