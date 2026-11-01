@@ -116,7 +116,8 @@ base model ships no label names, so index→name mapping is pinned in code:
 **0 = benign, 1 = injection** (`read/detector.py`, asserted in tests).
 
 - The trained checkpoint lives outside the repo
-  (`~/.local/share/baitwatch/models/`), pinned by SHA-256 in
+  (`~/.local/share/baitwatch/models/v17c_86m_soup` for v1.7; copy it from the
+  training machine or set `BAITWATCH_MODEL_PATH`), pinned by SHA-256 in
   `read/model_config.json` together with the operating thresholds — that file
   is what `scan()` reads, and what `tests/read/test_metrics.py` guards.
 - v1.7's flag threshold comes from the v1.7 gate (`read.training.eval_v17`):

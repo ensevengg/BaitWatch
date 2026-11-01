@@ -96,12 +96,13 @@ the installer; pass `--python PATH` to pin another one. The hook imports the
 installed `hooks` package, so `pip install -e .` is required; a bare source
 checkout is not enough for `-I`.
 
-The real scanner needs the pinned checkpoint (`v15f_22m`). When it is absent,
+The real scanner needs the pinned checkpoint (`v17c_86m_soup`, v1.7). When it is absent,
 `python -m attacks harness --scanner read` prints an actionable error and the
 hook fails closed (`source: error`). Set `BAITWATCH_MODEL_PATH` to the
 checkpoint directory, or use `BAITWATCH_HOOK_SCANNER=keyword` for the CPU
-stand-in. The checkpoint is copied from the training machine; it is not
-downloaded by the installer.
+stand-in. The checkpoint is copied from the training machine into
+`~/.local/share/baitwatch/models/v17c_86m_soup`; it is not downloaded by the
+installer. A copy of the older `v15f_22m` no longer matches the pin.
 
 ## Wire format
 
