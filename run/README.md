@@ -9,13 +9,8 @@ This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, the Da
 Install Python 3.12 or later, uv, Docker Engine 28 or later and the Docker CLI. Your user needs access to a local Linux Docker daemon. Then run:
 
 ```bash
-uv sync --frozen --extra dev --extra cpu
-docker pull alpine:3.20
-docker pull python:3.12-alpine
-uv run --no-sync python -m run.cage build
-uv run --no-sync ruff check run tests/run tests/e2e
-uv run --no-sync ruff format --check run tests/run tests/e2e
-uv run --no-sync pytest -m "not gpu" tests/run tests/e2e
+bash run/setup.sh                    # deps, images, cage build and a smoke scan
+bash run/setup.sh --tests            # same, plus the full RUN check (lint, format, tests)
 ```
 
 The default cage is `baitwatch-cage:1`, built only from the trusted
@@ -266,3 +261,11 @@ deadline kill still yields at least FLAG. Registry contacts without a plain
 DNS or hello-only TLS exemption remain FLAG under the current verdict policy,
 and other sink contacts remain BLOCK. Neither
 an install failure nor a registry lookup proves an install lifecycle payload ran.
+
+## Known limitations
+
+The sandbox boundary has its own [known limits](SANDBOX.md#known-limits); the two that most affect reading a verdict are the literal-IP observation gap above and the bounded client-chosen bytes a hello-only registry TLS contact can still carry. The deferred items below are also known:
+
+- During the response-header phase, the OpenAI-compatible backend is bounded only by the per-read socket timeout. An endpoint that sends headers slowly can push one model call past the decoy wall budget. The scan stays non-ALLOW when that happens.
+- When a call fails after the wall deadline, the decoy records `DECOY_TIME_BUDGET`, and the underlying error kind isn't shown.
+- If the cage deadline expires during model inference and that call then fails, it's recorded as `DECOY_FAILED`, not a deadline code (`DECOY_DEADLINE` is only checked between calls). It's still non-ALLOW.

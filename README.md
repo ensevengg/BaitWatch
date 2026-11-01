@@ -75,11 +75,8 @@ Detector checkpoint, thresholds and the full API: [`read/README.md`](read/README
 Needs Linux, Docker Engine 28 or later, and uv.
 
 ```bash
-uv sync --frozen --extra dev --extra cpu
-docker pull alpine:3.20
-docker pull python:3.12-alpine
-uv run --no-sync python -m run.cage build
-bash run/check.sh                    # lint, format and RUN tests, including Docker isolation
+bash run/setup.sh                    # deps, images, cage build and a smoke scan
+bash run/setup.sh --tests            # same, plus the full RUN check (lint, format, tests)
 baitwatch-run sandbox <repo> -- echo hello
 ```
 
