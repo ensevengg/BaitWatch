@@ -854,3 +854,43 @@ def test_honeytoken_in_registry_dns_name_blocks():
     report = fuse(CLEAN, run)
     assert report.verdict == "BLOCK"
     assert "honeytoken" in report.reason
+
+
+def test_read_block_score_is_the_pinned_hard_high():
+    from read.config import config_from_model_config
+
+    assert config_from_model_config().hard_high == READ_BLOCK_SCORE
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        "not json",
+        '{"thresholds": {}}',
+        '{"thresholds": {"hard_high": "high"}}',
+        '{"thresholds": {"hard_high": NaN}}',
+        '{"thresholds": {"hard_high": 0}}',
+        '{"thresholds": {"hard_high": 1.5}}',
+        "[]",
+    ],
+)
+def test_missing_or_invalid_pin_falls_back_to_the_lower_cutoff(tmp_path, monkeypatch, content):
+    import importlib.machinery
+
+    import run.verdict as verdict
+
+    if content is not None:
+        (tmp_path / "model_config.json").write_text(content, encoding="utf-8")
+    spec = importlib.machinery.ModuleSpec("read", None, is_package=True)
+    spec.submodule_search_locations = [str(tmp_path)]
+    monkeypatch.setattr(verdict.importlib.util, "find_spec", lambda name: spec)
+    assert verdict.pinned_read_block_score() == verdict.READ_BLOCK_FALLBACK
+
+
+def test_a_judge_escalated_attack_below_the_cutoff_flags():
+    run = complete_run()
+    judged = ReadOutcome(status=State.COMPLETE, verdict="attack", max_score=0.95)
+    report = fuse(judged, run)
+    assert report.verdict == "FLAG"
+    assert "READ flagged" in report.reason

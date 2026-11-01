@@ -1,24 +1,45 @@
-"""Provisional verdict fusion: READ outcome plus RUN evidence -> VerdictReport.
+"""Verdict fusion: READ outcome plus RUN evidence -> VerdictReport.
 
-The thresholds here are provisional until agreed with Manan; the fixed rules
-are already binding: any exception, timeout, truncated scan, missing component,
-READ incomplete/unavailable or RUN error is at least FLAG, never ALLOW, and any
-non-registry sink contact or honeytoken sent over the network is BLOCK. A
-decoy that only reads a honeytoken FLAGs. Validated plain DNS lookups and
-hello-only TLS contacts to the exact hosts in REGISTRY_HOSTS do not affect
-the verdict. Other registry contacts remain attempts and FLAG instead of
-BLOCK. The judge inside READ may
-escalate but never clears a high READ score, so fusion sees only the resulting
-top score.
+A READ attack verdict BLOCKs at the pinned checkpoint's `hard_high` score
+(`read/model_config.json`) and FLAGs below it. Any exception, timeout,
+truncated scan, missing component, READ incomplete/unavailable or RUN error is
+at least FLAG, never ALLOW, and any non-registry sink contact or honeytoken
+sent over the network is BLOCK. A decoy that only reads a honeytoken FLAGs.
+Validated plain DNS lookups and hello-only TLS contacts to the exact hosts in
+REGISTRY_HOSTS do not affect the verdict. Other registry contacts remain
+attempts and FLAG instead of BLOCK. The judge inside READ may escalate but
+never clears a high READ score, so fusion sees only the resulting top score.
 """
 
+import importlib.util
+import json
+import math
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from run.evidence import CommandResult, NetworkHit, ReadEvidence, RunEvidence, State, VerdictReport
 
-# Provisional until agreed with Manan.
-READ_BLOCK_SCORE = 0.9
+READ_BLOCK_FALLBACK = 0.9
+
+
+def pinned_read_block_score() -> float:
+    """READ's pinned `hard_high`, or the lower fallback if the pin is missing or invalid.
+
+    Read as plain JSON: importing the `read` package loads torch.
+    """
+    spec = importlib.util.find_spec("read")
+    if spec is None or not spec.submodule_search_locations:
+        return READ_BLOCK_FALLBACK
+    path = Path(next(iter(spec.submodule_search_locations))) / "model_config.json"
+    try:
+        value = float(json.loads(path.read_text(encoding="utf-8"))["thresholds"]["hard_high"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return READ_BLOCK_FALLBACK
+    return value if math.isfinite(value) and 0.0 < value <= 1.0 else READ_BLOCK_FALLBACK
+
+
+READ_BLOCK_SCORE = pinned_read_block_score()
 CAGE_HOME = "/cage/home"
 REGISTRY_HOSTS = (
     "pypi.org",
@@ -265,7 +286,9 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         tokens = ", ".join(dict.fromkeys(hit.token_id for hit in sent))
         blockers.append(_bounded(f"honeytoken hit(s) sent over the network: {tokens}"))
     if read.verdict == "attack" and read.max_score >= READ_BLOCK_SCORE:
-        blockers.append(f"READ top score {read.max_score:.2f} reaches the block threshold")
+        blockers.append(
+            f"READ top score {read.max_score:.4f} reaches the block cutoff {READ_BLOCK_SCORE:.4f}"
+        )
 
     if read.status is not State.COMPLETE:
         flags.append(_bounded(read.reason or "READ did not run"))
