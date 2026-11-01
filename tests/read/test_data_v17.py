@@ -147,6 +147,18 @@ def test_agent_file_local_names_do_not_collide():
     assert local_name("a/b", "AGENTS.md") == local_name("a/b", "AGENTS.md")
 
 
+def test_agent_file_local_name_fits_filename_limit():
+    from read.data.v17.agentfiles import local_name
+
+    long_dir = "d" * 220
+    name = local_name("owner/project", f"{long_dir}/AGENTS.md")
+    assert len(name.encode()) <= 255
+    assert name != local_name("owner/project", f"{long_dir}/CLAUDE.md")
+    wide = local_name("o/p", "é" * 200 + "/AGENTS.md")     # multi-byte cut stays valid UTF-8
+    assert len(wide.encode()) <= 255
+    assert local_name("a/b", "AGENTS.md").startswith("a__b__AGENTS.md.")
+
+
 def test_live_gpu_tolerates_unsupported_fields(monkeypatch):
     import read.training.live as live
 

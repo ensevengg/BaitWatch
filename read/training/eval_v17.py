@@ -155,9 +155,16 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
         from read.data.v17.agentfiles import PERMISSIVE, split_for_repo
         from read.data.v17.sources import TEST_REPOS, TRAIN_REPOS
         lock = json.loads(lock_path.read_text())
+        # Corpus and test-carrier clones are already scored above (dirs named
+        # "name" or "owner__name"); skip their lock entries so no file counts twice.
+        scanned = {k.lower() for k in corpus_files}
         for key, meta in sorted(lock["files"].items()):
+            repo, path = meta["repo"], meta["path"]
+            if {f'{repo.rsplit("/", 1)[-1]}:{path}'.lower(),
+                    f'{repo.replace("/", "__")}:{path}'.lower()} & scanned:
+                continue
             if (meta.get("license") in PERMISSIVE
-                    and split_for_repo(meta["repo"], TRAIN_REPOS, TEST_REPOS) == "test_planted"):
+                    and split_for_repo(repo, TRAIN_REPOS, TEST_REPOS) == "test_planted"):
                 path = HOME / "v17_raw/agentfiles/files" / meta["local"]
                 scores = file_scores(path, det, cfg)
                 if not scores:

@@ -111,9 +111,12 @@ def repo_infos(repos: list[str], batch: int = 50) -> dict[str, dict]:
 
 def local_name(repo: str, path: str) -> str:
     """Readable and collision-free: ``a/b/AGENTS.md`` and ``a__b/AGENTS.md``
-    flatten to the same text, so a hash of the real repo:path is appended."""
+    flatten to the same text, so a hash of the real repo:path is appended.
+    The readable part is cut to fit the 255-byte filename limit."""
     flat = repo.replace("/", "__") + "__" + path.replace("/", "__")
-    return f"{flat}.{hashlib.sha256(f'{repo}:{path}'.encode()).hexdigest()[:10]}"
+    suffix = "." + hashlib.sha256(f"{repo}:{path}".encode()).hexdigest()[:10]
+    flat = flat.encode()[: 255 - len(suffix)].decode("utf-8", errors="ignore")
+    return flat + suffix
 
 
 def _fetch_blob(h: dict, files_dir: Path, max_bytes: int) -> tuple[str, str | None]:
