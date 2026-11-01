@@ -2,7 +2,7 @@
 
 BaitWatch checks a repository for attacks aimed at coding agents before a developer lets an agent work in it. The planned product has two parts. READ runs a detector over the files. RUN executes the repository as a decoy inside an isolated Docker network and records what it tries to reach.
 
-This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, the Day 4 fused scan, and Day 5 honeytokens. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, plants per-scan fake credentials in the staged copy and detects them in sink and tool output, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not yet include model transcript scanning, the agreed verdict thresholds, or agent hooks.
+This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, the Day 4 fused scan, and Day 5 honeytokens. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, plants per-scan fake credentials in the staged copy and detects them in sink and tool output, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not yet include model transcript scanning or agent hooks.
 
 ## Setup on Linux
 
@@ -75,8 +75,11 @@ exit code permits an agent to proceed on its own. ALLOW means READ is clean
 and the RUN decoy completed without verdict-triggering evidence, subject to
 the observation limits below; it does not establish that the repository is safe.
 
-The fusion in `run/verdict.py` is provisional until the thresholds are agreed
-with the READ owner. Its fixed rules: any exception, timeout, truncated scan,
+The fusion in `run/verdict.py` BLOCKs a READ attack verdict when its top score
+reaches the pinned checkpoint's `hard_high` in `read/model_config.json`
+(0.9965 for v1.7). A READ attack below that score, such as one the judge
+escalated from the review band, is FLAG. If the pin is missing or invalid,
+fusion uses the lower cutoff 0.9. Its other rules: any exception, timeout, truncated scan,
 missing component, incomplete READ, or RUN error is at least FLAG;
 step-budget exhaustion and killed background work are errors; a decoy without
 an executed `run_cmd`, or staging exclusions beyond the top-level `.git`

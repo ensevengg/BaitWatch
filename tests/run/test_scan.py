@@ -99,7 +99,7 @@ def test_outcome_mapping_keeps_incomplete_reasons():
 
 
 def test_outcome_mapping_keeps_attack_scores():
-    outcome = _outcome_from(fake_result("attack", 0.99))
+    outcome = _outcome_from(fake_result("attack", 0.999))
     assert outcome.verdict == "attack"
     assert outcome.max_score >= READ_BLOCK_SCORE
 
@@ -130,12 +130,12 @@ def test_a_real_incomplete_scan_result_flags_and_never_allows():
 
 def test_a_real_attack_scan_result_blocks_even_with_coverage_gaps():
     result = real_scan_result(
-        findings=[flagged(0.97)],
+        findings=[flagged(0.999)],
         reasons=["judge budget: 1 review-band chunk(s) not judged"],
     )
     assert result.read_verdict == "attack"
     outcome = _outcome_from(result)
-    assert outcome.max_score == 0.97
+    assert outcome.max_score == 0.999
     assert "judge budget" in outcome.reason
     assert fuse(outcome, complete_run()).verdict == "BLOCK"
 
@@ -206,7 +206,7 @@ def test_read_system_failures_are_not_attack_scores():
 
 
 def test_attack_reason_retains_coverage_gaps():
-    result = real_scan_result(findings=[flagged(0.97)], reasons=["file cap: 2 files"])
+    result = real_scan_result(findings=[flagged(0.999)], reasons=["file cap: 2 files"])
     report = fuse(_outcome_from(result), complete_run())
     assert report.verdict == "BLOCK"
     assert "file cap" in report.reason
@@ -284,10 +284,10 @@ def test_directory_coverage_failure_preserves_a_real_read_attack(monkeypatch, tm
     from run.staging import StagingLimits
 
     (tmp_path / ".git").mkdir()
-    result = real_scan_result(findings=[flagged(0.97)])
+    result = real_scan_result(findings=[flagged(0.999)])
     result.stats.dirs_skipped = 1
     monkeypatch.setattr(importlib.import_module("read.scan"), "scan", lambda *a: result)
     outcome = default_read_scanner(tmp_path, staging_limits=StagingLimits(max_entries=0))
     assert outcome.status == State.ERROR
-    assert outcome.max_score == 0.97
+    assert outcome.max_score == 0.999
     assert fuse(outcome, complete_run()).verdict == "BLOCK"

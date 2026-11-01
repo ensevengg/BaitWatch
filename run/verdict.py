@@ -1,24 +1,64 @@
-"""Provisional verdict fusion: READ outcome plus RUN evidence -> VerdictReport.
+"""Verdict fusion: READ outcome plus RUN evidence -> VerdictReport.
 
-The thresholds here are provisional until agreed with Manan; the fixed rules
-are already binding: any exception, timeout, truncated scan, missing component,
-READ incomplete/unavailable or RUN error is at least FLAG, never ALLOW, and any
-non-registry sink contact or honeytoken sent over the network is BLOCK. A
-decoy that only reads a honeytoken FLAGs. Validated plain DNS lookups and
-hello-only TLS contacts to the exact hosts in REGISTRY_HOSTS do not affect
-the verdict. Other registry contacts remain attempts and FLAG instead of
-BLOCK. The judge inside READ may
-escalate but never clears a high READ score, so fusion sees only the resulting
-top score.
+A READ attack verdict BLOCKs at the pinned checkpoint's `hard_high` score
+(`read/model_config.json`) and FLAGs below it. Any exception, timeout,
+truncated scan, missing component, READ incomplete/unavailable or RUN error is
+at least FLAG, never ALLOW, and any non-registry sink contact or honeytoken
+sent over the network is BLOCK. A decoy that only reads a honeytoken FLAGs.
+Validated plain DNS lookups and hello-only TLS contacts to the exact hosts in
+REGISTRY_HOSTS do not affect the verdict. Other registry contacts remain
+attempts and FLAG instead of BLOCK. The judge inside READ may escalate but
+never clears a high READ score, so fusion sees only the resulting top score.
 """
 
+import json
+import math
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from run.evidence import CommandResult, NetworkHit, ReadEvidence, RunEvidence, State, VerdictReport
 
-# Provisional until agreed with Manan.
-READ_BLOCK_SCORE = 0.9
+READ_BLOCK_FALLBACK = 0.9
+# The sibling package's file, never one found through sys.path: a scanned repo
+# in the working directory could otherwise supply its own pin.
+READ_MODEL_CONFIG = Path(__file__).resolve().parents[1] / "read" / "model_config.json"
+_PIN_MAX_BYTES = 64 * 1024
+
+
+def pinned_read_block_score(path: Path = READ_MODEL_CONFIG) -> float:
+    """READ's pinned `hard_high`, or the lower fallback if the pin is missing or invalid.
+
+    Read as plain JSON: importing the `read` package loads torch.
+    """
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(_PIN_MAX_BYTES + 1)
+        if len(raw) > _PIN_MAX_BYTES:
+            return READ_BLOCK_FALLBACK
+        value = json.loads(raw)["thresholds"]["hard_high"]
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return READ_BLOCK_FALLBACK
+    if type(value) not in (int, float):
+        return READ_BLOCK_FALLBACK
+    try:
+        value = float(value)
+    except OverflowError:
+        return READ_BLOCK_FALLBACK
+    return value if math.isfinite(value) and 0.0 < value <= 1.0 else READ_BLOCK_FALLBACK
+
+
+READ_BLOCK_SCORE = pinned_read_block_score()
+
+
+def _read_score(score: float) -> str:
+    """Four decimals, or the exact value when rounding would cross the block cutoff."""
+    text = f"{score:.4f}"
+    if (float(text) >= READ_BLOCK_SCORE) != (score >= READ_BLOCK_SCORE):
+        return repr(score)
+    return text
+
+
 CAGE_HOME = "/cage/home"
 REGISTRY_HOSTS = (
     "pypi.org",
@@ -265,14 +305,17 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         tokens = ", ".join(dict.fromkeys(hit.token_id for hit in sent))
         blockers.append(_bounded(f"honeytoken hit(s) sent over the network: {tokens}"))
     if read.verdict == "attack" and read.max_score >= READ_BLOCK_SCORE:
-        blockers.append(f"READ top score {read.max_score:.2f} reaches the block threshold")
+        blockers.append(
+            f"READ top score {_read_score(read.max_score)} reaches the block cutoff "
+            f"{READ_BLOCK_SCORE!r}"
+        )
 
     if read.status is not State.COMPLETE:
         flags.append(_bounded(read.reason or "READ did not run"))
     elif read.verdict == "clean":
         pass
     elif read.verdict == "attack":
-        flags.append(f"READ flagged injection content with top score {read.max_score:.2f}")
+        flags.append(f"READ flagged injection content with top score {_read_score(read.max_score)}")
     elif read.verdict == "incomplete":
         flags.append(_bounded(f"READ coverage is incomplete: {read.reason}"))
     else:

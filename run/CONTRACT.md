@@ -25,7 +25,7 @@ An empty list means nothing was recorded. It does not mean the component ran. Ev
 
 ## VerdictReport
 
-The proposed `VerdictReport` has three verdicts, `ALLOW`, `FLAG` and `BLOCK`, and defaults to `FLAG`. The Python model and the generated JSON Schema both reject `ALLOW` unless READ and every RUN component are complete and there are no errors or honeytoken hits. This guard only checks structure. A provisional fusion truth table lives in `run/verdict.py` (`baitwatch scan` uses it); its thresholds are not agreed yet.
+The proposed `VerdictReport` has three verdicts, `ALLOW`, `FLAG` and `BLOCK`, and defaults to `FLAG`. The Python model and the generated JSON Schema both reject `ALLOW` unless READ and every RUN component are complete and there are no errors or honeytoken hits. This guard only checks structure. The fusion truth table lives in `run/verdict.py` (`baitwatch scan` uses it). Its READ block cutoff is the pinned `hard_high` from `read/model_config.json` when that value is usable. Otherwise fusion uses 0.9.
 
 The READ finding fields are left out on purpose. Manan owns that part of the contract. The team should agree on the finding format and on what counts as complete before any component depends on this proposal.
 
