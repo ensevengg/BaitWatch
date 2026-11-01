@@ -81,6 +81,24 @@ def scan_cases(root: Path, det: Detector, cfg: ReadConfig) -> dict[str, dict[str
             for d in sorted(p for p in root.iterdir() if p.is_dir())}
 
 
+def clone_repo_ids(root: Path) -> dict[str, str]:
+    """Clone dir name -> "owner/name", from the lock file next to the clones.
+
+    The FPR corpus names clones by repo name only (``corpus_lock.json`` keeps
+    the URL); test carriers use ``owner__name`` (``carriers_lock.json`` is
+    keyed by ``owner/name``). Dirs missing from the lock are left out.
+    """
+    ids: dict[str, str] = {}
+    corpus_lock, carriers_lock = root / "corpus_lock.json", root / "carriers_lock.json"
+    if corpus_lock.exists():
+        for name, meta in json.loads(corpus_lock.read_text()).items():
+            ids[name] = meta["url"].rstrip("/").removeprefix("https://github.com/")
+    if carriers_lock.exists():
+        for full in json.loads(carriers_lock.read_text()):
+            ids[full.replace("/", "__")] = full
+    return ids
+
+
 def threshold_at_fpr(benign_scores: np.ndarray, target: float) -> float:
     """Smallest threshold with FPR <= target (scores >= t are flagged)."""
     s = np.sort(benign_scores)[::-1]
@@ -141,11 +159,15 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
                 aditya[key] = scores.get(e["file"], 0.0)
 
     corpus_files: dict[str, float] = {}
+    scanned: set[str] = set()     # "owner/name:path", to skip the same file in the agent-file lock
     corpus_cfg = _cfg(model, max_files=corpus_max_files)
     for root in (HOME / "benign-corpus", HOME / "v17_raw/carriers/test"):
+        ids = clone_repo_ids(root)
         for repo in sorted(p for p in root.iterdir() if p.is_dir()):
             for f, s in file_scores(repo, det, corpus_cfg).items():
                 corpus_files[f"{repo.name}:{f}"] = s
+                if repo.name in ids:
+                    scanned.add(f"{ids[repo.name]}:{f}".lower())
 
     # Held-out real agent files (repos never trained on): the harmless voice
     # users hit most, scored one file at a time.
@@ -155,14 +177,10 @@ def evaluate(model: Path, own_threshold: float | None, corpus_max_files: int = 8
         from read.data.v17.agentfiles import PERMISSIVE, split_for_repo
         from read.data.v17.sources import TEST_REPOS, TRAIN_REPOS
         lock = json.loads(lock_path.read_text())
-        # Corpus and test-carrier clones are already scored above (dirs named
-        # "name" or "owner__name"); skip their lock entries so no file counts twice.
-        scanned = {k.lower() for k in corpus_files}
         for key, meta in sorted(lock["files"].items()):
-            repo, path = meta["repo"], meta["path"]
-            if {f'{repo.rsplit("/", 1)[-1]}:{path}'.lower(),
-                    f'{repo.replace("/", "__")}:{path}'.lower()} & scanned:
-                continue
+            repo = meta["repo"]
+            if f'{repo}:{meta["path"]}'.lower() in scanned:
+                continue    # already scored from a corpus or test-carrier clone
             if (meta.get("license") in PERMISSIVE
                     and split_for_repo(repo, TRAIN_REPOS, TEST_REPOS) == "test_planted"):
                 path = HOME / "v17_raw/agentfiles/files" / meta["local"]

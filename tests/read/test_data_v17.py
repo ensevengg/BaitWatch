@@ -168,3 +168,14 @@ def test_live_gpu_tolerates_unsupported_fields(monkeypatch):
     monkeypatch.setattr(live.subprocess, "run", lambda *a, **k: Proc())
     g = live.gpu()
     assert g["util"] is None and g["power"] is None and g["mem_used"] == 4100
+
+
+def test_clone_repo_ids_use_full_repo_identity(tmp_path):
+    from read.training.eval_v17 import clone_repo_ids
+
+    (tmp_path / "corpus_lock.json").write_text(json.dumps(
+        {"cli": {"url": "https://github.com/httpie/cli", "commit": "x", "why": ""}}))
+    (tmp_path / "carriers_lock.json").write_text(json.dumps({"astral-sh/ruff": {}}))
+    ids = clone_repo_ids(tmp_path)
+    assert ids == {"cli": "httpie/cli", "astral-sh__ruff": "astral-sh/ruff"}
+    assert clone_repo_ids(tmp_path / "missing") == {}
