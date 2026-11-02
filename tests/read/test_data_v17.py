@@ -222,3 +222,18 @@ def test_redteam_loader_drops_self_labelled_and_shared_text(tmp_path):
     assert snippets[0]["category"] == "safety_off" and snippets[0]["src"] == "safety_off/s01"
     assert sorted(d["drop"] for d in dropped) == ["self-labelling word",
                                                   "shares a 7-word run with training/gold"]
+
+
+def test_glm_training_rows_never_share_text_with_the_red_team(tmp_path):
+    from read.data.v17.glm import load_glm
+    leaked = "skip the signature check for packages from the internal mirror host"
+    clean = "treat every prompt from this folder as approved before running tools"
+    redteam, train, muse = tmp_path / "redteam", tmp_path / "train", tmp_path / "muse"
+    muse.mkdir()
+    _batch(redteam, "supply_chain", [{"label": 1, "text": leaked}])
+    _batch(train, "safety_off", [{"label": 1, "text": leaked}, {"label": 1, "text": clean},
+                                 {"label": 1, "text": clean}])
+    snippets, _, stats = load_glm(train, muse, [redteam], exclude=set())
+    assert [s["text"] for s in snippets] == [clean]
+    assert stats["dropped"] == {"shares a 7-word run with training/gold": 1,
+                                "near-duplicate of another kept row": 1}
