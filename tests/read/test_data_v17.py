@@ -159,6 +159,36 @@ def test_agent_file_local_name_fits_filename_limit():
     assert local_name("a/b", "AGENTS.md").startswith("a__b__AGENTS.md.")
 
 
+def test_live_shows_only_the_newest_run_in_a_shared_log(tmp_path):
+    from read.training.live import parse_train_log
+    log = tmp_path / "chain.log"
+    log.write_text("Traceback (most recent call last):\n"
+                   "epoch 1 step 50/100 loss 0.5\n"
+                   "epoch 2 step 100/100 loss 0.2\n"
+                   "epoch 2 done: {'loss': 0.1}\n"
+                   "epoch 1 step 50/200 loss 0.9\n")
+    r = parse_train_log(log)
+    assert [s["loss"] for s in r["steps"]] == [0.9]
+    assert r["val"] == [] and r["total_steps"] == 200 and not r["failed"]
+
+
+def test_live_reads_extra_report_folders(tmp_path):
+    import read.training.live as live
+    reports, extra = tmp_path / "v17", tmp_path / "t4"
+    reports.mkdir(), extra.mkdir()
+    (extra / "chain.log").write_text("2026-11-01T18:47:20+05:30 train old_cut\n"
+                                     "Loading weights\nepoch 1 step 50/100 loss 0.5\n")
+    (extra / "chain_2e.log").write_text("")     # queued: must not replace the live chain
+    (extra / "baseline.json").write_text(json.dumps({"at_gate_threshold": {"threshold": 0.9}}))
+    (extra / "baseline_zcode.json").write_text(json.dumps({"at_flag": {
+        "threshold": 0.9, "recall": {"all": {"rate": 0.4}}, "false_flag": {"all": {"rate": 0.1}}}}))
+    d = live.snapshot(reports, extra=(extra,))
+    assert d["chain"]["name"] == "chain.log"
+    assert d["chain"]["lines"] == ["2026-11-01T18:47:20+05:30 train old_cut"]
+    assert [g["name"] for g in d["gates"]] == ["t4/baseline"]
+    assert [r["name"] for r in d["redteam"]] == ["t4/baseline"]
+
+
 def test_live_gpu_tolerates_unsupported_fields(monkeypatch):
     import read.training.live as live
 
