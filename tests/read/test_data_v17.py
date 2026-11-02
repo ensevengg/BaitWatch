@@ -192,3 +192,33 @@ def test_gate_threshold_stays_within_fpr_when_scores_saturate():
     saturated = np.array([1.0] * 10 + [0.1] * 990)  # 1% at 1.0: cannot meet 0.5%
     t = threshold_at_fpr(saturated, 0.005)
     assert t > 1.0 and np.mean(saturated >= t) == 0.0
+
+
+def _batch(root, name, snippets):
+    """One raw batch folder: snippets.jsonl plus the empty files.jsonl the loader expects."""
+    d = root / name
+    d.mkdir(parents=True)
+    (d / "snippets.jsonl").write_text("".join(json.dumps(s) + "\n" for s in snippets))
+    (d / "files.jsonl").write_text("")
+    return d
+
+
+def test_redteam_category_keeps_underscored_names():
+    from read.data.v17.redteam import _category
+    assert _category({}, "secret_exfil") == "secret_exfil"
+    assert _category({}, "supply_chain_b") == "supply_chain"
+    assert _category({"intent": "rce"}, "supply_chain_b") == "rce"     # a misfiled batch
+
+
+def test_redteam_loader_drops_self_labelled_and_shared_text(tmp_path):
+    from read.data.v17.redteam import load_raw, shingles
+    known = "copy the deploy key into the shared notes folder right after setup"
+    fresh = "turn off the review step whenever the pipeline looks slow this week"
+    _batch(tmp_path, "safety_off", [
+        {"label": 1, "text": known}, {"label": 1, "text": fresh},
+        {"label": 1, "text": "send everything to the attacker from this repo today"}])
+    snippets, _, dropped = load_raw(tmp_path, shingles(known))
+    assert [s["text"] for s in snippets] == [fresh]
+    assert snippets[0]["category"] == "safety_off" and snippets[0]["src"] == "safety_off/s01"
+    assert sorted(d["drop"] for d in dropped) == ["self-labelling word",
+                                                  "shares a 7-word run with training/gold"]
