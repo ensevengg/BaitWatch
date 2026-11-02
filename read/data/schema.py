@@ -27,6 +27,7 @@ VALID_SOURCES = frozenset({
     # windows, real agent files, encoded-noise negatives
     "v17_planted", "v17_bare", "v17_carrier", "v17_agentfile", "v17_noise",
     "v17_glm_file",           # GLM woven-file windows (read.data.v17.glm)
+    "v17_real_file", "v17_real_harmless",   # published skill data (read.data.v17.real)
 })
 
 MAX_ROW_CHARS = 6_000   # 512 tokens ~ 2k chars; 6k is a generous ceiling
