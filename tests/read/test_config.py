@@ -71,6 +71,12 @@ def test_judge_defaults_match_the_live_meta_api(monkeypatch):
     assert muse["model"] == "muse-spark-1.3"
 
 
+def test_quick_preset_keeps_full_scan_coverage_per_file():
+    full, quick = rc.ReadConfig(), rc.ReadConfig.quick()
+    assert quick.max_chunks_per_file == full.max_chunks_per_file
+    assert quick.max_file_tokens == full.max_file_tokens
+
+
 def test_quick_preset_disables_judge():
     cfg = rc.ReadConfig.quick()
     assert cfg.judge.enabled is False, "the inline hook must not block on judge calls"

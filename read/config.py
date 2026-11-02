@@ -171,18 +171,21 @@ class ReadConfig:
 
     @classmethod
     def quick(cls) -> "ReadConfig":
-        """Inline-hook preset: agent-config files first, tight caps.
+        """Inline-hook preset: agent-config files first, capped file count.
 
         The walker's priority ordering guarantees AGENTS.md/CLAUDE.md/README
         and .claude settings are scanned before anything else, so the highest
-       -risk files are always covered within the budget; everything past the
-        caps is reported via stats.truncated_scan / views_dropped and treated
-        as incomplete evidence by the verdict engine.
+       -risk files are always covered within the budget. A repo over the file
+        cap is reported via stats.truncated_scan and treated as incomplete.
+
+        Per-file coverage matches a full scan: a tighter chunk cap let a
+        payload in the middle of a long file read as clean. The middle of a
+        file over max_file_tokens is still skipped, and only strict_coverage
+        makes that incomplete.
         """
         cfg = cls()
         cfg.walker.max_files = 400
-        cfg.max_chunks_per_file = 8
-        cfg.max_file_tokens = 8_000
+        cfg.max_chunks_per_file = 64
         # The inline hook must not block on judge round-trips: detector-only.
         # Review-band chunks it surfaces are reported as unjudged/incomplete
         # (see read/scan.py), never silently clean.
