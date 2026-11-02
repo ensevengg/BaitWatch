@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("at_flag", "at_review"):
         b = rep[name]
         print(f"{name} t={b['threshold']}: recall {b['recall']['all']} "
-              f"false_flag {b['false_flag']['all']}")
+              f"false_flag {b.get('false_flag', {}).get('all')}")
         for k, v in b["recall"].items():
             if k != "all":
                 print(f"  {k:32s} {v['rate']}  (n={v['n']})")

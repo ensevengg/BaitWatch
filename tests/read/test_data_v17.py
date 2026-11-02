@@ -267,3 +267,15 @@ def test_glm_training_rows_never_share_text_with_the_red_team(tmp_path):
     assert [s["text"] for s in snippets] == [clean]
     assert stats["dropped"] == {"shares a 7-word run with training/gold": 1,
                                 "near-duplicate of another kept row": 1}
+def test_live_shows_a_column_per_heldout_set_and_tolerates_no_harmless_rows(tmp_path):
+    import read.training.live as live
+    (tmp_path / "m_malware.json").write_text(json.dumps({"at_flag": {
+        "threshold": 0.9, "recall": {"all": {"rate": 0.1}},
+        "false_flag": {"all": {"rate": 0.0, "n": 223}}}}))
+    (tmp_path / "m_aditya1.json").write_text(json.dumps({"at_flag": {
+        "threshold": 0.9, "recall": {"all": {"rate": 0.5}}}}))
+    (tmp_path / "m_other.json").write_text(json.dumps({"at_flag": {}}))
+    rows = live.redteam_reports(tmp_path)
+    assert [r["name"] for r in rows] == ["m"]
+    assert rows[0]["malware"]["ff_n"] == 223 and rows[0]["aditya1"]["ff"] is None
+    assert "other" not in rows[0]

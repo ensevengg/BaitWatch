@@ -124,7 +124,7 @@ details summary { cursor: pointer; color: var(--text-secondary); }
       <pre id="chain" class="muted" style="white-space:pre-wrap;font-size:12px;margin:0">No chain log yet.</pre>
     </div>
     <div class="card">
-      <h2>GLM red-team <span class="muted" style="font-weight:400">(at each model's gate threshold)</span></h2>
+      <h2>Held-out attacks caught <span class="muted" style="font-weight:400">(at each model's gate threshold; FF = harmless files flagged)</span></h2>
       <div id="redteam" class="muted">No red-team reports yet.</div>
     </div>
   </section>
@@ -317,10 +317,10 @@ function renderExtras(d) {
   const rt = d.redteam || [];
   if (rt.length) {
     $("redteam").classList.remove("muted");
-    const cell = (x) => x ? `<td class="num">${fmtPct(x.recall)}</td><td class="num">${fmtPct(x.ff)}</td>` : `<td class="num">–</td><td class="num">–</td>`;
-    $("redteam").innerHTML = `<table><tr><th>Model</th><th class="num">zcode recall</th><th class="num">zcode false flags</th>
-      <th class="num">opencode recall</th><th class="num">opencode false flags</th><th class="num">Threshold</th></tr>` +
-      rt.map(r => `<tr><td>${esc(r.name)}</td>${cell(r.zcode)}${cell(r.opencode)}<td class="num">${fmtNum(r.threshold, 4)}</td></tr>`).join("") + `</table>`;
+    const sets = Object.entries(d.redteam_sets || {}).filter(([k]) => rt.some(r => r[k]));
+    const cell = (x) => !x ? `<td class="num">–</td>` : `<td class="num">${fmtPct(x.recall)}${x.ff_n ? `<span class="muted"> · ${fmtPct(x.ff)} FF</span>` : ""}</td>`;
+    $("redteam").innerHTML = `<table><tr><th>Model</th>${sets.map(([, n]) => `<th class="num">${esc(n)}</th>`).join("")}<th class="num">Threshold</th></tr>` +
+      rt.map(r => `<tr><td>${esc(r.name)}</td>${sets.map(([k]) => cell(r[k])).join("")}<td class="num">${fmtNum(r.threshold, 4)}</td></tr>`).join("") + `</table>`;
   }
 }
 

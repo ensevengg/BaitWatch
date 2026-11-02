@@ -30,6 +30,10 @@ STAGES = (("read.training.train", "training"), ("read.training.tune_threshold", 
           ("read.data.v17.build", "building data"))
 STAMPED_RE = re.compile(r"^\d{4}-\d\d-\d\dT")
 TRAIN_MARK_RE = re.compile(r"^\S+ train (\S+)")
+# Report files are <model>_<set>.json, shown in this order. Set names hold no underscore.
+REDTEAM_SETS = {"malware": "Real malware", "aditya0": "Aditya bare", "aditya1": "Aditya placed 1",
+                "aditya2": "Aditya placed 2", "aditya3": "Aditya placed 3", "zcode": "GLM weak",
+                "strong": "GLM strong", "opencode": "GLM other"}
 
 
 def _procs() -> list[dict]:
@@ -139,18 +143,19 @@ def gate_reports(reports: Path, prefix: str = "") -> list[dict]:
 
 
 def redteam_reports(root: Path, prefix: str = "") -> list[dict]:
-    """GLM red-team results: one row per model, zcode and opencode sets side by side."""
+    """Held-out attack sets: one row per model, one column per set."""
     rows: dict[str, dict] = {}
     for p in root.glob("*_*.json"):
         name, _, rt_set = p.stem.rpartition("_")
-        if rt_set not in ("zcode", "opencode"):
+        if rt_set not in REDTEAM_SETS:
             continue
         try:
             a = json.loads(p.read_text())["at_flag"]
         except (OSError, json.JSONDecodeError, KeyError):
             continue
         r = rows.setdefault(name, {"name": prefix + name, "mtime": 0.0})
-        r[rt_set] = {"recall": a["recall"]["all"]["rate"], "ff": a["false_flag"]["all"]["rate"]}
+        ff = a.get("false_flag", {}).get("all", {})
+        r[rt_set] = {"recall": a["recall"]["all"]["rate"], "ff": ff.get("rate"), "ff_n": ff.get("n")}
         r["threshold"] = a.get("threshold")
         r["mtime"] = max(r["mtime"], p.stat().st_mtime)
     return sorted(rows.values(), key=lambda r: r["mtime"])
@@ -226,6 +231,7 @@ def snapshot(reports: Path, log_override: Path | None = None,
                              *(r for d in extra for r in gate_reports(d, f"{d.name}/"))),
                             key=lambda r: r["mtime"]),
             "target": {"recall": 0.96, "fpr": 0.005},
+            "redteam_sets": REDTEAM_SETS,
             "redteam": sorted((*redteam_reports(reports.parent / "redteam"),
                                *(r for d in extra for r in redteam_reports(d, f"{d.name}/"))),
                               key=lambda r: r["mtime"]),
