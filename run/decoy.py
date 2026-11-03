@@ -155,9 +155,7 @@ def _run_tool(sandbox: Sandbox, call: ToolCall) -> tuple[CommandResult, str]:
     arguments = call.arguments if isinstance(call.arguments, dict) else {}
     value = arguments.get(key, _DEFAULTS.get(name))
     if not isinstance(value, str) or not value:
-        return _failed_call(
-            sandbox, call, name, f"{name} requires a nonempty string {key!r}"
-        )
+        return _failed_call(sandbox, call, name, f"{name} requires a nonempty string {key!r}")
     if "\0" in value:
         return _failed_call(sandbox, call, name, f"{name} argument must not contain NUL")
     result = sandbox.exec(_argv(name, value))

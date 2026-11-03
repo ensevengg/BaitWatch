@@ -680,12 +680,12 @@ def test_file_scan_planted_file_with_foreign_token_hits_and_own_token_does_not(t
     from run.honeytokens import scan_files
 
     own = HT("ht-own", "BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w", ".env", "API_KEY")
-    foreign = HT("ht-foreign", "BAITWATCH_FAKE_m3xyn52wkr2gs3tufyq6", ".env.local", "DATABASE_PASSWORD")
+    foreign = HT(
+        "ht-foreign", "BAITWATCH_FAKE_m3xyn52wkr2gs3tufyq6", ".env.local", "DATABASE_PASSWORD"
+    )
     planted = {".env": {own.token_id}, ".env.local": {foreign.token_id}}
     (tmp_path / ".env").write_text(f"API_KEY={own.value}\nDATABASE_PASSWORD={foreign.value}\n")
-    scan = scan_files(
-        tmp_path, [FileDiff(path=".env", change="modified")], (own, foreign), planted
-    )
+    scan = scan_files(tmp_path, [FileDiff(path=".env", change="modified")], (own, foreign), planted)
     assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-foreign", "file")]
     (tmp_path / ".env").write_text(f"API_KEY={own.value}\n")
     own_only = scan_files(

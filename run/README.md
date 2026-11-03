@@ -122,7 +122,7 @@ logs or reports), `BAITWATCH_DECOY_FALLBACK_BASE_URL`,
 (optional; one of `low`, `medium`, `high`; unset sends no `reasoning_effort`
 field, and an invalid value is an error; reasoning tokens count against the
 decoy token budget), `BAITWATCH_DECOY_FALLBACK_REASONING_EFFORT` (same, for
-the fallback backend), and `BAITWATCH_PWNRATE_RUNS` (default 10).
+the fallback backend), and `BAITWATCH_PWNRATE_RUNS` (default 10); an empty-string value is treated as unset.
 Model tiers that allow the provider to train on sent text (such as Muse Spark's "contributor" tier) must not be used to scan private repositories, because the decoy sends repository contents to the model.
 The report JSON and Markdown table give, per repo: runs, runs with a counted
 sink hit, runs with honeytoken hits, verdict counts, pwn rate, p50/p95 latency,
@@ -279,3 +279,4 @@ The sandbox boundary has its own [known limits](SANDBOX.md#known-limits); the tw
 - During the response-header phase, the OpenAI-compatible backend is bounded only by the per-read socket timeout. An endpoint that sends headers slowly can push one model call past the decoy wall budget. The scan stays non-ALLOW when that happens.
 - When a call fails after the wall deadline, the decoy records `DECOY_TIME_BUDGET`, and the underlying error kind isn't shown.
 - If the cage deadline expires during model inference and that call then fails, it's recorded as `DECOY_FAILED`, not a deadline code (`DECOY_DEADLINE` is only checked between calls). It's still non-ALLOW.
+- A honeytoken value split across two files or two entries is not detected.

@@ -121,9 +121,7 @@ def test_failed_dispatch_arguments_are_recorded_in_transcript():
     token = Honeytoken("ht-x", "BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w", ".env", "API_KEY")
     sandbox = FakeSandbox()
     backend = FakeBackend(
-        LLMReply(
-            tool_calls=[ToolCall(id="1", name="bogus", arguments={"command": token.value})]
-        ),
+        LLMReply(tool_calls=[ToolCall(id="1", name="bogus", arguments={"command": token.value})]),
         LLMReply(text="done"),
     )
     run_decoy(sandbox, backend)
@@ -135,7 +133,9 @@ def test_failed_dispatch_arguments_are_recorded_in_transcript():
     sandbox2 = FakeSandbox()
     backend2 = FakeBackend(
         LLMReply(
-            tool_calls=[ToolCall(id="1", name="run_cmd", arguments={"command": 42, "x": token.value})]
+            tool_calls=[
+                ToolCall(id="1", name="run_cmd", arguments={"command": 42, "x": token.value})
+            ]
         ),
         LLMReply(text="done"),
     )
@@ -152,9 +152,7 @@ def test_transcript_overflow_marks_incomplete_and_non_allow():
     sandbox = FakeSandbox()
     sandbox.decoy_transcript = ["x" * TRANSCRIPT_CHARS]
     backend = FakeBackend(
-        LLMReply(
-            tool_calls=[ToolCall(id="1", name="bogus", arguments={"command": "y"})]
-        ),
+        LLMReply(tool_calls=[ToolCall(id="1", name="bogus", arguments={"command": "y"})]),
         LLMReply(text="done"),
     )
     run_decoy(sandbox, backend)
@@ -166,16 +164,16 @@ def test_transcript_overflow_marks_incomplete_and_non_allow():
     real = Sandbox.__new__(Sandbox)
     real.decoy_transcript = list(sandbox.decoy_transcript)
     real.decoy_transcript_incomplete = True
-    real._honeytokens = (Honeytoken("ht-x", "BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w", ".env", "API_KEY"),)
+    real._honeytokens = (
+        Honeytoken("ht-x", "BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w", ".env", "API_KEY"),
+    )
     real._honeytoken_scanned = False
     real._sink_logs = {}
     real.evidence = RunEvidence()
     real._scan_honeytokens()
     assert any(e.code == "HONEYTOKEN_SCAN_INCOMPLETE" for e in real.evidence.errors)
     evidence = sandbox.evidence
-    evidence.components = RunComponents(
-        **{k: State.COMPLETE for k in RunComponents.model_fields}
-    )
+    evidence.components = RunComponents(**{k: State.COMPLETE for k in RunComponents.model_fields})
     evidence.errors.append(RunError(code="HONEYTOKEN_SCAN_INCOMPLETE", message="bound"))
     evidence.status = "error"
     assert fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), evidence).verdict != "ALLOW"
