@@ -603,11 +603,19 @@ class FallbackBackend:
         return replace(reply, backend=self.last_backend)
 
 
-def make_backend_with_fallback(primary_spec: str, fallback_spec: str | None = None) -> LLMBackend:
-    primary = make_backend(primary_spec)
+def _effort_from_env(name: str) -> str | None:
+    return _validated_reasoning_effort(os.environ.get(name) or None, source=name)
+
+
+def make_backend_with_fallback(
+    primary_spec: str, fallback_spec: str | None = None, prefix: str = "BAITWATCH_DECOY"
+) -> LLMBackend:
+    effort = _effort_from_env(f"{prefix}_REASONING_EFFORT")
+    fb_effort = _effort_from_env(f"{prefix}_FALLBACK_REASONING_EFFORT")
+    primary = make_backend(primary_spec, reasoning_effort=effort)
     if not fallback_spec:
         return primary
-    return FallbackBackend(primary, make_backend(fallback_spec))
+    return FallbackBackend(primary, make_backend(fallback_spec, reasoning_effort=fb_effort))
 
 
 def backend_from_env(prefix: str = "BAITWATCH_DECOY") -> LLMBackend | None:
@@ -617,10 +625,7 @@ def backend_from_env(prefix: str = "BAITWATCH_DECOY") -> LLMBackend | None:
         return None
     if not base_url or not model:
         raise ValueError(f"{prefix}_BASE_URL and {prefix}_MODEL must be set together")
-    effort = _validated_reasoning_effort(
-        os.environ.get(f"{prefix}_REASONING_EFFORT") or None,
-        source=f"{prefix}_REASONING_EFFORT",
-    )
+    effort = _effort_from_env(f"{prefix}_REASONING_EFFORT")
     primary = OpenAICompatBackend(
         base_url,
         model,
@@ -635,17 +640,14 @@ def backend_from_env(prefix: str = "BAITWATCH_DECOY") -> LLMBackend | None:
         raise ValueError(
             f"{prefix}_FALLBACK_BASE_URL and {prefix}_FALLBACK_MODEL must be set together"
         )
-    fb_effort = _validated_reasoning_effort(
-        os.environ.get(f"{prefix}_FALLBACK_REASONING_EFFORT") or None,
-        source=f"{prefix}_FALLBACK_REASONING_EFFORT",
-    )
+    fb_effort = _effort_from_env(f"{prefix}_FALLBACK_REASONING_EFFORT")
     fallback = OpenAICompatBackend(
         fb_url, fb_model, temperature=0, seed=0, reasoning_effort=fb_effort
     )
     return FallbackBackend(primary, fallback)
 
 
-def make_backend(spec: str) -> LLMBackend:
+def make_backend(spec: str, reasoning_effort: str | None = None) -> LLMBackend:
     if not isinstance(spec, str) or ":" not in spec:
         raise ValueError("LLM spec must be scripted:PATH, ollama:MODEL, or openai:BASE_URL#MODEL")
     kind, _, argument = spec.partition(":")
@@ -654,7 +656,9 @@ def make_backend(spec: str) -> LLMBackend:
     if kind == "scripted":
         return ScriptedBackend.from_json(argument)
     if kind == "ollama":
-        return OpenAICompatBackend("http://127.0.0.1:11434/v1", argument)
+        return OpenAICompatBackend(
+            "http://127.0.0.1:11434/v1", argument, reasoning_effort=reasoning_effort
+        )
     if kind == "openai":
         parts = argument.split("#")
         if len(parts) not in (2, 3) or any(not part for part in parts):
@@ -663,5 +667,6 @@ def make_backend(spec: str) -> LLMBackend:
             parts[0],
             parts[1],
             api_key_env=parts[2] if len(parts) == 3 else None,
+            reasoning_effort=reasoning_effort,
         )
     raise ValueError(f"unknown LLM backend {kind!r}")

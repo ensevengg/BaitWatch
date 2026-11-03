@@ -153,7 +153,7 @@ def test_cli_configs_give_cage_grace_beyond_wall_budget(monkeypatch, tmp_path):
         seen.setdefault("configs", []).append(kwargs["config"])
         return complete
 
-    monkeypatch.setattr("run.llm.make_backend", lambda spec: "backend", raising=False)
+    monkeypatch.setattr("run.llm.make_backend", lambda spec, **_: "backend", raising=False)
     monkeypatch.setattr("run.cli.detonate", fake_detonate)
     monkeypatch.setattr("run.scan_cli.make_backend_with_fallback", lambda spec, fb=None: object())
     monkeypatch.setattr("run.scan.detonate", fake_detonate)

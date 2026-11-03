@@ -376,7 +376,7 @@ def _complete_evidence() -> RunEvidence:
 def test_decoy_cli_passes_backend_spec_and_steps(monkeypatch, tmp_path):
     seen: dict = {}
 
-    def fake_make_backend(spec):
+    def fake_make_backend(spec, **_):
         seen["spec"] = spec
         return "backend"
 
@@ -397,7 +397,7 @@ def test_decoy_cli_passes_backend_spec_and_steps(monkeypatch, tmp_path):
 
 
 def test_decoy_cli_exit_zero_only_when_complete(monkeypatch, tmp_path):
-    monkeypatch.setattr("run.llm.make_backend", lambda spec: "backend", raising=False)
+    monkeypatch.setattr("run.llm.make_backend", lambda spec, **_: "backend", raising=False)
     monkeypatch.setattr("run.cli.detonate", lambda *args, **kwargs: _complete_evidence())
     result = runner.invoke(app, ["decoy", str(tmp_path), "--llm", "scripted:steps.json"])
     assert result.exit_code == 0
@@ -405,7 +405,7 @@ def test_decoy_cli_exit_zero_only_when_complete(monkeypatch, tmp_path):
 
 
 def test_decoy_cli_error_exits_three(monkeypatch, tmp_path):
-    monkeypatch.setattr("run.llm.make_backend", lambda spec: "backend", raising=False)
+    monkeypatch.setattr("run.llm.make_backend", lambda spec, **_: "backend", raising=False)
     evidence = RunEvidence(status="error", errors=[RunError(code="TEST", message="synthetic")])
     monkeypatch.setattr("run.cli.detonate", lambda *args, **kwargs: evidence)
     result = runner.invoke(app, ["decoy", str(tmp_path), "--llm", "scripted:steps.json"])

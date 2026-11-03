@@ -178,7 +178,9 @@ directory component, so installing packages containing agent files does not
 BLOCK, while a control path above such a directory (for example
 `.claude/skills/build/SKILL.md`) still BLOCKs. `.git/config` and `.git/hooks`
 remain protected even inside those trees. Ordinary setup writes (build output, dependencies, environments, lockfiles and source files) alone
-remain eligible for ALLOW with clean READ and a complete executed decoy.
+remain eligible for ALLOW with clean READ and a complete executed decoy, as long as they stay
+within the honeytoken file scan's limits: 1,024 added or modified files, 1 MiB per file and
+16 MiB in total. Past those limits the scan records `HONEYTOKEN_SCAN_INCOMPLETE` and FLAGs.
 
 `FileDiff.is_truncated` defaults to false and is set by the runner from the
 trusted before/after manifests for counted repository files; it does not change

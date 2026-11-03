@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from run.llm import (
+    FallbackBackend,
     LLMError,
     LLMReply,
     OpenAICompatBackend,
@@ -20,6 +21,7 @@ from run.llm import (
     _parse_reply,
     backend_from_env,
     make_backend,
+    make_backend_with_fallback,
 )
 
 ENV = "BAITWATCH_TEST_API_KEY"
@@ -543,12 +545,35 @@ def test_reasoning_effort_from_env(monkeypatch):
     monkeypatch.setenv("BAITWATCH_DECOY_BASE_URL", "http://127.0.0.1:1/v1")
     monkeypatch.setenv("BAITWATCH_DECOY_MODEL", "m")
     monkeypatch.setenv("BAITWATCH_DECOY_REASONING_EFFORT", "low")
+    monkeypatch.delenv("BAITWATCH_DECOY_FALLBACK_BASE_URL", raising=False)
+    monkeypatch.delenv("BAITWATCH_DECOY_FALLBACK_MODEL", raising=False)
     backend = backend_from_env()
     assert isinstance(backend, OpenAICompatBackend)
     assert backend.reasoning_effort == "low"
     monkeypatch.setenv("BAITWATCH_DECOY_REASONING_EFFORT", "bogus")
     with pytest.raises(ValueError, match="BAITWATCH_DECOY_REASONING_EFFORT"):
         backend_from_env()
+
+
+def test_spec_backends_take_reasoning_effort_from_env(monkeypatch):
+    monkeypatch.setenv("BAITWATCH_DECOY_REASONING_EFFORT", "low")
+    monkeypatch.setenv("BAITWATCH_DECOY_FALLBACK_REASONING_EFFORT", "high")
+    backend = make_backend_with_fallback("openai:http://127.0.0.1:1/v1#m", "ollama:f")
+    assert isinstance(backend, FallbackBackend)
+    assert backend.primary.reasoning_effort == "low"
+    assert backend.fallback.reasoning_effort == "high"
+    monkeypatch.delenv("BAITWATCH_DECOY_FALLBACK_REASONING_EFFORT")
+    single = make_backend_with_fallback("openai:http://127.0.0.1:1/v1#m")
+    assert single.reasoning_effort == "low"
+    monkeypatch.setenv("BAITWATCH_DECOY_REASONING_EFFORT", "bogus")
+    with pytest.raises(ValueError, match="BAITWATCH_DECOY_REASONING_EFFORT"):
+        make_backend_with_fallback("openai:http://127.0.0.1:1/v1#m")
+
+
+def test_spec_backends_send_no_reasoning_effort_by_default(monkeypatch):
+    monkeypatch.delenv("BAITWATCH_DECOY_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("BAITWATCH_DECOY_FALLBACK_REASONING_EFFORT", raising=False)
+    assert make_backend_with_fallback("openai:http://127.0.0.1:1/v1#m").reasoning_effort is None
 
 
 def test_make_backend_scripted(tmp_path):
