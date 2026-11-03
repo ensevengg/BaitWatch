@@ -101,6 +101,18 @@ def test_tool_calls_dispatch_through_sandbox_exec():
     ]
 
 
+def test_decoy_transcript_is_recorded_bounded():
+    sandbox = FakeSandbox()
+    backend = FakeBackend(
+        LLMReply(
+            text="intermediate note", tool_calls=[ToolCall(id="1", name="list_files", arguments={})]
+        ),
+        LLMReply(text="final summary"),
+    )
+    run_decoy(sandbox, backend)
+    assert sandbox.decoy_transcript == ["intermediate note", "final summary"]
+
+
 def test_first_request_has_system_role_then_the_task_as_user():
     backend = FakeBackend(LLMReply(text="done"))
     run_decoy(FakeSandbox(), backend, task="audit the lockfile")

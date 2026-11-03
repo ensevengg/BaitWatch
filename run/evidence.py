@@ -52,7 +52,7 @@ class NetworkHit(StrictModel):
 
 class HoneytokenHit(StrictModel):
     token_id: str
-    source: Literal["dns", "http", "tls", "tool_log", "transcript"]
+    source: Literal["dns", "http", "tls", "tool_output", "tool_args", "transcript", "file"]
     source_ip: str | None = None
 
 
@@ -133,7 +133,7 @@ class VerdictReport(StrictModel):
             or self.run.status != "complete"
             or not self.run.components.complete()
             or self.run.errors
-            or self.run.honeytoken_hits
+            or any(hit.source != "tool_output" for hit in self.run.honeytoken_hits)
         ):
             raise ValueError(
                 "ALLOW requires complete READ/RUN checks and no errors or honeytoken hits"

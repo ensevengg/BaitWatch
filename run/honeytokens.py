@@ -384,25 +384,148 @@ def scan_sink_log(path: Path, tokens: tuple[Honeytoken, ...]) -> HoneytokenScan:
     return HoneytokenScan(scan.hits, scan.incomplete or incomplete)
 
 
-def scan_tool_results(
-    results: list[CommandResult], tokens: tuple[Honeytoken, ...]
-) -> HoneytokenScan:
-    """Search executed tool output for token values; a hit proves the decoy
-    handled a planted value, not that anything left the cage."""
+def _scan_texts(items: list[tuple[str, str]], tokens: tuple[Honeytoken, ...]) -> HoneytokenScan:
     prepared = _prepare(tokens)
     if not prepared:
         return HoneytokenScan((), False)
     hits: dict[tuple[str, str, str | None], HoneytokenHit] = {}
     incomplete = False
     scanned = 0
+    for text, source in items:
+        if scanned >= SCAN_TOTAL_BYTES:
+            incomplete = True
+            break
+        if scanned + len(text) > SCAN_TOTAL_BYTES:
+            incomplete = True
+            text = text[: SCAN_TOTAL_BYTES - scanned]
+        scanned += len(text)
+        for entry in prepared:
+            key = (entry.token.token_id, source, None)
+            if key not in hits and _search(text, "squash", entry.variants):
+                hits[key] = _hit(entry.token.token_id, source, None)
+    return HoneytokenScan(tuple(hits.values()), incomplete)
+
+
+def scan_tool_results(
+    results: list[CommandResult], tokens: tuple[Honeytoken, ...]
+) -> HoneytokenScan:
+    """Search tool results: stdout/stderr is `tool_output` (the decoy read the
+    value); the decoy's own command arguments are `tool_args` (it moved it)."""
+    items: list[tuple[str, str]] = []
     for result in results:
-        for text in (result.stdout, result.stderr, " ".join(result.command)):
-            if scanned >= SCAN_TOTAL_BYTES:
-                incomplete = True
+        for text in (result.stdout, result.stderr):
+            items.append((text, "tool_output"))
+        items.append((" ".join(result.command), "tool_args"))
+    return _scan_texts(items, tokens)
+
+
+def scan_transcript(texts: list[str], tokens: tuple[Honeytoken, ...]) -> HoneytokenScan:
+    return _scan_texts([(text, "transcript") for text in texts], tokens)
+
+
+FILE_BYTE_LIMIT = RECORD_BYTE_LIMIT
+FILE_COUNT_LIMIT = 1024
+
+
+def _read_staged_file(root: Path, rel: str) -> bytes | None:
+    """Read one staged file fd-relative without following symlinks.
+
+    Returns None when the path is unsafe, not a regular file, or unreadable;
+    the caller marks the scan incomplete in every such case.
+    """
+    parts = rel.split("/")
+    if not rel or rel.startswith("/") or any(part in ("", ".", "..") for part in parts):
+        return None
+    try:
+        dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    file_fd: int | None = None
+    try:
+        for part in parts[:-1]:
+            try:
+                metadata = os.stat(part, dir_fd=dir_fd, follow_symlinks=False)
+            except OSError:
+                return None
+            if not stat.S_ISDIR(metadata.st_mode):
+                return None
+            try:
+                next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+            except OSError:
+                return None
+            os.close(dir_fd)
+            dir_fd = next_fd
+        name = parts[-1]
+        try:
+            metadata = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            return None
+        if not stat.S_ISREG(metadata.st_mode):
+            return None
+        try:
+            file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
+        except OSError:
+            return None
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode):
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(file_fd, 64 * 1024)
+            if not chunk:
                 break
-            scanned += len(text)
-            for entry in prepared:
-                key = (entry.token.token_id, "tool_log", None)
-                if key not in hits and _search(text, "squash", entry.variants):
-                    hits[key] = _hit(entry.token.token_id, "tool_log", None)
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > FILE_BYTE_LIMIT:
+                break
+        return b"".join(chunks)
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        os.close(dir_fd)
+
+
+def scan_files(
+    root: Path,
+    diffs,
+    tokens: tuple[Honeytoken, ...],
+    planted_locations: frozenset[str] | set[str] = frozenset(),
+) -> HoneytokenScan:
+    prepared = _prepare(tokens)
+    if not prepared:
+        return HoneytokenScan((), False)
+    candidates = [
+        diff.path
+        for diff in diffs
+        if diff.change in ("added", "modified")
+        and diff.path not in planted_locations
+        and not diff.path.startswith("/")
+    ]
+    hits: dict[tuple[str, str, str | None], HoneytokenHit] = {}
+    incomplete = False
+    if len(candidates) > FILE_COUNT_LIMIT:
+        incomplete = True
+        candidates = candidates[:FILE_COUNT_LIMIT]
+    scanned = 0
+    for rel in candidates:
+        if scanned >= SCAN_TOTAL_BYTES:
+            incomplete = True
+            break
+        data = _read_staged_file(root, rel)
+        if data is None:
+            incomplete = True
+            continue
+        if len(data) > FILE_BYTE_LIMIT:
+            incomplete = True
+            data = data[:FILE_BYTE_LIMIT]
+        if scanned + len(data) > SCAN_TOTAL_BYTES:
+            incomplete = True
+            data = data[: SCAN_TOTAL_BYTES - scanned]
+        scanned += len(data)
+        text = data.decode("utf-8", errors="ignore")
+        for entry in prepared:
+            key = (entry.token.token_id, "file", None)
+            if key not in hits and _search(text, "squash", entry.variants):
+                hits[key] = _hit(entry.token.token_id, "file", None)
     return HoneytokenScan(tuple(hits.values()), incomplete)

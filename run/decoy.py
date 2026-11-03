@@ -2,6 +2,7 @@
 runs inside the cage, and every call — reads included, since hash-diff only sees
 writes — lands in `tool_log`."""
 
+import contextlib
 import json
 import time
 from typing import Any
@@ -27,6 +28,7 @@ MAX_SECONDS = 120.0
 DECOY_CAGE_GRACE_SECONDS = 5
 READ_BYTES = 16 * 1024
 FEEDBACK_CHARS = 8 * 1024
+TRANSCRIPT_CHARS = 64 * 1024
 
 _ARG_KEY = {"read_file": "path", "list_files": "path", "run_cmd": "command"}
 _DEFAULTS = {"list_files": "."}
@@ -156,6 +158,29 @@ def _run_tool(sandbox: Sandbox, call: ToolCall) -> tuple[CommandResult, str]:
     ), _feedback(result)
 
 
+def _record_transcript(sandbox: Sandbox, text: str) -> None:
+    if not text:
+        return
+    store = getattr(sandbox, "decoy_transcript", None)
+    if store is None:
+        store = []
+        with contextlib.suppress(Exception):
+            sandbox.decoy_transcript = store  # type: ignore[attr-defined]
+        if getattr(sandbox, "decoy_transcript", None) is not store:
+            return
+    used = sum(len(item) for item in store)
+    room = TRANSCRIPT_CHARS - used
+    if room <= 0:
+        with contextlib.suppress(Exception):
+            sandbox.decoy_transcript_incomplete = True  # type: ignore[attr-defined]
+        return
+    if len(text) > room:
+        with contextlib.suppress(Exception):
+            sandbox.decoy_transcript_incomplete = True  # type: ignore[attr-defined]
+        text = text[:room]
+    store.append(text)
+
+
 def _assistant_message(reply: LLMReply) -> dict[str, Any]:
     return {
         "role": "assistant",
@@ -283,6 +308,7 @@ def run_decoy(
                 last_backend = str(backend.name)
             elif getattr(backend, "last_backend", None):
                 last_backend = str(backend.last_backend)
+            _record_transcript(sandbox, reply.text)
             # Count a late reply's usage before failing on time; its tool calls never run.
             _check_wall()
             _check_cage(sandbox, deadline)

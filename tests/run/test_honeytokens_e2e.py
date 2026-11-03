@@ -267,7 +267,7 @@ class Scripted:
         )
 
 
-def test_a_decoy_that_reads_the_planted_env_is_a_tool_log_hit(repo: Path, engine):
+def test_a_decoy_that_reads_the_planted_env_is_a_tool_output_hit(repo: Path, engine):
     evidence = detonate(
         repo,
         config=SandboxConfig(image=PYTHON_IMAGE, decoy_seconds=90),
@@ -279,14 +279,12 @@ def test_a_decoy_that_reads_the_planted_env_is_a_tool_log_hit(repo: Path, engine
     assert "BAITWATCH_FAKE_" in read.stdout
     hits = evidence.honeytoken_hits
     assert len(hits) == 2
-    assert {hit.source for hit in hits} == {"tool_log"}
+    assert {hit.source for hit in hits} == {"tool_output"}
     assert len({hit.token_id for hit in hits}) == 2
     assert all(hit.source_ip is None for hit in hits)
     assert not evidence.dns_hits and not evidence.http_hits and not evidence.tls_hits
-    # Honeytoken hits never upgrade the status; the verdict guard still refuses ALLOW.
     assert evidence.status == "complete"
-    with pytest.raises(ValidationError, match="ALLOW requires"):
-        VerdictReport(verdict="ALLOW", reason="bad", read={"status": "complete"}, run=evidence)
+    VerdictReport(verdict="ALLOW", reason="clean read", read={"status": "complete"}, run=evidence)
     assert (repo / ".env").exists() is False
     assert_no_leftovers(engine, evidence)
 
