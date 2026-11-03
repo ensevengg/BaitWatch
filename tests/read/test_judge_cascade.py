@@ -241,3 +241,30 @@ def test_stored_severity_that_is_not_a_number_is_dropped(tmp_path):
     judge = _judge(tmp_path)
     judge.cache.put(judge._cache_key("window", "f"), {"verdict": "attack", "severity": "high"})
     assert judge.lookup("window", "f").severity is None
+
+
+def test_temporary_failure_is_retried_once(tmp_path, monkeypatch):
+    calls = []
+
+    def flaky(req, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise TimeoutError("slow")
+        return _Response(_answer())
+
+    monkeypatch.setattr("urllib.request.urlopen", flaky)
+    monkeypatch.setattr(Judge, "RETRY_WAIT_S", 0.0)
+    assert _judge(tmp_path).review("t", "f", 0.5).verdict == "benign"
+    assert len(calls) == 2
+
+
+def test_permanent_failure_is_not_retried(tmp_path, monkeypatch):
+    calls = []
+
+    def refused(req, timeout):
+        calls.append(1)
+        raise urllib.error.URLError("refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", refused)
+    assert _judge(tmp_path).review("t", "f", 0.5).verdict == "unavailable"
+    assert len(calls) == 1

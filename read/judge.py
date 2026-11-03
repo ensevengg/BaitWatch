@@ -249,6 +249,7 @@ class Judge:
     DEAD_TTL_S = 120.0
     #: Timeouts, 429s and 5xx in a row before an endpoint is treated as down.
     MAX_TEMPORARY_FAILURES = 3
+    RETRY_WAIT_S = 2.0
 
     def __init__(self, config: JudgeConfig | None = None,
                  ledger: SpendLedger | None = None):
@@ -273,14 +274,17 @@ class Judge:
     def _mark_dead(self, name: str) -> None:
         self._dead_until[name] = time.monotonic() + self.DEAD_TTL_S
 
+    @staticmethod
+    def _is_temporary(exc: Exception) -> bool:
+        return (isinstance(exc, TimeoutError)
+                or (isinstance(exc, urllib.error.HTTPError)
+                    and (exc.code == 429 or exc.code >= 500))
+                or (isinstance(exc, urllib.error.URLError)
+                    and isinstance(exc.reason, TimeoutError)))
+
     def _record_failure(self, name: str, exc: Exception) -> None:
         """Rate limits and timeouts must not end a scan's judging on the first hit."""
-        temporary = (isinstance(exc, TimeoutError)
-                     or (isinstance(exc, urllib.error.HTTPError)
-                         and (exc.code == 429 or exc.code >= 500))
-                     or (isinstance(exc, urllib.error.URLError)
-                         and isinstance(exc.reason, TimeoutError)))
-        if not temporary:
+        if not self._is_temporary(exc):
             self._mark_dead(name)
             return
         self._failures[name] = self._failures.get(name, 0) + 1
@@ -465,7 +469,13 @@ class Judge:
                 errors.append(f"{name}: {env} not set")
                 continue
             try:
-                content, usage = self._chat(endpoint, message)
+                try:
+                    content, usage = self._chat(endpoint, message)
+                except Exception as first:  # noqa: BLE001 - classified just below
+                    if not self._is_temporary(first):
+                        raise
+                    time.sleep(self.RETRY_WAIT_S)
+                    content, usage = self._chat(endpoint, message)
             except (urllib.error.URLError, http.client.HTTPException, TimeoutError,
                     OSError, KeyError, IndexError, ValueError, TypeError,
                     AttributeError) as exc:

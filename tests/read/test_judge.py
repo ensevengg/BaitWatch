@@ -115,7 +115,8 @@ def test_server_error_is_unavailable(mock_api, tmp_path):
     assert result.verdict == "unavailable"
 
 
-def test_timeout_is_unavailable(mock_api, tmp_path):
+def test_timeout_is_unavailable(mock_api, tmp_path, monkeypatch):
+    monkeypatch.setattr(Judge, "RETRY_WAIT_S", 0.0)
     judge = make_judge(mock_api, tmp_path, behaviour="slow", timeout=0.2)
     started = time.time()
     result = judge.review("anything", "f.txt", 0.5)
