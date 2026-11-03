@@ -2,7 +2,6 @@
 runs inside the cage, and every call — reads included, since hash-diff only sees
 writes — lands in `tool_log`."""
 
-import contextlib
 import json
 import time
 from typing import Any
@@ -136,7 +135,15 @@ def _check_cage(sandbox: Sandbox, deadline: float | None) -> None:
         raise _DecoyFailure("CAGE_EXITED", "the cage is not running")
 
 
-def _failed_call(name: str, message: str) -> tuple[CommandResult, str]:
+def _failed_call(
+    sandbox: Sandbox, call: ToolCall, name: str, message: str
+) -> tuple[CommandResult, str]:
+    raw = call.arguments
+    try:
+        dumped = json.dumps(raw, default=str)
+    except (TypeError, ValueError):
+        dumped = str(raw)
+    _record_transcript(sandbox, f"{name} {dumped}")
     return CommandResult(command=[name], stderr=message[:1000]), f"tool error: {message}"
 
 
@@ -144,13 +151,15 @@ def _run_tool(sandbox: Sandbox, call: ToolCall) -> tuple[CommandResult, str]:
     name = call.name if isinstance(call.name, str) else ""
     key = _ARG_KEY.get(name)
     if key is None:
-        return _failed_call(name or "<invalid>", f"unknown tool {name!r}")
+        return _failed_call(sandbox, call, name or "<invalid>", f"unknown tool {name!r}")
     arguments = call.arguments if isinstance(call.arguments, dict) else {}
     value = arguments.get(key, _DEFAULTS.get(name))
     if not isinstance(value, str) or not value:
-        return _failed_call(name, f"{name} requires a nonempty string {key!r}")
+        return _failed_call(
+            sandbox, call, name, f"{name} requires a nonempty string {key!r}"
+        )
     if "\0" in value:
-        return _failed_call(name, f"{name} argument must not contain NUL")
+        return _failed_call(sandbox, call, name, f"{name} argument must not contain NUL")
     result = sandbox.exec(_argv(name, value))
     # tool_log records what the decoy asked for; the exec kept the cage-side argv.
     return CommandResult.model_validate(
@@ -161,22 +170,14 @@ def _run_tool(sandbox: Sandbox, call: ToolCall) -> tuple[CommandResult, str]:
 def _record_transcript(sandbox: Sandbox, text: str) -> None:
     if not text:
         return
-    store = getattr(sandbox, "decoy_transcript", None)
-    if store is None:
-        store = []
-        with contextlib.suppress(Exception):
-            sandbox.decoy_transcript = store  # type: ignore[attr-defined]
-        if getattr(sandbox, "decoy_transcript", None) is not store:
-            return
+    store = sandbox.decoy_transcript
     used = sum(len(item) for item in store)
     room = TRANSCRIPT_CHARS - used
     if room <= 0:
-        with contextlib.suppress(Exception):
-            sandbox.decoy_transcript_incomplete = True  # type: ignore[attr-defined]
+        sandbox.decoy_transcript_incomplete = True
         return
     if len(text) > room:
-        with contextlib.suppress(Exception):
-            sandbox.decoy_transcript_incomplete = True  # type: ignore[attr-defined]
+        sandbox.decoy_transcript_incomplete = True
         text = text[:room]
     store.append(text)
 

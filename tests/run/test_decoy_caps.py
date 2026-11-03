@@ -39,6 +39,8 @@ class FakeSandbox:
         self.evidence = RunEvidence()
         self.config = SimpleNamespace(decoy_seconds=120)
         self.argv = []
+        self.decoy_transcript: list[str] = []
+        self.decoy_transcript_incomplete = False
 
     def cage_running(self):
         return True
