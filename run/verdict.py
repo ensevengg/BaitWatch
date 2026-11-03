@@ -4,7 +4,7 @@ A READ attack verdict BLOCKs at the pinned checkpoint's `hard_high` score
 (`read/model_config.json`) and FLAGs below it. Any exception, timeout,
 truncated scan, missing component, READ incomplete/unavailable or RUN error is
 at least FLAG, never ALLOW, and any non-registry sink contact or honeytoken
-sent over the network is BLOCK. A decoy that only reads a honeytoken FLAGs.
+sent over the network is BLOCK.
 Validated plain DNS lookups and hello-only TLS contacts to the exact hosts in
 REGISTRY_HOSTS do not affect the verdict. Other registry contacts remain
 attempts and FLAG instead of BLOCK. A decoy that only reads a honeytoken
@@ -362,7 +362,13 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         verdict, why = "FLAG", flags
     else:
         verdict = "ALLOW"
-        why = ["READ is clean and the RUN decoy completed with no sink or honeytoken evidence"]
+        if run.honeytoken_hits:
+            why = [
+                "READ is clean and the RUN decoy completed with no sink evidence; "
+                "it read planted honeytoken(s) but did not move or send them"
+            ]
+        else:
+            why = ["READ is clean and the RUN decoy completed with no sink or honeytoken evidence"]
     if read.verdict == "attack" and read.reason:
         why.append(_bounded(f"READ coverage is incomplete: {read.reason}"))
     return VerdictReport(

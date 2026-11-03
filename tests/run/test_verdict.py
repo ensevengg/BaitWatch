@@ -192,6 +192,8 @@ def test_tool_output_only_can_allow():
     run.honeytoken_hits.append(HoneytokenHit(token_id="ht-1", source="tool_output"))
     report = fuse(CLEAN, run)
     assert report.verdict == "ALLOW"
+    assert "did not move or send" in report.reason
+    assert "no sink or honeytoken evidence" not in report.reason
     jsonschema.validate(report.model_dump(mode="json"), verdict_schema())
 
 
