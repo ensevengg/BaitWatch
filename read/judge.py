@@ -300,9 +300,12 @@ class Judge:
         if self.cache is None:
             return None
         stored = self.cache.get(self._cache_key(text, file))
-        if stored is None:
-            return None
-        return JudgeResult(stored["verdict"], stored.get("severity"), stored.get("explanation"),
+        if not isinstance(stored, dict) or stored.get("verdict") not in ("attack", "benign"):
+            return None     # a bad row is a miss: the cache must never break a scan
+        severity = stored.get("severity")
+        if isinstance(severity, bool) or not isinstance(severity, (int, float)):
+            severity = None
+        return JudgeResult(stored["verdict"], severity, stored.get("explanation"),
                            endpoint="cache", can_clear=True)
 
     def _api_key(self, endpoint: dict) -> str | None:
