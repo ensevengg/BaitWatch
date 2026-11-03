@@ -47,7 +47,7 @@ _ALLOWED = ("evil.example",)
 # treated as risky (not silently allowed) instead of being inspected halfway.
 MAX_PROMPT_CHARS = 65_536
 # First scan of a tree: model plus judge. Later prompts on the same tree use the cache.
-DEFAULT_HOOK_DEADLINE_S = 60.0
+DEFAULT_HOOK_DEADLINE_S = 75.0
 HOOK_DECISION_MARGIN_S = 8.0
 BLOCK_MIN_SCORE = 0.7
 

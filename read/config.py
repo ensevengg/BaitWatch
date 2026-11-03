@@ -101,6 +101,9 @@ class JudgeConfig:
     timeout_s: float = 30.0                # per judge call; p95 at low effort is about 11 s
     concurrency: int = 8                   # parallel judge calls per scan
     max_calls_per_scan: int = 60
+    # Low-score tier 2/3 windows stop once this many calls are planned. Agent-heavy
+    # repositories have many tier 0/1 windows, and those must not compete with bulk.
+    max_bulk_calls_per_scan: int | None = None
     max_tokens_per_scan: int = 200_000     # judge input+output token budget per scan
     # Reasoning tokens count against max_tokens, so a small limit returns an
     # empty answer (300 was used up by reasoning on every call).
@@ -215,7 +218,11 @@ class ReadConfig:
         cfg.max_file_tokens = 60_000
         cfg.max_chunks_per_file = 160
         cfg.bulk_best_effort = True
-        cfg.max_chunks_per_scan = 2_500    # about 25 s of model time on the demo GPU
+        # About 15 s of model time on the demo GPU. With the model load and the judge
+        # calls in parallel, a cold first scan stays inside the hook deadline.
+        cfg.max_chunks_per_scan = 1_500
+        cfg.judge.concurrency = 16
+        cfg.judge.max_bulk_calls_per_scan = 40
         # The inline hook must not block on judge round-trips: detector-only.
         # Review-band chunks it surfaces are reported as unjudged/incomplete
         # (see read/scan.py), never silently clean.

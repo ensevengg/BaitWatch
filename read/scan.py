@@ -417,6 +417,17 @@ def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], jud
     band = sorted((w for w in scored if cfg.review_low <= w[1] < cfg.flag_threshold),
                   key=lambda w: -w[1])
     low = _low_tier(scored, cfg, stats)
+    unread: set[str] = set(stats.judge_overflow_files)
+    if cfg.judge.max_bulk_calls_per_scan is not None:
+        kept, planned = [], len(high) + len(band)
+        for window in low:      # tier 0/1 windows sort first
+            if priority_tier(window[0].file) <= 1 or planned < cfg.judge.max_bulk_calls_per_scan:
+                kept.append(window)
+                planned += 1
+            else:
+                stats.judge_low_unjudged += 1
+                unread.add(window[0].file)
+        low = kept
     tiers = [("high", w) for w in high] + [("band", w) for w in band] + [("low", w) for w in low]
     if not tiers:
         return
@@ -426,7 +437,6 @@ def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], jud
             0.0, cfg.judge.deadline_s - (time.perf_counter() - started))
     results = _judge_all(judged, [(c.text, c.file, s) for _, (c, s) in tiers],
                          budget, cfg.judge.concurrency, stats)
-    unread: set[str] = set(stats.judge_overflow_files)
     for (tier, (chunk, score)), result in zip(tiers, results):
         evidence = _evidence(chunk, score)
         if result.verdict == "skipped" and "deadline" in (result.error or ""):
@@ -797,7 +807,8 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
         reasons.append(f"judge coverage: {len(crowded)} agent-facing file(s) with more suspicious "
                        f"windows than the judge reads ({', '.join(crowded[:3])})")
     if stats.judge_skipped:
-        reasons.append(f"judge budget: {stats.judge_skipped} review-band chunk(s) not judged")
+        cause = "judge time limit" if stats.judge_deadline_hit else "judge budget"
+        reasons.append(f"{cause}: {stats.judge_skipped} chunk(s) not judged")
     unjudged = sum(1 for f in findings
                    if f.status == STATUS_REVIEWED and f.evidence.get("note"))
     if unjudged:
