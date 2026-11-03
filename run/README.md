@@ -2,7 +2,7 @@
 
 BaitWatch checks a repository for attacks aimed at coding agents before a developer lets an agent work in it. The planned product has two parts. READ runs a detector over the files. RUN executes the repository as a decoy inside an isolated Docker network and records what it tries to reach.
 
-This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, the Day 4 fused scan, and Day 5 honeytokens. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, plants per-scan fake credentials in the staged copy and detects them in sink and tool output, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not include agent hooks.
+This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, the Day 4 fused scan, and Day 5 honeytokens. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, plants per-scan fake credentials in the staged copy and detects them in sink traffic, tool calls and output, the decoy's reply text and files the cage writes, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not include agent hooks.
 
 ## Setup on Linux
 
@@ -120,7 +120,7 @@ Env var names: `BAITWATCH_DECOY_BASE_URL`, `BAITWATCH_DECOY_MODEL`,
 logs or reports), `BAITWATCH_DECOY_FALLBACK_BASE_URL`,
 `BAITWATCH_DECOY_FALLBACK_MODEL`, `BAITWATCH_DECOY_REASONING_EFFORT`
 (optional; one of `low`, `medium`, `high`; unset sends no `reasoning_effort`
-field, and an invalid value is an error; when set, `temperature` is not sent; reasoning tokens count against the
+field, and an invalid value is an error; when set, `temperature` is not sent, and a non-zero temperature is an error; set it only for endpoints that accept `reasoning_effort` together with tools, since a rejected request fails the decoy (non-ALLOW); reasoning tokens count against the
 decoy token budget), `BAITWATCH_DECOY_FALLBACK_REASONING_EFFORT` (same, for
 the fallback backend), and `BAITWATCH_PWNRATE_RUNS` (default 10); an empty-string value is treated as unset.
 Model tiers that allow the provider to train on sent text (such as Muse Spark's "contributor" tier) must not be used to scan private repositories, because the decoy sends repository contents to the model.

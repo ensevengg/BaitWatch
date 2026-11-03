@@ -226,6 +226,8 @@ class OpenAICompatBackend:
         self.max_calls = _positive_int("max_calls", max_calls)
         self.max_response_bytes = _positive_int("max_response_bytes", max_response_bytes)
         self.reasoning_effort = _validated_reasoning_effort(reasoning_effort)
+        if self.reasoning_effort is not None and self.temperature != 0:
+            raise ValueError("temperature cannot be combined with reasoning_effort")
         self._calls = 0
         if api_key_env is not None and endpoint.scheme == "http":
             # The localhost HTTP exception must not send credentials through a proxy.

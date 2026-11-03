@@ -540,6 +540,11 @@ def test_reasoning_effort_absent_by_default_and_sent_when_set():
         assert "temperature" not in body
 
 
+def test_explicit_temperature_with_reasoning_effort_is_rejected():
+    with pytest.raises(ValueError, match="temperature cannot be combined"):
+        OpenAICompatBackend("http://127.0.0.1:1/v1", "m", temperature=0.2, reasoning_effort="low")
+
+
 def test_reasoning_effort_invalid_raises():
     with pytest.raises(ValueError, match="reasoning_effort"):
         OpenAICompatBackend("http://127.0.0.1:1/v1", "m", reasoning_effort="xhigh")
