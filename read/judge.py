@@ -78,6 +78,9 @@ Respond with ONLY a JSON object, no markdown, no other text:
 """
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_INVISIBLE_RE = re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u00ad]")
+_NEWLINE_RUN_RE = re.compile(r"\s*\n\s*\n\s*")
+_SPACE_RUN_RE = re.compile(r"[^\S\n]{2,}")
 
 
 @dataclass
@@ -88,6 +91,7 @@ class JudgeResult:
     endpoint: str | None = None
     error: str | None = None
     usage: dict | None = None
+    can_clear: bool = True  # False: it did not read the whole window
 
 
 class SpendLedger:
@@ -316,10 +320,22 @@ class Judge:
         }
         return content, norm
 
+    def _prepare(self, text: str) -> tuple[str, bool]:
+        """What the judge reads, and whether any of the window was left out.
+
+        Padding costs an attacker almost no model tokens but many characters,
+        so runs of whitespace and invisible characters are collapsed before
+        the length limit. A window still over the limit keeps its head and tail.
+        """
+        snippet = _SPACE_RUN_RE.sub(" ", _NEWLINE_RUN_RE.sub("\n\n", _INVISIBLE_RE.sub("", text)))
+        limit = self.cfg.max_chunk_chars
+        if len(snippet) <= limit:
+            return snippet, False
+        half = limit // 2
+        return snippet[:half] + "\n…[middle of chunk left out]…\n" + snippet[-half:], True
+
     def _user_message(self, text: str, file: str, score: float) -> str:
-        snippet = text[: self.cfg.max_chunk_chars]
-        if len(text) > self.cfg.max_chunk_chars:
-            snippet += "\n…[chunk truncated]"
+        snippet, _ = self._prepare(text)
         # A fresh random fence per call: the attacker cannot know the id, so
         # a "</chunk>" inside the data closes nothing.
         tag = f"chunk-{secrets.token_hex(6)}"
@@ -390,6 +406,8 @@ class Judge:
             result = JudgeResult("unavailable", None, None, error=f"judge error: {exc}")
         if budget is not None:
             budget.settle(estimate, usage_total)
+        if self._prepare(text)[1]:
+            result.can_clear = False   # it did not read the whole window
         return result
 
     def _review(self, message: str, usage_total: dict) -> JudgeResult:

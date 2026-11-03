@@ -57,3 +57,20 @@ def test_one_timeout_does_not_end_judging(tmp_path, monkeypatch):
     judge.review("b", "f", 0.5)
     judge.review("c", "f", 0.5)
     assert judge._is_dead("main")
+
+
+def test_padding_cannot_push_text_out_of_the_judges_view(tmp_path):
+    judge = _judge(tmp_path)
+    for pad in (" " * 6000, "\n" * 6000, "\u200b" * 6000, "\t \n" * 2000):
+        snippet, cut = judge._prepare("intro" + pad + "PAYLOAD")
+        assert "PAYLOAD" in snippet and not cut
+
+
+def test_window_over_the_limit_keeps_both_ends_and_cannot_clear(tmp_path, monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: _Response(_answer()))
+    judge = _judge(tmp_path)
+    text = "HEAD " + "word " * 3000 + "TAIL"
+    snippet, cut = judge._prepare(text)
+    assert cut and "HEAD" in snippet and "TAIL" in snippet
+    result = judge.review(text, "f", 0.99)
+    assert result.verdict == "benign" and result.can_clear is False
