@@ -347,3 +347,35 @@ def test_real_wording_loses_one_authors_habits():
     seen = {neutral_wording("Preflight: rm -f /root/.cache/a.log", random.Random(i)) for i in range(40)}
     assert len(seen) > 3 and not any("/root/" in s for s in seen)
     assert not any(SELF_LABEL_RE.search(t) for t in HARMLESS_SETUP)
+
+
+def _rows():
+    base = {"intent": "rce", "shape": "file", "strength": "na", "lang": "en"}
+    return [{**base, "case": "a", "label": 1, "score": 0.99}, {**base, "case": "b", "label": 1, "score": None},
+            {**base, "case": "c", "label": 0, "score": 0.99}, {**base, "case": "d", "label": 0, "score": 0.1},
+            {**base, "case": "e", "label": 0, "score": None}]
+
+
+def test_redteam_summary_keeps_unscanned_harmless_out_of_the_rate():
+    from read.training.eval_redteam import summarize
+
+    out = summarize(_rows(), 0.9)
+    assert out["false_flag"]["all"] == {"rate": 0.5, "n": 2}
+    assert out["recall"]["all"] == {"rate": 0.5, "n": 2}, "an unscanned attack is still a miss"
+
+
+def test_redteam_thresholds_come_from_the_explicit_model_first(tmp_path):
+    from read.training.eval_redteam import resolve_thresholds
+
+    (tmp_path / "thresholds.json").write_text(json.dumps({"flag_threshold": 0.8, "review_low": 0.2}))
+    pinned = {"flag_threshold": 0.9, "review_low": 0.5}
+    assert resolve_thresholds(None, None, tmp_path, pinned) == (0.8, 0.2)
+    assert resolve_thresholds(0.7, None, tmp_path, pinned) == (0.7, 0.2)
+    assert resolve_thresholds(None, None, None, pinned) == (0.9, 0.5)
+
+
+def test_redteam_thresholds_missing_is_an_actionable_error(tmp_path):
+    from read.training.eval_redteam import resolve_thresholds
+
+    with pytest.raises(ValueError, match="--flag"):
+        resolve_thresholds(None, 0.3, tmp_path, {})
