@@ -105,6 +105,12 @@ class JudgeConfig:
     # Reasoning tokens count against max_tokens, so a small limit returns an
     # empty answer (300 was used up by reasoning on every call).
     max_output_tokens: int = 2_000
+    max_windows_per_file: int = 3          # low-score windows judged per tier 2/3 file
+    # The same for tier 0/1 files. More rule-matching windows than this in one
+    # such file makes the verdict incomplete: at most 14 in 34 public repos.
+    max_windows_per_agent_file: int = 16
+    # Seconds from scan start after which no new judge call starts (None: no limit).
+    deadline_s: float | None = None
     # Persistent verdict cache (read/cache.py). None path = BAITWATCH_JUDGE_CACHE
     # or ~/.cache/baitwatch/judge.sqlite.
     cache: bool = True
@@ -134,6 +140,8 @@ class JudgeConfig:
                     "model": os.environ.get("BAITWATCH_JUDGE_MODEL", "muse-spark-1.3"),
                     "api_key_env": "META_API_KEY",
                     "reasoning_effort": "low",
+                    # Only this endpoint was measured well enough to clear a flag.
+                    "can_clear": True,
                 },
                 {
                     "name": "llama32_3b_local",
@@ -178,6 +186,8 @@ class ReadConfig:
     # stats.files_covered, and the hook scans them when an agent opens one.
     bulk_best_effort: bool = False
     max_chunks_per_scan: int | None = None  # tier 2/3 files stop being chunked past this
+    judge_floor: float = 0.05              # below review_low, still judged from this score up
+    judge_clears_flags: bool = True        # a "benign" verdict may remove a model flag
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     walker: WalkerConfig = field(default_factory=WalkerConfig)
 

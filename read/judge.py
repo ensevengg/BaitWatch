@@ -2,10 +2,9 @@
 
 Design rules (roadmap D3/D5, each covered by a test):
 
-- The judge reads attacker-controlled text, so it is wired *escalate-only*:
-  ``scan()`` lets it flag or explain, and nothing it says can clear a chunk the
-  model already flagged.  Inside the uncertain band (review_low..flag_threshold)
-  a "benign" verdict clears the chunk — that is the band's whole purpose.
+- The judge reads attacker-controlled text, so ``scan()`` limits what it can do:
+  when the primary endpoint answers, its verdict decides, including clearing a
+  model flag; when nothing answers, the model's flags stand. See read/docs/JUDGE.md.
 - Fail closed: API error, timeout, unparseable answer or a hit spend cap
   return verdict "unavailable".  An exhausted per-scan budget returns
   "skipped" (no call was made).  Inside the review band the scan treats both
@@ -92,7 +91,7 @@ class JudgeResult:
     endpoint: str | None = None
     error: str | None = None
     usage: dict | None = None
-    can_clear: bool = True  # False: it did not read the whole window
+    can_clear: bool = True  # False: this endpoint may not remove a model flag
 
 
 class SpendLedger:
@@ -259,6 +258,7 @@ class Judge:
             self.cfg.usd_per_1k_input, self.cfg.usd_per_1k_output)
         self._dead_until: dict[str, float] = {}
         self._failures: dict[str, int] = {}
+        self.deadline: float | None = None     # time.monotonic() value; see scan()
         self.cache = None
         if self.cfg.cache:
             from read.cache import DEFAULT_JUDGE_CACHE_PATH, JudgeCache
@@ -329,7 +329,10 @@ class Judge:
         if key:
             headers["Authorization"] = f"Bearer {key}"
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=self.cfg.timeout_s) as resp:
+        timeout = self.cfg.timeout_s
+        if self.deadline is not None:
+            timeout = max(1.0, min(timeout, self.deadline - time.monotonic()))
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         content = payload["choices"][0]["message"]["content"]
         usage = payload.get("usage")
@@ -420,6 +423,10 @@ class Judge:
             if budget is not None and reserved is not None:
                 budget.settle(reserved, None)
             return JudgeResult("unavailable", None, None, error=f"judge error: {exc}")
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            if budget is not None and reserved is not None:
+                budget.settle(reserved, None)
+            return JudgeResult("skipped", None, None, error="judge deadline reached")
         if budget is not None and reserved is None and not budget.reserve(estimate):
             return JudgeResult("skipped", None, None, error="judge budget exhausted")
         usage_total: dict = {}
@@ -480,5 +487,6 @@ class Judge:
                 continue
             parsed.endpoint = name
             parsed.usage = usage
+            parsed.can_clear = bool(endpoint.get("can_clear"))
             return parsed
         return JudgeResult("unavailable", None, None, error="; ".join(errors) or "no endpoints")
