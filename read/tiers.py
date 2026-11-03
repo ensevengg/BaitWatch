@@ -52,3 +52,24 @@ def priority_tier(rel_path: str) -> int:
     if text_like or rel.startswith(".github/"):
         return 2
     return 3
+
+
+_LOCKFILES = frozenset({
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock", "poetry.lock", "uv.lock",
+    "go.sum", "composer.lock", "gemfile.lock", "pipfile.lock", "npm-shrinkwrap.json",
+})
+_GENERATED_SUFFIXES = (".lock", ".snap", ".min.js", ".min.css", ".map", ".svg", ".csv", ".tsv")
+_GENERATED_DIRS = ("__snapshots__/", "snapshots/", "vendor/", "third_party/", "testdata/",
+                   "fixtures/", "__fixtures__/", "generated/", "locale/", "locales/", "i18n/")
+
+
+def is_generated(rel_path: str) -> bool:
+    """Lockfiles, snapshots, bundles, data and vendored files.
+
+    A repository scan spends nothing on these; they make up nearly half of some large
+    repositories and score as noise. The hook scans one if an agent opens it.
+    """
+    rel = rel_path.replace(os.sep, "/").lower()
+    name = rel.rsplit("/", 1)[-1]
+    return (name in _LOCKFILES or name.endswith(_GENERATED_SUFFIXES)
+            or any(f"/{d}" in f"/{rel}" for d in _GENERATED_DIRS))

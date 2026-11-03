@@ -18,6 +18,8 @@ os.environ["BAITWATCH_SCORE_CACHE"] = str(
 
 os.environ["BAITWATCH_JUDGE_CACHE"] = str(
     Path(tempfile.mkdtemp(prefix="bw-test-cache-")) / "judge.sqlite")
+os.environ["BAITWATCH_FILE_CACHE"] = str(
+    Path(tempfile.mkdtemp(prefix="bw-test-cache-")) / "files.sqlite")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:

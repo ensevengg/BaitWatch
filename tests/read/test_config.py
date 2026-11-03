@@ -58,7 +58,7 @@ def test_quick_preset_uses_pinned_thresholds(monkeypatch, tmp_path):
     (tmp_path / "model_config.json").write_text(json.dumps(pin))
     cfg = rc.ReadConfig.quick()
     assert (cfg.flag_threshold, cfg.review_low) == (0.85, 0.521)
-    assert cfg.walker.max_files == 2_000
+    assert cfg.walker.max_files == 50_000
 
 
 def test_judge_defaults_match_the_live_meta_api(monkeypatch):

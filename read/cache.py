@@ -28,6 +28,10 @@ DEFAULT_JUDGE_CACHE_PATH = Path(os.environ.get(
     "BAITWATCH_JUDGE_CACHE",
     str(Path.home() / ".cache" / "baitwatch" / "judge.sqlite")))
 
+DEFAULT_FILE_CACHE_PATH = Path(os.environ.get(
+    "BAITWATCH_FILE_CACHE",
+    str(Path.home() / ".cache" / "baitwatch" / "files.sqlite")))
+
 _BATCH = 500
 
 
@@ -158,7 +162,7 @@ class JudgeCache:
             self._disable()
             return None
 
-    def put(self, key: str, value: dict) -> None:
+    def put(self, key: str, value) -> None:
         if self._db is None:
             return
         try:
@@ -167,3 +171,11 @@ class JudgeCache:
                                  (self._key(key), json.dumps(value)))
         except sqlite3.Error:
             self._disable()
+
+
+class FileResultCache(JudgeCache):
+    """Findings per exact file content, so a repeat scan reads only changed files."""
+
+    def get(self, key: str) -> list | None:
+        stored = super().get(key)
+        return stored if isinstance(stored, list) else None

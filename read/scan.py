@@ -86,6 +86,12 @@ class ScanStats:
     judge_low_flagged: int = 0      # windows below the review band the judge flagged
     judge_low_unjudged: int = 0     # low-tier windows no judge answered for
     judge_deadline_hit: bool = False  # time ran out; a later scan can finish the work
+    judge_low_planned: int = 0      # low-score tier 2/3 windows sent to the judge
+    judge_last_error: str | None = None   # a sample, so an outage can be diagnosed
+    files_cached: int = 0           # batches: results reused for unchanged files
+    files_generated: int = 0        # batches: generated files left for the check on open
+    scan_time_limit_hit: bool = False   # batches: time ran out; a later scan resumes
+    scan_stopped_early: bool = False    # batches: the verdict was decided, the rest skipped
     # Files with more candidate windows than the per-file cap.
     judge_overflow_files: list[str] = field(default_factory=list)
     elapsed_s: float = 0.0
@@ -419,11 +425,13 @@ def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], jud
     low = _low_tier(scored, cfg, stats)
     unread: set[str] = set(stats.judge_overflow_files)
     if cfg.judge.max_bulk_calls_per_scan is not None:
-        kept, planned = [], len(high) + len(band)
+        kept = []
         for window in low:      # tier 0/1 windows sort first
-            if priority_tier(window[0].file) <= 1 or planned < cfg.judge.max_bulk_calls_per_scan:
+            if priority_tier(window[0].file) <= 1:
                 kept.append(window)
-                planned += 1
+            elif stats.judge_low_planned < cfg.judge.max_bulk_calls_per_scan:
+                kept.append(window)
+                stats.judge_low_planned += 1
             else:
                 stats.judge_low_unjudged += 1
                 unread.add(window[0].file)
@@ -441,6 +449,8 @@ def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], jud
         evidence = _evidence(chunk, score)
         if result.verdict == "skipped" and "deadline" in (result.error or ""):
             stats.judge_deadline_hit = True
+        if result.verdict == "unavailable" and result.error:
+            stats.judge_last_error = result.error[:160]
         if result.verdict == "attack":
             sev = result.severity if result.severity is not None else score
             raised = sev > score
@@ -449,7 +459,7 @@ def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], jud
             findings.append(_finding(
                 chunk, max(score, sev),
                 LAYER_JUDGE if raised or tier != "high" else LAYER_MODEL,
-                evidence, STATUS_FLAGGED, result.explanation))
+                {**evidence, "judge_confirmed": True}, STATUS_FLAGGED, result.explanation))
         elif tier == "high":
             clears = (result.verdict == "benign" and cfg.judge_clears_flags
                       and getattr(result, "can_clear", True))
@@ -505,11 +515,14 @@ def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], jud
 
 def scan(path: str | Path, cfg: ReadConfig | None = None,
          detector: Detector | None = None, judge: Judge | None = None,
-         decoders: list | None = None) -> ScanResult:
+         decoders: list | None = None, *, only_files: set[str] | None = None,
+         walked=None) -> ScanResult:
     """Scan one repository (or any directory / single file) for injections.
 
     With no explicit config, the pinned thresholds from model_config.json
     apply; an explicitly passed ReadConfig is honored exactly as given.
+    ``only_files`` and ``walked`` let read.batches scan part of a repository
+    without walking it again.
     """
     started = time.perf_counter()
     if cfg is None:
@@ -545,9 +558,11 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
     judged = judge if judge is not None else (Judge(cfg.judge) if cfg.judge.enabled else None)
     budget = ScanBudget(cfg.judge.max_calls_per_scan, cfg.judge.max_tokens_per_scan) if judged else None
 
-    walk_result = walk(target, cfg.walker) if target.is_dir() else None
+    walk_result = walked if walked is not None else (
+        walk(target, cfg.walker) if target.is_dir() else None)
     if walk_result is not None:
-        scanned_files = [(f.path, f.rel_path, f.encoding) for f in walk_result.files]
+        scanned_files = [(f.path, f.rel_path, f.encoding) for f in walk_result.files
+                         if only_files is None or f.rel_path in only_files]
     else:
         scanned_files = [(target, target.name, None)]
     stats = ScanStats(model_path=str(det.model_path), thresholds={
@@ -812,7 +827,8 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
     unjudged = sum(1 for f in findings
                    if f.status == STATUS_REVIEWED and f.evidence.get("note"))
     if unjudged:
-        reasons.append(f"unjudged review-band: {unjudged} review-band chunk(s) not judged")
+        cause = f" ({stats.judge_last_error})" if stats.judge_last_error else ""
+        reasons.append(f"unjudged review-band: {unjudged} review-band chunk(s) not judged{cause}")
     if stats.decoder_errors:
         reasons.append(f"decoder errors: {len(stats.decoder_errors)}")
     if cfg.strict_coverage and stats.partial_files:
