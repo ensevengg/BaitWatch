@@ -223,6 +223,8 @@ def train(data_dir: Path, base_model: Path, out_dir: Path,
     from transformers import AutoModelForSequenceClassification, AutoTokenizer, \
         get_linear_schedule_with_warmup
 
+    if stop_after_epoch is not None and stop_after_epoch < 1:
+        raise ValueError(f"stop_after_epoch must be 1 or more, got {stop_after_epoch}")
     set_seed(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if mode == "head" and lr is None:
@@ -366,6 +368,13 @@ def train(data_dir: Path, base_model: Path, out_dir: Path,
     return meta
 
 
+def _stop_epoch(value: str) -> int:
+    epoch = int(value)
+    if epoch < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, got {epoch}")
+    return epoch
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="read.training.train")
     parser.add_argument("--data-dir",
@@ -394,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--energy-margin", type=float, default=None)
     parser.add_argument("--label-smoothing", type=float, default=0.0)
     parser.add_argument("--grad-checkpointing", action="store_true")
-    parser.add_argument("--stop-after-epoch", type=int, default=None,
+    parser.add_argument("--stop-after-epoch", type=_stop_epoch, default=None,
                         help="keep the --epochs learning-rate schedule but stop after this epoch")
     parser.add_argument("--mlflow-uri", default=None,
                         help="MLflow tracking server (default: $MLFLOW_TRACKING_URI; "

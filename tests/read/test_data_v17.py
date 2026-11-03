@@ -391,3 +391,22 @@ def test_live_page_keeps_a_threshold_per_red_team_set(tmp_path):
     assert row["malware"]["threshold"] == 0.9
     assert row["aditya0"]["threshold"] == 0.8
     assert "threshold" not in row
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_train_rejects_a_stop_epoch_below_one(bad):
+    from read.training.train import train
+
+    with pytest.raises(ValueError, match="stop_after_epoch"):
+        train("data", "base", "out", stop_after_epoch=bad)
+
+
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_stop_epoch_option_rejects_values_below_one(bad):
+    import argparse
+
+    from read.training.train import _stop_epoch
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        _stop_epoch(bad)
+    assert _stop_epoch("2") == 2
