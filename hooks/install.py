@@ -32,7 +32,7 @@ __all__ = [
     "uninstall",
 ]
 
-TOOL_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|WebFetch|Read"
+TOOL_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|WebFetch|Read|Grep"
 
 # ``onFailure: "block"`` needs a host that honours it.  2.1.295 is the first
 # Claude Code release with the documented fail-closed hook contract.

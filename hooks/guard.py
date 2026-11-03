@@ -23,7 +23,7 @@ import os
 import re
 import shlex
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -448,7 +448,10 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
     files = sorted({finding.file for finding in result.flagged})[:8]
     model = Path(str(result.stats.model_path)).name
     reason = {
-        "block": f"READ flagged {result.stats.flagged} chunk(s) (max score {result.max_score:.2f})",
+        "block": (
+            f"READ flagged {result.stats.flagged} chunk(s) in {', '.join(files[:3])} "
+            f"(max score {result.max_score:.2f})"
+        ),
         "ask": (
             f"READ flagged {result.stats.flagged} low-severity chunk(s) "
             f"(max score {result.max_score:.2f}): review before continuing"
@@ -569,7 +572,7 @@ _SHELL_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
 
 def _read_targets(tool: str, data: dict) -> list[str]:
     """Files this tool call will show the agent, as far as can be told statically."""
-    if tool in ("read", "view", "open"):
+    if tool in ("read", "view", "open", "grep"):
         path = data.get("file_path") or data.get("path")
         return [str(path)] if path else []
     if tool not in ("bash", "shell", "terminal", "run_command"):
@@ -846,7 +849,10 @@ def _combine(
     verdict = "allow"
     if repo is not None:
         verdict = _worst(verdict, repo.verdict)
-        reasons.append(repo.reason)
+        # "Found no injection" next to a refusal contradicts itself: only the refusal counts.
+        refused = (policy is not None and policy.verdict != "allow") or prompt_reason
+        if repo.verdict != "allow" or not refused:
+            reasons.append(repo.reason)
         source = "cache" if repo.cached else "repo"
         files = repo.files
     if policy is not None:
@@ -929,6 +935,16 @@ def gate_b(payload: dict, *, scanner=scan_repo, cache=None) -> Decision:
     repo_scan = None
     if status == "ok" and root is not None:
         repo_scan = scanner(root) if scanner is not scan_repo else scan_repo(root, cache=cache)
+    if repo_scan is not None and repo_scan.verdict == "ask":
+        from hooks.cache import ApprovalStore
+
+        if ApprovalStore().is_approved(root):
+            # The user approved this exact tree at Gate A. Actions are still checked below.
+            repo_scan = replace(
+                repo_scan,
+                verdict="allow",
+                reason=f"{repo_scan.reason}; approved for this exact tree by the user",
+            )
     if repo_scan is not None and repo_scan.verdict == "block":
         decision = Decision(
             "B",
