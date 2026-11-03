@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import time
 from pathlib import Path
 
@@ -358,3 +359,19 @@ def test_project_settings_cannot_choose_the_judge():
         "BAITWATCH_HOOK_JUDGE",
     ):
         assert key in hook_cli._USER_HOOK_ENV_KEYS
+
+
+def test_large_tree_fingerprint_notices_an_edit(tmp_path):
+    from hooks.cache import MAX_FINGERPRINT_BYTES, repo_fingerprint
+
+    (tmp_path / "README.md").write_text("hello\n")
+    (tmp_path / "blob.dat").write_bytes(b"0" * (MAX_FINGERPRINT_BYTES + 10))
+    first = repo_fingerprint(tmp_path)
+    assert first is not None, "a large tree must still be cacheable"
+    (tmp_path / "blob.dat").write_bytes(b"1" * (MAX_FINGERPRINT_BYTES + 10))
+    assert repo_fingerprint(tmp_path) != first
+    info = (tmp_path / "README.md").stat()
+    second = repo_fingerprint(tmp_path)
+    (tmp_path / "README.md").write_text("HELLO\n")
+    os.utime(tmp_path / "README.md", ns=(info.st_atime_ns, info.st_mtime_ns))
+    assert repo_fingerprint(tmp_path) != second, "agent files are compared by content"

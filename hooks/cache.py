@@ -36,9 +36,12 @@ __all__ = [
 
 DEFAULT_TTL = 600.0
 DEFAULT_APPROVAL_TTL = 900.0
-MAX_FINGERPRINT_FILES = 4_000
-MAX_FINGERPRINT_DIRS = 4_000
+MAX_FINGERPRINT_FILES = 100_000
+MAX_FINGERPRINT_DIRS = 20_000
+# Content hashed per tree. Past this, and for files over the per-file limit,
+# path, size and mtime stand in, except agent-facing files, which are always read.
 MAX_FINGERPRINT_BYTES = 8 * 1024 * 1024
+MAX_FINGERPRINT_FILE_BYTES = 256 * 1024
 # Mirrors read.config.WalkerConfig.excluded_dirs: a directory READ never scans
 # must not be fingerprinted either, so the key changes only when the scan can.
 _SKIP_DIRS = {
@@ -154,7 +157,13 @@ def repo_fingerprint(repo: str | Path, *, exclude: list[str | Path] | None = Non
 
     Returns ``None`` when the tree is too large or unreadable, which the caller
     must treat as "cannot confirm unchanged": rescan, never reuse ALLOW.
+    Without this limit on hashing, every repository past the byte budget was
+    rescanned on every prompt and tool call.
     """
+    from hooks.lightread import load
+
+    priority_tier = load("tiers").priority_tier
+
     root = Path(repo)
     if not root.is_dir():
         return None
@@ -179,10 +188,12 @@ def repo_fingerprint(repo: str | Path, *, exclude: list[str | Path] | None = Non
             if not stat.S_ISREG(info.st_mode):
                 continue
             size = info.st_size
-            total += size
-            if total > MAX_FINGERPRINT_BYTES:
-                return None
             digest.update(f"{rel}\0{size}\0{info.st_mtime_ns}\0".encode())
+            if priority_tier(rel) > 1 and (
+                size > MAX_FINGERPRINT_FILE_BYTES or total + size > MAX_FINGERPRINT_BYTES
+            ):
+                continue
+            total += size
             with open(resolved, "rb") as handle:
                 while chunk := handle.read(1024 * 1024):
                     digest.update(chunk)
@@ -203,7 +214,16 @@ def scanner_signature() -> str:
     ):
         digest.update(f"{key}={os.environ.get(key, '')}\0".encode())
     root = Path(__file__).resolve().parents[1]
-    for rel in ("read/model_config.json", "attacks/decoders.py", "read/decoders.py"):
+    for rel in (
+        "read/model_config.json",
+        "attacks/decoders.py",
+        "read/decoders.py",
+        "read/scan.py",
+        "read/walk.py",
+        "read/tiers.py",
+        "read/rules.py",
+        "read/judge.py",
+    ):
         path = root / rel
         try:
             stat = path.stat()
