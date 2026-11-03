@@ -529,11 +529,15 @@ def test_reasoning_effort_absent_by_default_and_sent_when_set():
     with fake_server(reply(completion({"content": "done"}))) as server:
         backend = OpenAICompatBackend(server.base_url, "m")
         backend.chat([], [])
-        assert "reasoning_effort" not in json.loads(server.requests[0].body)
+        body = json.loads(server.requests[0].body)
+        assert "reasoning_effort" not in body
+        assert body["temperature"] == 0
     with fake_server(reply(completion({"content": "done"}))) as server:
         backend = OpenAICompatBackend(server.base_url, "m", reasoning_effort="low")
         backend.chat([], [])
-        assert json.loads(server.requests[0].body)["reasoning_effort"] == "low"
+        body = json.loads(server.requests[0].body)
+        assert body["reasoning_effort"] == "low"
+        assert "temperature" not in body
 
 
 def test_reasoning_effort_invalid_raises():

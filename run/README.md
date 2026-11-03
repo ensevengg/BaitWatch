@@ -120,7 +120,7 @@ Env var names: `BAITWATCH_DECOY_BASE_URL`, `BAITWATCH_DECOY_MODEL`,
 logs or reports), `BAITWATCH_DECOY_FALLBACK_BASE_URL`,
 `BAITWATCH_DECOY_FALLBACK_MODEL`, `BAITWATCH_DECOY_REASONING_EFFORT`
 (optional; one of `low`, `medium`, `high`; unset sends no `reasoning_effort`
-field, and an invalid value is an error; reasoning tokens count against the
+field, and an invalid value is an error; when set, `temperature` is not sent; reasoning tokens count against the
 decoy token budget), `BAITWATCH_DECOY_FALLBACK_REASONING_EFFORT` (same, for
 the fallback backend), and `BAITWATCH_PWNRATE_RUNS` (default 10); an empty-string value is treated as unset.
 Model tiers that allow the provider to train on sent text (such as Muse Spark's "contributor" tier) must not be used to scan private repositories, because the decoy sends repository contents to the model.
@@ -172,7 +172,7 @@ assert evidence.status == "incomplete"
 - Staging preserves symlinks, rejects hard links and special files, and never copies a host file when a repository file turns into a symlink during the copy.
 - Output floods and deadlines stop the container, and nonzero exit codes are kept.
 - The scripted decoy's tool calls execute inside the cage, land in `tool_log` in order, and its fake exfil reaches the DNS and HTTP sinks attributed to the cage and shows up in `file_diffs`; a decoy run that only finishes cleanly can make the whole evidence `complete`.
-- Honeytokens are generated per scan in shapes no provider's scanner matches, planted only in the staged copy before the first snapshot, and a leak to a sink or into tool output becomes a `HoneytokenHit` that forbids `ALLOW`; a hit carries only the token id, though the fake value can still appear in quoted tool output and sink detail, and a benign scan records none.
+- Honeytokens are generated per scan in shapes no provider's scanner matches, planted only in the staged copy before the first snapshot. A token sent to a sink BLOCKs, a token moved into tool arguments, reply text or an added or modified file FLAGs, and a token only read into tool output is a `tool_output` hit that does not change the verdict; a hit carries only the token id, though the fake value can still appear in quoted tool output and sink detail, and a benign scan records none.
 - A tool call that outlives its deadline is killed inside the cage and recorded timed out; forked or backgrounded work from any tool call leaves no live process behind, for compound (`sleep 100; echo done`) and backgrounded (`sleep 100 &`) commands alike.
 - The sandbox records setup failures, cleanup failures and subnet conflicts as errors, and `exec` fails closed on a cage that was never opened, has closed, or has exited.
 - The fusion flags or blocks on every incomplete READ or RUN, blocks on sink contacts outside the package registries, and only allows a clean READ plus a complete decoy run without disallowed evidence — the local attack fixtures block, the benign fixture allows, and every report validates against the schema.

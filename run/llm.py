@@ -275,8 +275,10 @@ class OpenAICompatBackend:
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
-            "temperature": self.temperature,
         }
+        # Reasoning models can reject temperature alongside reasoning_effort.
+        if self.reasoning_effort is None:
+            payload["temperature"] = self.temperature
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
         if self.seed is not None:
