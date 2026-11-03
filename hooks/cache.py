@@ -271,6 +271,7 @@ class CachedScan:
     files: list[str]
     model: str
     created: float
+    covered: list[str] | None = None  # files read in full; None: not recorded
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -308,13 +309,15 @@ class ScanCache:
             reason = str(entry.get("reason", ""))
             files = [str(item) for item in entry.get("files", [])]
             model = str(entry.get("model", ""))
+            covered = entry.get("covered")
+            covered = [str(item) for item in covered] if isinstance(covered, list) else None
         except (KeyError, TypeError, ValueError):
             return None
         if verdict not in ("allow", "ask", "block"):
             return None
         if self.ttl >= 0 and time.time() - created > self.ttl:
             return None
-        return CachedScan(verdict, score, reason, files, model, created)
+        return CachedScan(verdict, score, reason, files, model, created, covered)
 
     def set(self, key: str, scan: CachedScan) -> None:
         data = self._load()

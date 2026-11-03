@@ -16,10 +16,12 @@ module imports torch; the READ scanner is imported lazily inside
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
 import re
+import shlex
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,6 +145,7 @@ class RepoScan:
     model: str = ""
     cached: bool = False
     duration_ms: float = 0.0
+    covered: list[str] | None = None  # files read in full; None: not recorded
 
 
 _RANK = {"allow": 0, "ask": 1, "block": 2}
@@ -341,6 +344,7 @@ def _store_cached_scan(
             files=scan_result.files,
             model=model,
             created=time.time(),
+            covered=scan_result.covered,
         ),
     )
 
@@ -399,6 +403,7 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
                     cached.model,
                     cached=True,
                     duration_ms=(time.perf_counter() - started) * 1000,
+                    covered=cached.covered,
                 )
 
     if mode == "keyword":
@@ -460,6 +465,7 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
         files=files,
         model=model,
         duration_ms=(time.perf_counter() - started) * 1000,
+        covered=result.stats.files_covered,
     )
     # An outage or a deadline is temporary, so scan again next time. Budget cuts
     # are stable: rescanning would give the same answer at the same cost.
@@ -467,6 +473,227 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
     if not (judge_on and (stats.judge_unavailable or stats.judge_deadline_hit)):
         _store_cached_scan(cache, repo, tag, cache_key, scan_result, model)
     return scan_result
+
+
+# Words that make a tier-3 file (source code, data) worth a model load when an
+# agent opens it. Tier 0-2 files are always scanned; loading the model for every
+# source file an agent opens would add about 5 s per file.
+_AGENT_TALK_RE = re.compile(
+    r"\b(?:ai|llm|agents?|assistants?|claude|copilot|cursor|gpt|codex|gemini|muse|"
+    r"ignore (?:all|any|previous|prior)|instructions?|system prompt)\b",
+    re.IGNORECASE,
+)
+_IMPERATIVE_RE = re.compile(
+    r"\b(?:always|never|must|do not|don't|make sure|before you|when you|you should|you must|"
+    r"first,|run|execute|download|install|fetch|send|upload|delete|disable|skip|bypass|"
+    r"add|remove|set)\b",
+    re.IGNORECASE,
+)
+_PROSE_WORDS = frozenset(
+    [
+        "the",
+        "and",
+        "all",
+        "your",
+        "you",
+        "this",
+        "that",
+        "with",
+        "from",
+        "before",
+        "after",
+        "send",
+        "run",
+        "read",
+        "file",
+        "files",
+        "user",
+        "secret",
+        "token",
+        "not",
+        "a",
+        "an",
+        "of",
+        "to",
+        "in",
+        "is",
+        "are",
+        "be",
+        "it",
+        "on",
+        "for",
+        "as",
+        "at",
+        "by",
+        "or",
+        "if",
+        "we",
+        "our",
+        "can",
+        "will",
+        "should",
+        "must",
+        "when",
+        "then",
+        "use",
+        "using",
+    ]
+)
+_BINARY_LOOKING = {
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".zip",
+    ".gz",
+    ".bin",
+    ".exe",
+    ".dll",
+    ".so",
+    ".dylib",
+    ".pyc",
+    ".class",
+    ".wasm",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".doc",
+    ".docx",
+    ".xlsx",
+}
+_READING_COMMANDS = {"cat", "head", "tail", "less", "more", "bat", "nl", "sed", "awk"}
+_MAX_READ_TARGETS = 5
+_SHELL_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
+
+
+def _read_targets(tool: str, data: dict) -> list[str]:
+    """Files this tool call will show the agent, as far as can be told statically."""
+    if tool in ("read", "view", "open"):
+        path = data.get("file_path") or data.get("path")
+        return [str(path)] if path else []
+    if tool not in ("bash", "shell", "terminal", "run_command"):
+        return []
+    targets: list[str] = []
+    for part in _SHELL_SPLIT_RE.split(str(data.get("command") or data.get("cmd") or "")):
+        try:
+            words = shlex.split(part)
+        except ValueError:
+            continue
+        if not words or Path(words[0]).name not in _READING_COMMANDS:
+            continue
+        args = [word for word in words[1:] if not word.startswith("-") and not word.isdigit()]
+        if Path(words[0]).name in ("sed", "awk"):
+            args = args[1:]  # the first free argument is the script
+        targets.extend(args)
+    return targets[:_MAX_READ_TARGETS]
+
+
+def _has_imperative_prose(text: str) -> bool:
+    """A line that reads as an English instruction, such as one in a comment or string."""
+    for line in text.splitlines():
+        words = re.findall(r"[A-Za-z']+", line)
+        if (
+            len(words) >= 7
+            and _IMPERATIVE_RE.search(line)
+            and sum(word.lower() in _PROSE_WORDS for word in words) >= 2
+        ):
+            return True
+    return False
+
+
+def _worth_scanning_on_read(path: Path, rel: str) -> bool:
+    """Tier 0-2 always; tier 3 when it looks agent-directed, decoded or not.
+
+    On real attack windows this sees 91%, and it asks for the model on 38% of
+    ordinary source files. Scanning anything with prose sees all of them, but
+    asks on 71%, at about 5 s per file.
+    """
+    from attacks.decoderlib import builtin_decoders, produce_views
+    from hooks.lightread import load
+
+    if load("tiers").priority_tier(rel) <= 2:
+        return True
+    rule_hits = load("rules").rule_hits
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(262_144)
+    except OSError:
+        return False
+    if path.suffix.lower() in _BINARY_LOOKING and b"\x00" not in raw[:8192]:
+        return True  # text wearing a binary extension, which the repository scan skips
+    text = raw.decode("utf-8", "replace")
+    return any(
+        _AGENT_TALK_RE.search(view.text) or rule_hits(view.text) or _has_imperative_prose(view.text)
+        for view in produce_views(text, builtin_decoders())
+    )
+
+
+def scan_opened_file(path: Path, rel: str, *, cache=None) -> Decision:
+    """Score one file the repository scan did not cover, as the agent opens it."""
+    from hooks.cache import CachedScan
+    from read.config import ReadConfig
+    from read.scan import scan
+    from read.walk import priority_tier
+
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        return Decision("B", "ask", f"could not read {rel} to check it: {exc}", source="read")
+    key = f"open|{digest}|{rel}|{_read_tag()}|{_hook_judge_on()}"
+    if cache is not None:
+        hit = cache.get(key)
+        if hit is not None:
+            return Decision("B", hit.verdict, hit.reason, source="read", files=hit.files)
+    cfg = ReadConfig.quick()
+    # One file: its gaps count, whatever its tier.
+    cfg.bulk_best_effort = False
+    cfg.judge.max_windows_per_file = cfg.judge.max_windows_per_agent_file
+    cfg.judge.enabled = _hook_judge_on()
+    if cfg.judge.enabled:
+        cfg.judge.deadline_s = max(1.0, _hook_deadline() - HOOK_DECISION_MARGIN_S)
+    result = scan(path, cfg=cfg)
+    stats = result.stats
+    if result.read_verdict == "attack":
+        verdict = _verdict_from_read("attack", result.max_score) if cfg.judge.enabled else "ask"
+        reason = f"{rel} contains text aimed at the agent (score {result.max_score:.2f})"
+    elif stats.partial_files and priority_tier(rel) <= 2:
+        verdict, reason = "ask", f"{rel} is too large to check in full"
+    elif stats.judge_overflow_files:
+        verdict, reason = "ask", f"{rel} has more suspicious sections than could be judged"
+    elif any(f.status == "reviewed" and f.evidence.get("note") for f in result.findings):
+        verdict, reason = "ask", f"{rel} looks suspicious and could not be judged"
+    else:
+        verdict, reason = "allow", f"{rel} checked on open"
+    if cache is not None and not (stats.judge_unavailable or stats.judge_deadline_hit):
+        cache.set(key, CachedScan(verdict, result.max_score, reason, [rel], "read", time.time()))
+    return Decision("B", verdict, reason, source="read", files=[rel])
+
+
+def _opened_file_decision(tool, data, repo_scan, root, cwd, *, cache=None) -> Decision | None:
+    """Check files this call opens that the repository scan left out, worst first."""
+    if repo_scan is None or repo_scan.covered is None or root is None:
+        return None
+    covered = set(repo_scan.covered)
+    worst: Decision | None = None
+    for raw in _read_targets(tool, data):
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(cwd) / candidate
+        lexical = Path(os.path.normpath(candidate))
+        try:
+            rel = lexical.relative_to(root).as_posix()
+        except ValueError:
+            continue  # outside the project: the credential rules still apply
+        if rel in covered or not lexical.is_file():
+            continue
+        target = lexical.resolve()
+        if not _worth_scanning_on_read(target, rel):
+            continue
+        decision = scan_opened_file(target, rel, cache=cache)
+        if worst is None or _RANK[decision.verdict] > _RANK[worst.verdict]:
+            worst = decision
+    return worst
 
 
 def prompt_risk(prompt: str) -> tuple[bool, str]:
@@ -679,6 +906,17 @@ def gate_b(payload: dict, *, scanner=scan_repo, cache=None) -> Decision:
         return decision
     policy = static_tool_decision(tool_name, tool_input)
     tool = tool_name.strip().lower()
+    if policy.verdict != "block" and root is not None and scanner is scan_repo:
+        opened = _opened_file_decision(
+            tool,
+            tool_input if isinstance(tool_input, dict) else {},
+            repo_scan,
+            root,
+            repo,
+            cache=cache,
+        )
+        if opened is not None and _RANK[opened.verdict] > _RANK[policy.verdict]:
+            policy = opened
     if (
         policy.verdict == "allow"
         and root is not None
