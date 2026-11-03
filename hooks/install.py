@@ -116,10 +116,11 @@ def _hook_entry(gate: str, python: str | None, *, matcher: str | None) -> dict:
             {
                 "type": "command",
                 "command": hook_command(gate, python),
-                "timeout": 90,
+                "timeout": 630,
+                "statusMessage": "BaitWatch is checking this repository",
                 # A timeout or startup failure must never let the action
                 # continue.  The CLI also enforces an internal deadline below
-                # 90 s, so it usually prints a decision first.
+                # 630 s, so it usually prints a decision first.
                 "onFailure": "block",
             }
         ]

@@ -46,8 +46,10 @@ _ALLOWED = ("evil.example",)
 # A prompt longer than this cannot be decoded within the hook deadline; it is
 # treated as risky (not silently allowed) instead of being inspected halfway.
 MAX_PROMPT_CHARS = 65_536
-# First scan of a tree: model plus judge. Later prompts on the same tree use the cache.
-DEFAULT_HOOK_DEADLINE_S = 75.0
+# A first scan reads the whole repository, one batch after another, and security comes
+# before speed. Most repositories finish in under 3 minutes. Later scans read only
+# what changed, and a scan that runs out of time resumes where it stopped.
+DEFAULT_HOOK_DEADLINE_S = 600.0
 HOOK_DECISION_MARGIN_S = 8.0
 BLOCK_MIN_SCORE = 0.7
 
@@ -123,6 +125,8 @@ class Decision:
     # Gate A may turn a repo/incomplete ASK into ALLOW after an explicit,
     # fingerprint-bound user approval. Prompt risk is never approvable.
     approvable: bool = False
+    detail: str = ""  # for the person at Gate A; never sent to the agent
+    notice: str = ""  # shown to the person when a prompt is allowed
 
     def as_dict(self) -> dict:
         return {
@@ -146,6 +150,8 @@ class RepoScan:
     cached: bool = False
     duration_ms: float = 0.0
     covered: list[str] | None = None  # files read in full; None: not recorded
+    detail: str = ""  # what was flagged and why, for the person at Gate A
+    notice: str = ""  # what the scan did and did not check
 
 
 _RANK = {"allow": 0, "ask": 1, "block": 2}
@@ -345,19 +351,60 @@ def _store_cached_scan(
             model=model,
             created=time.time(),
             covered=scan_result.covered,
+            detail=scan_result.detail,
         ),
     )
 
 
-def _verdict_from_read(read_verdict: str, max_score: float) -> str:
-    """Block a confident attack; ask about a low-severity one or incomplete evidence.
+def _verdict_from_read(
+    read_verdict: str, flagged: list, min_model_score: float
+) -> tuple[str, list]:
+    """The verdict, and the flagged files that only matter if an agent opens them.
 
-    Of 609 attack files the judge caught, 608 had severity 0.7 or more, so asking
-    below that rarely lets an attack off a block, and it still stops the prompt.
+    - Block: the model and the judge agree on an agent-facing file, the score is at
+      least 0.7, or BaitWatch itself failed. All 17 attack repositories we test have
+      two such signals.
+    - Ask: they agree somewhere else, the judge alone flags an agent-facing file, the
+      score is low, or no judge confirmed a model flag. Asking still stops the prompt.
+    - The judge alone on any other file does not stop the prompt: it mostly reacts to
+      ordinary install instructions there. That file is refused when opened.
     """
-    if read_verdict == "attack":
-        return "block" if max_score >= BLOCK_MIN_SCORE else "ask"
-    return "ask" if read_verdict == "incomplete" else "allow"
+    from hooks.lightread import load
+
+    if read_verdict != "attack":
+        return ("ask" if read_verdict == "incomplete" else "allow"), []
+    tier = load("tiers").priority_tier
+    deferred: list[str] = []
+    verdict = "allow"
+    for finding in flagged:
+        if finding.layer == "system":
+            return "block", []
+        confirmed = finding.layer != "model" or bool(finding.evidence.get("judge_confirmed"))
+        two_signal = confirmed and finding.evidence.get("model_score", 0.0) >= min_model_score
+        agent_facing = tier(finding.file) <= 1
+        if two_signal and agent_facing and finding.score >= BLOCK_MIN_SCORE:
+            return "block", []
+        if not confirmed or two_signal or agent_facing:
+            verdict = "ask"
+        else:
+            deferred.append(finding.file)
+    return verdict, sorted(set(deferred))
+
+
+def _flag_detail(flagged: list, limit: int = 3) -> str:
+    """Where and why, for the person at Gate A.
+
+    The judge read attacker-controlled text, so this stays short, on one line, and
+    labelled as its reading. It is never sent to the agent.
+    """
+    lines = []
+    for finding in flagged[:limit]:
+        line = finding.evidence.get("line")
+        where = f"{finding.file}:{line}" if line else finding.file
+        why = " ".join(str(finding.explanation or "no judge explanation").split())[:200]
+        why = "".join(ch for ch in why if ch.isprintable())
+        lines.append(f"- {where} (judge's reading: {why})")
+    return "\n".join(lines)
 
 
 def _hook_judge_on() -> bool:
@@ -404,6 +451,7 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
                     cached=True,
                     duration_ms=(time.perf_counter() - started) * 1000,
                     covered=cached.covered,
+                    detail=cached.detail,
                 )
 
     if mode == "keyword":
@@ -433,34 +481,81 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
         _store_cached_scan(cache, repo, tag, cache_key, scan_result, "keyword")
         return scan_result
 
+    from hooks.cache import scanner_signature
+    from read.batches import scan_in_batches
+    from read.cache import DEFAULT_FILE_CACHE_PATH, FileResultCache
     from read.config import ReadConfig  # lazy: keeps hooks importable on CPU
-    from read.scan import scan
 
     cfg = ReadConfig.quick()
     judge_on = _hook_judge_on()
     cfg.judge.enabled = judge_on
-    if judge_on:
-        # Leave time to print a decision before the hook's own deadline. What
-        # the judge did not reach is kept in its cache for the next attempt.
-        cfg.judge.deadline_s = max(1.0, _hook_deadline() - HOOK_DECISION_MARGIN_S)
-    result = scan(repo, cfg=cfg)
-    verdict = _verdict_from_read(result.read_verdict, result.max_score)
-    files = sorted({finding.file for finding in result.flagged})[:8]
-    model = Path(str(result.stats.model_path)).name
-    reason = {
-        "block": (
-            f"READ flagged {result.stats.flagged} chunk(s) in {', '.join(files[:3])} "
-            f"(max score {result.max_score:.2f})"
-        ),
-        "ask": (
-            f"READ flagged {result.stats.flagged} low-severity chunk(s) "
+    store = FileResultCache(DEFAULT_FILE_CACHE_PATH)
+    # Leave time to print a decision before the hook's own deadline. What a scan
+    # did not reach is picked up by the next one.
+    result = scan_in_batches(
+        repo,
+        cfg,
+        store=store if store.enabled else None,
+        store_salt=f"{tag}|{scanner_signature()}",
+        time_limit_s=max(1.0, _hook_deadline() - HOOK_DECISION_MARGIN_S),
+        stop_score=BLOCK_MIN_SCORE,
+    )
+    stats = result.stats
+    flagged = result.flagged
+    confirmed = any(
+        finding.layer != "model" or finding.evidence.get("judge_confirmed") for finding in flagged
+    )
+    verdict, deferred = _verdict_from_read(result.read_verdict, flagged, cfg.review_low)
+    files = sorted({finding.file for finding in flagged})[:8]
+    names = ", ".join(files[:3])
+    model = Path(str(stats.model_path)).name
+    total = stats.best_effort_gaps + len(stats.files_covered)
+    if result.read_verdict != "attack":
+        ask_reason = "READ could not cover the repository completely: " + "; ".join(
+            stats.incomplete_reasons[:3]
+        )
+    elif confirmed:
+        ask_reason = (
+            f"READ flagged {stats.flagged} chunk(s) in {names} "
             f"(max score {result.max_score:.2f}): review before continuing"
-            if result.read_verdict == "attack"
-            else "READ could not cover the repository completely: "
-            + "; ".join(result.stats.incomplete_reasons[:3])
-        ),
-        "allow": "READ found no injection",
+        )
+    elif judge_on:
+        ask_reason = (
+            f"the model flagged {names} (max score {result.max_score:.2f}), but the judge "
+            f"could not confirm it: {stats.judge_last_error or 'no answer'}"
+        )
+    else:
+        ask_reason = (
+            f"the model flagged {names} (max score {result.max_score:.2f}), but no judge "
+            "confirmed it, and the model alone often flags harmless files. "
+            "Set META_API_KEY to turn the judge on"
+        )
+    reason = {
+        "block": f"READ flagged {stats.flagged} chunk(s) in {names} "
+        f"(max score {result.max_score:.2f})",
+        "ask": ask_reason,
+        "allow": f"READ found no injection in the {len(stats.files_covered)} files it checked",
     }[verdict]
+    # A deferred file stays out of "covered", so Gate B refuses it when it is opened.
+    covered = [rel for rel in stats.files_covered if rel not in deferred]
+    notice = ""
+    if deferred:
+        notice = (
+            f"BaitWatch found text aimed at agents in {', '.join(deferred[:3])}"
+            f"{' and others' if len(deferred) > 3 else ''}. The prompt can run, "
+            "but an agent is stopped if it opens these files."
+        )
+    elif verdict == "allow" and not stats.files_cached:
+        notice = (
+            f"BaitWatch checked {len(stats.files_covered)} of {total} files and found no "
+            "injection. This lowers the risk; it does not prove the repository is safe."
+        )
+        if stats.best_effort_gaps:
+            notice += (
+                " Files it skipped, such as generated ones, are checked if an agent opens them."
+            )
+    if verdict == "allow" and not judge_on:
+        notice = f"{notice} No judge is running: set META_API_KEY for better results.".strip()
     scan_result = RepoScan(
         verdict=verdict,
         score=result.max_score,
@@ -468,12 +563,16 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
         files=files,
         model=model,
         duration_ms=(time.perf_counter() - started) * 1000,
-        covered=result.stats.files_covered,
+        covered=covered,
+        detail=_flag_detail(flagged) if verdict != "allow" else "",
+        notice=notice,
     )
-    # An outage or a deadline is temporary, so scan again next time. Budget cuts
-    # are stable: rescanning would give the same answer at the same cost.
-    stats = result.stats
-    if not (judge_on and (stats.judge_unavailable or stats.judge_deadline_hit)):
+    # An outage or running out of time is temporary, so scan again next time. Budget
+    # cuts are stable: rescanning would give the same answer at the same cost.
+    if not (
+        stats.scan_time_limit_hit
+        or (judge_on and (stats.judge_unavailable or stats.judge_deadline_hit))
+    ):
         _store_cached_scan(cache, repo, tag, cache_key, scan_result, model)
     return scan_result
 
@@ -615,7 +714,8 @@ def _worth_scanning_on_read(path: Path, rel: str) -> bool:
     from attacks.decoderlib import builtin_decoders, produce_views
     from hooks.lightread import load
 
-    if load("tiers").priority_tier(rel) <= 2:
+    tiers = load("tiers")
+    if tiers.priority_tier(rel) <= 2 or tiers.is_generated(rel):
         return True
     rule_hits = load("rules").rule_hits
     try:
@@ -675,7 +775,7 @@ def scan_opened_file(path: Path, rel: str, *, cache=None, started: float | None 
     result = scan(path, cfg=cfg)
     stats = result.stats
     if result.read_verdict == "attack":
-        verdict = _verdict_from_read("attack", result.max_score) if cfg.judge.enabled else "ask"
+        verdict = "block" if cfg.judge.enabled and result.max_score >= BLOCK_MIN_SCORE else "ask"
         reason = f"{rel} contains text aimed at the agent (score {result.max_score:.2f})"
     elif stats.partial_files and priority_tier(rel) <= 2:
         verdict, reason = "ask", f"{rel} is too large to check in full"
@@ -865,7 +965,13 @@ def _combine(
     if verdict == "allow":
         reasons.append("no repository risk and no dangerous tool pattern")
     return Decision(
-        gate, verdict, "; ".join(reason for reason in reasons if reason), source=source, files=files
+        gate,
+        verdict,
+        "; ".join(reason for reason in reasons if reason),
+        source=source,
+        files=files,
+        detail=repo.detail if repo is not None else "",
+        notice=repo.notice if repo is not None and not repo.cached else "",
     )
 
 
@@ -906,6 +1012,22 @@ def gate_a(payload: dict, *, scanner=scan_repo, cache=None) -> Decision:
             if part
         )
         decision.source = "error"
+    if (
+        decision.verdict == "block"
+        and not risky
+        and not unresolved
+        and root is not None
+        and repo_scan is not None
+        and repo_scan.verdict == "block"
+    ):
+        from hooks.cache import ApprovalStore
+
+        if ApprovalStore().is_approved(root, block=True):
+            decision.verdict = "allow"
+            decision.detail = ""
+            decision.reason = (
+                f"{decision.reason}; the user chose to continue past this for this exact tree"
+            )
     if decision.verdict == "ask" and not risky and not unresolved and root is not None:
         decision.approvable = True
         from hooks.cache import ApprovalStore
@@ -935,10 +1057,10 @@ def gate_b(payload: dict, *, scanner=scan_repo, cache=None) -> Decision:
     repo_scan = None
     if status == "ok" and root is not None:
         repo_scan = scanner(root) if scanner is not scan_repo else scan_repo(root, cache=cache)
-    if repo_scan is not None and repo_scan.verdict == "ask":
+    if repo_scan is not None and repo_scan.verdict in ("ask", "block"):
         from hooks.cache import ApprovalStore
 
-        if ApprovalStore().is_approved(root):
+        if ApprovalStore().is_approved(root, block=repo_scan.verdict == "block"):
             # The user approved this exact tree at Gate A. Actions are still checked below.
             repo_scan = replace(
                 repo_scan,

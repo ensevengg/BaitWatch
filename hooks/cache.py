@@ -219,6 +219,7 @@ def scanner_signature() -> str:
         "attacks/decoders.py",
         "read/decoders.py",
         "read/scan.py",
+        "read/batches.py",
         "read/walk.py",
         "read/tiers.py",
         "read/rules.py",
@@ -272,6 +273,8 @@ class CachedScan:
     model: str
     created: float
     covered: list[str] | None = None  # files read in full; None: not recorded
+    detail: str = ""  # what was flagged and why, for the person at Gate A
+    notice: str = ""  # what the scan did and did not check
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -311,13 +314,15 @@ class ScanCache:
             model = str(entry.get("model", ""))
             covered = entry.get("covered")
             covered = [str(item) for item in covered] if isinstance(covered, list) else None
+            detail = str(entry.get("detail", ""))
+            notice = str(entry.get("notice", ""))
         except (KeyError, TypeError, ValueError):
             return None
         if verdict not in ("allow", "ask", "block"):
             return None
         if self.ttl >= 0 and time.time() - created > self.ttl:
             return None
-        return CachedScan(verdict, score, reason, files, model, created, covered)
+        return CachedScan(verdict, score, reason, files, model, created, covered, detail, notice)
 
     def set(self, key: str, scan: CachedScan) -> None:
         data = self._load()
@@ -379,7 +384,9 @@ class ApprovalStore:
     def _key(self, root: Path, fingerprint: str) -> str:
         return f"{root}|{fingerprint}"
 
-    def approve(self, repo: str | Path, minutes: float | None = None) -> str:
+    def approve(
+        self, repo: str | Path, minutes: float | None = None, *, allow_block: bool = False
+    ) -> str:
         root = Path(repo).resolve()
         fingerprint = repo_fingerprint(root, exclude=[self.path])
         if fingerprint is None:
@@ -392,17 +399,19 @@ class ApprovalStore:
             "fingerprint": fingerprint,
             "created": now,
             "expires": now + seconds,
+            "allow_block": allow_block,
         }
         self._write(data)
         return fingerprint
 
-    def is_approved(self, repo: str | Path) -> bool:
+    def is_approved(self, repo: str | Path, *, block: bool = False) -> bool:
+        """``block``: the approval must also have been given for a BLOCK verdict."""
         root = Path(repo).resolve()
         fingerprint = repo_fingerprint(root, exclude=[self.path])
         if fingerprint is None:
             return False
         entry = self._load().get(self._key(root, fingerprint))
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or (block and entry.get("allow_block") is not True):
             return False
         try:
             return float(entry.get("expires", 0)) > time.time()

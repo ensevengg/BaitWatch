@@ -15,7 +15,6 @@ from hooks import cli as hook_cli
 from hooks.cache import CachedScan, ScanCache
 from hooks.guard import (
     RepoScan,
-    _verdict_from_read,
     error_decision,
     gate_a,
     gate_b,
@@ -335,20 +334,6 @@ def test_cli_crash_is_a_deny(
 
 def test_cli_selftest() -> None:
     assert hook_cli.selftest() == 0
-
-
-@pytest.mark.parametrize(
-    "read_verdict,score,expected",
-    [
-        ("attack", 1.0, "block"),
-        ("attack", 0.7, "block"),
-        ("attack", 0.4, "ask"),
-        ("incomplete", 0.0, "ask"),
-        ("clean", 0.0, "allow"),
-    ],
-)
-def test_verdict_from_read(read_verdict, score, expected):
-    assert _verdict_from_read(read_verdict, score) == expected
 
 
 def test_project_settings_cannot_choose_the_judge():

@@ -98,6 +98,7 @@ _USER_HOOK_ENV_KEYS = (
     "BAITWATCH_FALLBACK_MODEL",
     "BAITWATCH_JUDGE_USD_CAP",
     "BAITWATCH_JUDGE_CACHE",
+    "BAITWATCH_FILE_CACHE",
     "BAITWATCH_SPEND_LEDGER",
 )
 
@@ -178,19 +179,28 @@ def emit(decision: Decision, host: str = "claude") -> None:
     gate = decision.gate.upper()
     if gate == "A":
         if decision.verdict == "block":
-            payload = {"decision": "block", "reason": decision.reason}
+            reason = decision.reason
+            if decision.detail:
+                reason = f"{reason}\n{decision.detail}"
+            if decision.source in ("repo", "cache"):
+                reason = (
+                    f"{reason}\nIf you have read this and trust the repository, run "
+                    f"`{approve_command()} --allow-block` and resubmit the prompt."
+                )
+            payload = {"decision": "block", "reason": reason}
         elif decision.verdict == "ask":
             # Claude Code's UserPromptSubmit contract has no ASK: context plus
             # exit 0 would run the prompt immediately.  Turn the ask into a
             # block that tells the user exactly how to approve and retry.
             reason = (
                 f"BaitWatch needs approval before this prompt runs: {decision.reason}. "
-                f"Inspect the repository, then run `{approve_command()}` "
+                + (f"{decision.detail} " if decision.detail else "")
+                + f"Inspect the repository, then run `{approve_command()}` "
                 "and resubmit the prompt."
             )
             payload = {"decision": "block", "reason": reason}
         else:
-            payload = {}
+            payload = {"systemMessage": decision.notice} if decision.notice else {}
     else:
         if decision.verdict in ("block", "ask"):
             payload = {
@@ -420,7 +430,7 @@ def _approve_command(args: argparse.Namespace) -> int:
             print(f"revoked {removed} approval(s) for {root}")
             return 0
         try:
-            fingerprint = store.approve(root, args.minutes)
+            fingerprint = store.approve(root, args.minutes, allow_block=args.allow_block)
         except (OSError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -478,6 +488,11 @@ def main(argv: list[str] | None = None) -> int:
     approve_parser.add_argument("--repo", type=Path, default=None)
     approve_parser.add_argument("--minutes", type=float, default=15.0)
     approve_parser.add_argument("--revoke", action="store_true")
+    approve_parser.add_argument(
+        "--allow-block",
+        action="store_true",
+        help="also continue past a BLOCK for this exact tree; read the reason first",
+    )
 
     cache_parser = sub.add_parser("cache")
     cache_parser.add_argument("cache_action", choices=("path", "clear"))
