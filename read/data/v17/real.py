@@ -142,7 +142,7 @@ def inserted_blocks(texts: list[str], min_share: float = 0.5) -> list[dict]:
 def load_skillharm(raw: Path) -> tuple[list[dict], Counter]:
     root = raw / SKILLHARM
     groups: dict[str, list[dict]] = defaultdict(list)
-    for x in json.loads((root / "MANIFEST.json").read_text())["fpp"]:
+    for x in json.loads((root / "MANIFEST.json").read_text(encoding="utf-8"))["fpp"]:
         path = root / x["path"] / x["target_path"]
         if Path(x["target_path"]).name == "SKILL.md" and path.is_file():
             groups[x["task_id"] + "/" + x["target_path"]].append(
@@ -274,8 +274,8 @@ def _agent_carriers(carriers_dir: Path, agent_dir: Path, exclude: Path) -> list:
     from read.data.v17.agentfiles import PERMISSIVE, split_for_repo
     from read.data.v17.carriers import index_agentfiles
     from read.data.v17.sources import TEST_REPOS, TRAIN_REPOS
-    lock = json.loads((agent_dir / "agentfiles_lock.json").read_text())
-    excluded = set(json.loads(exclude.read_text())) if exclude.exists() else set()
+    lock = json.loads((agent_dir / "agentfiles_lock.json").read_text(encoding="utf-8"))
+    excluded = set(json.loads(exclude.read_text(encoding="utf-8"))) if exclude.exists() else set()
     return [c for c in index_agentfiles(agent_dir / "files", lock)
             if f"{c.repo}:{c.rel}" not in excluded
             and lock["repos"].get(c.repo, {}).get("license") in PERMISSIVE
@@ -376,7 +376,8 @@ def build(raw: Path, base: Path, out_dir: Path, tokenizer: Path, attacks: Path,
                 "added_by_source": new.groupby(["source", "label"]).size().rename(
                     lambda x: str(x)).reset_index(name="n").to_dict("records"),
                 "leaked_into_judged_splits": leaked}
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str),
+                                           encoding="utf-8")
     return manifest
 
 
@@ -393,7 +394,7 @@ def _case(root: Path, side: str, case: str, file: str, text: str, label: int, in
 def _write_set(root: Path, cases: list[dict]) -> None:
     (root / "attack").mkdir(parents=True, exist_ok=True)
     (root / "benign").mkdir(parents=True, exist_ok=True)
-    (root / "cases.json").write_text(json.dumps(cases, indent=1))
+    (root / "cases.json").write_text(json.dumps(cases, indent=1), encoding="utf-8")
 
 
 def heldout(raw: Path, attacks: Path, carriers: Path, out: Path) -> dict:
@@ -444,7 +445,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "heldout":
         print(json.dumps(heldout(raw, attacks, HOME / "v17_raw/carriers", Path(args.out or HOME))))
         return 0
-    exclude = set(json.loads(Path(args.exclude).read_text())) if args.exclude else set()
+    exclude = (set(json.loads(Path(args.exclude).read_text(encoding="utf-8")))
+               if args.exclude else set())
     redteam = [HOME / "v17_raw/glm" / d for d in ("zcode", "zcode_strong", "opencode")]
     if args.command == "review":
         from read.data.v17.snippets import assign_split, load_batches

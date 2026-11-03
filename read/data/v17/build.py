@@ -312,7 +312,7 @@ def build(out_dir: Path, tokenizer_path: Path, old_dir: Path, seed: int = 42,
     glm_stats = None
     if glm_dir is not None:
         from read.data.v17.glm import add_glm
-        excl = set(json.loads(glm_exclude.read_text())) if glm_exclude else set()
+        excl = set(json.loads(glm_exclude.read_text(encoding="utf-8"))) if glm_exclude else set()
         glm_stats = add_glm(out, chunker, plant_snippet, train_pool, glm_dir, muse_dir,
                             redteam_dirs or [], excl, plants, rng, stats)
 
