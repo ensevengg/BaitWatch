@@ -803,5 +803,5 @@ def test_quick_preset_finds_a_payload_in_the_middle_of_a_long_file(fake_detector
             cfg.max_chunks_per_file = max_chunks
         return scan(repo, cfg, detector=fake_detector, decoders=[]).read_verdict
 
-    assert verdict(8) == "clean", "with 8 chunks the payload is out of reach"
+    assert verdict(8) == "incomplete", "out of reach with 8 chunks, and reported as a gap"
     assert verdict(None) == "attack"

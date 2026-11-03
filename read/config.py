@@ -163,6 +163,11 @@ class ReadConfig:
     score_cache_path: Path | None = None
     on_file_error: str = "flag"            # "flag" (fail-closed) or "skip"
     enable_decoders: bool = True
+    # Hook preset: tiers 2 and 3 (see read/tiers.py) are best effort, so gaps in
+    # them no longer make the verdict incomplete. Those files are left out of
+    # stats.files_covered, and the hook scans them when an agent opens one.
+    bulk_best_effort: bool = False
+    max_chunks_per_scan: int | None = None  # tier 2/3 files stop being chunked past this
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     walker: WalkerConfig = field(default_factory=WalkerConfig)
 
@@ -184,8 +189,13 @@ class ReadConfig:
         makes that incomplete.
         """
         cfg = cls()
-        cfg.walker.max_files = 400
-        cfg.max_chunks_per_file = 64
+        cfg.walker.max_files = 2_000
+        # Enough for a long README or workflow: a partly scanned agent-facing file
+        # makes the verdict incomplete.
+        cfg.max_file_tokens = 60_000
+        cfg.max_chunks_per_file = 160
+        cfg.bulk_best_effort = True
+        cfg.max_chunks_per_scan = 2_500    # about 25 s of model time on the demo GPU
         # The inline hook must not block on judge round-trips: detector-only.
         # Review-band chunks it surfaces are reported as unjudged/incomplete
         # (see read/scan.py), never silently clean.

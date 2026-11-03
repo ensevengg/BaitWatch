@@ -44,7 +44,7 @@ from read.findings import (LAYER_JUDGE, LAYER_MODEL, LAYER_SYSTEM,
                            STATUS_FLAGGED, STATUS_REVIEWED, Finding,
                            system_finding)
 from read.judge import Judge, JudgeResult, ScanBudget
-from read.walk import sniff_encoding, walk
+from read.walk import priority_tier, sniff_encoding, walk
 
 __all__ = ["ScanResult", "scan", "VERDICT_ATTACK", "VERDICT_INCOMPLETE", "VERDICT_CLEAN"]
 
@@ -79,6 +79,11 @@ class ScanStats:
     elapsed_s: float = 0.0
     truncated_scan: bool = False    # walker file cap hit
     files_over_cap: int = 0         # files the walker cap left unscanned
+    agent_files_over_cap: int = 0   # of those, tier 0 or 1
+    # Best-effort mode: tier 0/1 files only partly scanned.
+    agent_files_partial: list[str] = field(default_factory=list)
+    best_effort_gaps: int = 0       # best-effort mode: tier 2/3 files skipped or partly scanned
+    files_covered: list[str] = field(default_factory=list)  # read in full, every view scored
     detector_error: str | None = None
     decoder_errors: list[str] = field(default_factory=list)
     incomplete_reasons: list[str] = field(default_factory=list)
@@ -391,12 +396,20 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
         stats.unreadable_files = len(walk_result.unreadable)
         stats.truncated_scan = walk_result.truncated_scan
         stats.files_over_cap = walk_result.files_over_cap
+        stats.agent_files_over_cap = walk_result.agent_files_over_cap
 
     findings: list[Finding] = []
 
     # Pass 1: read text (head + tail), build decoded views, mask blobs, chunk.
     chunks: list[Chunk] = []
     for fpath, rel, encoding in scanned_files:
+        best_effort = cfg.bulk_best_effort and priority_tier(rel) >= 2
+        if (best_effort and cfg.max_chunks_per_scan is not None
+                and len(chunks) >= cfg.max_chunks_per_scan):
+            # The walker sorts tier 0 and 1 first, so only bulk files reach this.
+            stats.best_effort_gaps += 1
+            continue
+        before = (stats.views_dropped, stats.decoded_views_uncovered, len(decoder_errors))
         try:
             ft = _read_file(fpath, cfg.walker.max_file_bytes, cfg.tail_bytes, encoding)
         except OSError as exc:
@@ -523,8 +536,20 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
                 next_id += 1
             chunks.extend(segment_chunks)
             budget_left -= len(segment_chunks)
+        spent = (stats.views_dropped, stats.decoded_views_uncovered,
+                 len(decoder_errors)) != before
         if partial:
             stats.partial_files += 1
+        if partial or spent:
+            if best_effort:
+                # Recorded as a gap, not as evidence the whole scan fell short.
+                stats.views_dropped, stats.decoded_views_uncovered = before[:2]
+                del decoder_errors[before[2]:]
+                stats.best_effort_gaps += 1
+            elif cfg.bulk_best_effort and partial:
+                stats.agent_files_partial.append(rel)
+        else:
+            stats.files_covered.append(rel)
     stats.decoder_errors = [f"{name}: {msg}" for name, msg in decoder_errors]
 
     # Pass 2: one batched GPU pass over the distinct chunk texts.
@@ -681,7 +706,16 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
                         for rel, reason in walk_result.unreadable)
 
     reasons: list[str] = []
-    if stats.truncated_scan:
+    if cfg.bulk_best_effort:
+        stats.best_effort_gaps += stats.files_over_cap - stats.agent_files_over_cap
+        if stats.agent_files_over_cap:
+            reasons.append(f"file cap: {stats.agent_files_over_cap} agent-facing file(s) beyond "
+                           f"max_files={cfg.walker.max_files} not scanned")
+        if stats.agent_files_partial:
+            names = ", ".join(stats.agent_files_partial[:3])
+            reasons.append(f"partial coverage: {len(stats.agent_files_partial)} agent-facing "
+                           f"file(s) only partly scanned ({names})")
+    elif stats.truncated_scan:
         reasons.append(f"file cap: {stats.files_over_cap} file(s) beyond "
                        f"max_files={cfg.walker.max_files} not scanned")
     if stats.views_dropped:

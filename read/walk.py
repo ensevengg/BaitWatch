@@ -34,28 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from read.config import WalkerConfig
-
-# Tier 0: files coding agents load as instructions or configuration.
-AGENT_FILE_NAMES = frozenset({
-    "agents.md", "agent.md", "claude.md", "claude.local.md", "gemini.md",
-    "codex.md", "conventions.md", ".cursorrules", ".clinerules",
-    ".windsurfrules", ".roorules", ".goosehints", "copilot-instructions.md",
-    ".mcp.json", "mcp.json", "skill.md",
-})
-AGENT_DIR_PREFIXES = (
-    ".claude/", ".cursor/", ".windsurf/", ".clinerules/", ".roo/",
-    ".continue/", ".github/instructions/", ".github/prompts/",
-    ".github/chatmodes/", ".vscode/",
-)
-# Tier 1: what an agent reads next — READMEs, contributing guides, manifests
-# and install/CI scripts it is likely to run.
-TIER1_NAMES = frozenset({
-    "readme", "readme.md", "readme.rst", "readme.txt", "contributing.md",
-    "install.md", "setup.md", "package.json", "pyproject.toml", "setup.py",
-    "setup.cfg", "makefile", "dockerfile", "docker-compose.yml",
-    "requirements.txt", "cargo.toml", "go.mod", "install.sh", "setup.sh",
-})
-TIER1_DIR_PREFIXES = (".github/workflows/", ".devcontainer/")
+from read.tiers import AGENT_DIR_PREFIXES, TIER1_DIR_PREFIXES, priority_tier
 
 _UTF32_BOMS = (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
@@ -79,6 +58,7 @@ class WalkResult:
     unreadable: list[tuple[str, str]] = field(default_factory=list)  # (rel_path, reason)
     truncated_scan: bool = False     # file cap hit: not everything was inspected
     files_over_cap: int = 0          # how many scannable files the cap cut
+    agent_files_over_cap: int = 0    # of those, how many were tier 0 or 1
 
     @property
     def n_scanned(self) -> int:
@@ -117,18 +97,6 @@ def _is_within(repo_root: Path, target: Path) -> bool:
         return True
     except ValueError:
         return False
-
-
-def priority_tier(rel_path: str) -> int:
-    rel = rel_path.replace(os.sep, "/").lower()
-    name = rel.rsplit("/", 1)[-1]
-    if name in AGENT_FILE_NAMES or rel.startswith(AGENT_DIR_PREFIXES) \
-            or any(f"/{p}" in f"/{rel}" for p in AGENT_DIR_PREFIXES):
-        return 0
-    if name in TIER1_NAMES or name.startswith("readme") \
-            or rel.startswith(TIER1_DIR_PREFIXES):
-        return 1
-    return 2
 
 
 def _dir_tier(rel_dir: str) -> int:
@@ -293,6 +261,8 @@ def walk(repo_root: Path, cfg: WalkerConfig | None = None) -> WalkResult:
         if len(result.files) >= cfg.max_files:
             result.truncated_scan = True
             result.files_over_cap += 1
+            if priority_tier(cand.rel) <= 1:
+                result.agent_files_over_cap += 1
             continue
         try:
             with open(cand.read_path, "rb") as f:
