@@ -379,3 +379,15 @@ def test_redteam_thresholds_missing_is_an_actionable_error(tmp_path):
 
     with pytest.raises(ValueError, match="--flag"):
         resolve_thresholds(None, 0.3, tmp_path, {})
+
+
+def test_live_page_keeps_a_threshold_per_red_team_set(tmp_path):
+    from read.training.live import redteam_reports
+
+    for rt_set, thr in (("malware", 0.9), ("aditya0", 0.8)):
+        report = {"at_flag": {"threshold": thr, "recall": {"all": {"rate": 0.5, "n": 2}}}}
+        (tmp_path / f"m_{rt_set}.json").write_text(json.dumps(report))
+    row = redteam_reports(tmp_path)[0]
+    assert row["malware"]["threshold"] == 0.9
+    assert row["aditya0"]["threshold"] == 0.8
+    assert "threshold" not in row

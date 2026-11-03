@@ -155,8 +155,8 @@ def redteam_reports(root: Path, prefix: str = "") -> list[dict]:
             continue
         r = rows.setdefault(name, {"name": prefix + name, "mtime": 0.0})
         ff = a.get("false_flag", {}).get("all", {})
-        r[rt_set] = {"recall": a["recall"]["all"]["rate"], "ff": ff.get("rate"), "ff_n": ff.get("n")}
-        r["threshold"] = a.get("threshold")
+        r[rt_set] = {"recall": a["recall"]["all"]["rate"], "ff": ff.get("rate"), "ff_n": ff.get("n"),
+                     "threshold": a.get("threshold")}
         r["mtime"] = max(r["mtime"], p.stat().st_mtime)
     return sorted(rows.values(), key=lambda r: r["mtime"])
 

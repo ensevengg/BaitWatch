@@ -153,6 +153,7 @@ const STATUS = {
   idle:     { color: "var(--muted)",    icon: "○", label: "Idle" },
 };
 
+const WATCHER_STALE_MS = 20000;
 let lastData = null, hoverX = null, lastSeen = Date.now(), lastTs = null;
 
 // Report names and log lines come from files on disk: insert them as text.
@@ -319,8 +320,13 @@ function renderExtras(d) {
     $("redteam").classList.remove("muted");
     const sets = Object.entries(d.redteam_sets || {}).filter(([k]) => rt.some(r => r[k]));
     const cell = (x) => !x ? `<td class="num">–</td>` : `<td class="num">${fmtPct(x.recall)}${x.ff_n ? `<span class="muted"> · ${fmtPct(x.ff)} FF</span>` : ""}</td>`;
+    // Reports for one model can use different cutoffs: never show one as all of them.
+    const thresholdOf = (r) => {
+      const seen = [...new Set(sets.map(([k]) => r[k] && r[k].threshold).filter(t => t != null))];
+      return seen.length > 1 ? "mixed" : fmtNum(seen[0], 4);
+    };
     $("redteam").innerHTML = `<table><tr><th>Model</th>${sets.map(([, n]) => `<th class="num">${esc(n)}</th>`).join("")}<th class="num">Threshold</th></tr>` +
-      rt.map(r => `<tr><td>${esc(r.name)}</td>${sets.map(([k]) => cell(r[k])).join("")}<td class="num">${fmtNum(r.threshold, 4)}</td></tr>`).join("") + `</table>`;
+      rt.map(r => `<tr><td>${esc(r.name)}</td>${sets.map(([k]) => cell(r[k])).join("")}<td class="num">${thresholdOf(r)}</td></tr>`).join("") + `</table>`;
   }
 }
 
@@ -328,6 +334,7 @@ function renderExtras(d) {
 setInterval(() => {
   const d = lastData, run = d && d.run;
   if (!run || run.status !== "running" || run.stage !== "training") return;
+  if (Date.now() - lastSeen > WATCHER_STALE_MS) return;   // no data, so no estimate either
   const dt = (Date.now() - lastSeen) / 1000;
   if (run.elapsed_s != null) $("elapsed").textContent = fmtDur(run.elapsed_s + dt);
   if (run.eta_s != null) $("eta").textContent = fmtDur(Math.max(0, run.eta_s - dt));
@@ -352,7 +359,7 @@ function poll() {
   };
   s.onerror = () => s.remove();
   document.head.appendChild(s);
-  if (Date.now() - lastSeen > 20000) {
+  if (Date.now() - lastSeen > WATCHER_STALE_MS) {
     $("updated").innerHTML = `<span class="stale">watcher not updating — is read.training.live running?</span>`;
     $("status").innerHTML = `<span class="pill"><span style="color:${STATUS.idle.color}">${STATUS.idle.icon}</span>Unknown</span>`;
   }
