@@ -5,7 +5,7 @@ allowed to run in it.
 
 ```
 walk (symlink-safe) → decode hidden payloads → chunk (≤512 tokens)
-   → fine-tuned Llama Prompt Guard 2 detector → Muse Spark judge (escalate-only)
+   → fine-tuned Llama Prompt Guard 2 detector → Muse Spark judge
    → Finding[] for the verdict engine
 ```
 
@@ -104,10 +104,15 @@ Fail-closed semantics the engine can rely on:
   HTML-entity / URL decoders are gated (decoded runs, multi-escape lines, or
   materially encoded text only) and rot13/reversed keep an English-likeness
   gate, so ordinary files containing `&amp;` or `%20` gain no decoded view.
-- The judge can **escalate** (flag an uncertain chunk, raise a score) but can
-  **never clear** a chunk the model flagged — at most it records its dissent
-  in `explanation`. Inside the uncertain band (`review_low..flag_threshold`)
-  a "benign" verdict downgrades the chunk to `status="reviewed"`.
+- When the judge answers, it decides: "attack" flags a window from any tier and
+  "benign" clears one, even above `flag_threshold`. A flag it did not answer for
+  stays flagged, and only the primary endpoint can clear. Limits and reasons:
+  `read/docs/JUDGE.md`.
+- `ReadConfig.quick()` (the hook preset) treats tier 2 and 3 files
+  (`read/tiers.py`) as best effort: a gap in them is counted in
+  `stats.best_effort_gaps`, not in `incomplete_reasons`, and they are left out of
+  `stats.files_covered`. Gate B scans them when an agent opens one. Tier 0 and 1
+  gaps still make the verdict `"incomplete"`.
 
 ## Detector
 
@@ -131,8 +136,8 @@ base model ships no label names, so index→name mapping is pinned in code:
 `read/judge.py` speaks the OpenAI chat-completions dialect on stdlib urllib
 to keep the READ side dependency-free. Endpoints (first live one wins):
 Meta Model API (key in `META_API_KEY`) → local `llama-server` with the
-Llama-3.2-3B GGUF. Design rules: 10 s timeout, only suspicious chunks are
-sent, escalate-only, per-scan call/token budgets, and a persistent USD ledger
+Llama-3.2-3B GGUF. Design rules: 30 s timeout, only suspicious chunks are
+sent, a flag stands unless the primary endpoint clears it, per-scan call/token budgets, and a persistent USD ledger
 capped at $120 per key in code (a spend-limit notice does not stop billing).
 Details: `read/docs/JUDGE.md`.
 

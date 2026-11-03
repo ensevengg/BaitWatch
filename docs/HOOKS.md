@@ -54,7 +54,7 @@ The generated hook entries look like this:
           {
             "type": "command",
             "command": "\"/usr/bin/python3\" -I -m hooks gate-a --user-config",
-            "timeout": 30,
+            "timeout": 75,
             "onFailure": "block"
           }
         ]
@@ -67,7 +67,7 @@ The generated hook entries look like this:
           {
             "type": "command",
             "command": "\"/usr/bin/python3\" -I -m hooks gate-b --user-config",
-            "timeout": 30,
+            "timeout": 75,
             "onFailure": "block"
           }
         ]
@@ -178,26 +178,58 @@ cannot be parsed completely is unsafe and blocked.
 The static policy is intentionally narrow. It is not a general shell
 sandbox; it targets the actions the generated attacks need to succeed.
 
+## Coverage
+
+Gate A cannot read everything inside its time limit, so files are tiered
+(`read/tiers.py`):
+
+| Tier | Files | If not fully scanned |
+|---|---|---|
+| 0 | agent instructions and configuration | ask |
+| 1 | shallow READMEs and manifests, workflows, other root-level docs and scripts | ask |
+| 2 | other docs, scripts and `.github/` files | best effort |
+| 3 | everything else | best effort |
+
+A scan stops chunking tier 2 and 3 files after 2,500 chunks. When an agent opens
+a file Gate A did not fully cover, by the model or by the judge, with `Read` or with `cat`, `head`, `tail`,
+`less`, `more`, `bat`, `nl`, `sed` or `awk`, Gate B scans it first. That includes
+excluded directories such as `dist/` and `node_modules/`. Tier 3 files load the
+model only if they look agent-directed; this sees about 91% of real attack
+windows and asks on about 38% of ordinary source files.
+
+Known limits:
+
+- Other ways of reading a file (`grep -r`, `python -c`, a build script) are not
+  checked on open.
+- Hosts that auto-load instruction files from excluded directories, without a
+  tool call, are not covered.
+- Tool output and fetched pages are not scanned.
+- Edits that keep a large non-agent file's size and modification time do not
+  invalidate the cached verdict. Agent-facing files are compared by content.
+
 ## Fail-closed matrix
 
 | Situation | Default | Override |
 |---|---|---|
 | scanner raises / model missing | block | `BAITWATCH_ON_ERROR=ask` |
 | malformed stdin JSON | block | `BAITWATCH_ON_ERROR=ask` |
-| internal deadline expires (20 s) | block | `BAITWATCH_HOOK_DEADLINE` |
+| internal deadline expires (60 s) | block | `BAITWATCH_HOOK_DEADLINE` |
 | project root cannot be resolved | block (Gate A) / ask (Gate B) | — |
 | prompt longer than 65 536 chars | ask | shorten it |
 | prompt decoding exceeds its budget | ask | shorten it |
 | READ verdict `incomplete` | ask | — |
-| READ verdict `attack` | block | — |
+| agent opens an unscanned file: READ flags it | block (ask without a judge) | — |
+| agent opens an unscanned tier 0-2 file too large to check in full | ask | — |
+| READ verdict `attack`, score 0.7 or more | block | — |
+| READ verdict `attack`, score below 0.7 | ask | — |
 | hook disabled | allow | `BAITWATCH_HOOK=off` |
 | cache unreadable | scan again | — |
 | cache fresh | cached verdict | `BAITWATCH_HOOK_REFRESH=1` |
 | tree cannot be fingerprinted | scan again | — |
 
 The CLI runs each gate in a daemon thread with an internal deadline
-(`BAITWATCH_HOOK_DEADLINE`, default 20 s) that is shorter than Claude Code's
-30 s hook timeout. If the scan hangs, the CLI prints a deny and exits; the
+(`BAITWATCH_HOOK_DEADLINE`, default 60 s) that is shorter than the 75 s hook
+timeout the installer sets. The judge stops starting calls 8 s before the deadline. If the scan hangs, the CLI prints a deny and exits; the
 host never sees a timeout it would have to interpret.
 
 `BAITWATCH_HOOK=off` is a deliberate escape hatch for debugging. It should
@@ -269,8 +301,8 @@ process-environment behavior used by CI and the demo.
 | `BAITWATCH_HOOK=off` | bypass both gates (debug only) |
 | `BAITWATCH_ON_ERROR=deny\|ask` | crash behavior; `deny` is the default |
 | `BAITWATCH_HOOK_SCANNER=read\|keyword` | `read` is the product; `keyword` is the CPU stand-in for CI/demo |
-| `BAITWATCH_HOOK_JUDGE=1` | enable the inline judge (off by default; capped at 2 calls × 3 s) |
-| `BAITWATCH_HOOK_DEADLINE` | internal gate deadline in seconds (default 20) |
+| `BAITWATCH_HOOK_JUDGE=0` | turn the judge off (it is on when `META_API_KEY` is set) |
+| `BAITWATCH_HOOK_DEADLINE` | internal gate deadline in seconds (default 60) |
 | `BAITWATCH_CLAUDE_VERSION` | host version used by `python -m hooks install` when detection is unavailable |
 | `BAITWATCH_HOOK_CACHE` | cache file path |
 | `BAITWATCH_HOOK_APPROVALS` | approval store path |

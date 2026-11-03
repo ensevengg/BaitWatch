@@ -8,7 +8,7 @@ allowed to run in a repository.
 ```
 untrusted repo
   ├─ READ  fine-tuned Llama Prompt Guard 2 reads every file, including decoded
-  │        hidden payloads; Muse Spark judges uncertain chunks (escalate-only)
+  │        hidden payloads; Muse Spark judges flagged and suspicious chunks
   └─ RUN   a decoy agent runs the repo in an offline Docker cage rigged with
            DNS/HTTP(S) sinks and honeytokens
         ↓

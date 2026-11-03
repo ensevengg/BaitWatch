@@ -19,7 +19,7 @@ complete data-source list — `read/docs/DATA.md` is that list.
   0.85 up to the flag go to the judge.
 - **Task and intended use:** unchanged from v1.5 (below): file windows of
   software repositories, inside the READ scan, behind a fail-closed wrapper
-  and an escalate-only judge.
+  and an LLM judge that decides when it answers.
 
 ## Training data (v1.7)
 
@@ -109,7 +109,7 @@ Checkpoint integrity: SHA-256 pinned in `read/model_config.json`, verified by
   1 = injection (the base config ships no names).
 - **Intended use:** scoring file chunks of software repositories inside the
   BaitWatch READ scan, behind a threshold tuned on validation data, with a
-  fail-closed wrapper and an escalate-only LLM judge. **Not** a general
+  fail-closed wrapper and an LLM judge. **Not** a general
   prompt-injection classifier for chat traffic, and not a defense on its own.
 
 ### Training data (seed set v1.5)
