@@ -23,6 +23,9 @@ The judge only ever receives the *suspicious chunk* — never whole files, never
 the repo, never anything from the RUN side (honeytokens are planted in the
 cage copy, the READ scan never sees them).
 
+The hook preset also sends each agent instruction file to the judge whole, because
+an attack split across windows, or one the model scores low, reads clearly in context.
+
 Rule hits only choose what the judge reads. They fire on about 7% of ordinary
 files, so a rule hit alone is never a finding.
 
@@ -61,7 +64,7 @@ answer.
 | Failure | Result |
 |---|---|
 | API error / 5xx | fallback endpoint tried, else flagged + `judge_unavailable` |
-| Timeout (30 s) | same; three in a row, or 429s and 5xx, mark the endpoint down |
+| Timeout (30 s) | retried once; three failures in a row, including 429s and 5xx, mark the endpoint down |
 | Unparseable reply | same — a live model answering garbage is not trusted |
 | Per-scan call/token budget exhausted | no call made (`skipped`); chunk kept as `reviewed` with a note, scan verdict `incomplete` |
 | Paid endpoint with no API key set | skipped — repo text is never sent unauthenticated |

@@ -108,8 +108,9 @@ Fail-closed semantics the engine can rely on:
   "benign" clears one, even above `flag_threshold`. A flag it did not answer for
   stays flagged, and only the primary endpoint can clear. Limits and reasons:
   `read/docs/JUDGE.md`.
-- `ReadConfig.quick()` (the hook preset) treats tier 2 and 3 files
-  (`read/tiers.py`) as best effort: a gap in them is counted in
+- `read/batches.py` scans a repository batch by batch for the hook, saving its work
+  and reading only changed files on a later scan. `ReadConfig.quick()` treats tier 2
+  and 3 files (`read/tiers.py`) as best effort: a gap in them is counted in
   `stats.best_effort_gaps`, not in `incomplete_reasons`, and they are left out of
   `stats.files_covered`. Gate B scans them when an agent opens one. Tier 0 and 1
   gaps still make the verdict `"incomplete"`.
