@@ -16,6 +16,9 @@ import pytest
 os.environ["BAITWATCH_SCORE_CACHE"] = str(
     Path(tempfile.mkdtemp(prefix="bw-test-cache-")) / "scores.sqlite")
 
+os.environ["BAITWATCH_JUDGE_CACHE"] = str(
+    Path(tempfile.mkdtemp(prefix="bw-test-cache-")) / "judge.sqlite")
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))

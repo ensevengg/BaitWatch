@@ -76,6 +76,7 @@ class ScanStats:
     judge_calls: int = 0            # judge requests actually attempted
     judge_unavailable: int = 0
     judge_skipped: int = 0          # review-band chunks the per-scan budget did not cover
+    judge_cached: int = 0           # verdicts served by the judge cache
     elapsed_s: float = 0.0
     truncated_scan: bool = False    # walker file cap hit
     files_over_cap: int = 0         # files the walker cap left unscanned
@@ -297,16 +298,24 @@ def _judge_all(judge, items: list[tuple[str, str, float]], budget: ScanBudget | 
         return JudgeResult("unavailable", None, None, error=f"judge crashed: {exc}")
 
     results: list[JudgeResult | None] = [None] * len(requests)
+    lookup = getattr(judge, "lookup", None)
+    if lookup is not None:
+        for i, (text, file, _score) in enumerate(requests):
+            results[i] = lookup(text, file)
+        stats.judge_cached += sum(1 for r in results if r is not None)
+    open_requests = [i for i, r in enumerate(results) if r is None]
     estimate = getattr(judge, "estimate_tokens", None)
     if estimate is None or concurrency <= 1:
-        for i, (text, file, score) in enumerate(requests):
+        for i in open_requests:
+            text, file, score = requests[i]
             try:
                 results[i] = judge.review(text, file, score, budget)
             except Exception as exc:   # noqa: BLE001 - a judge bug is a failure, not a crash
                 results[i] = crashed(exc)
     else:
         planned: list[tuple[int, int | None]] = []
-        for i, (text, file, score) in enumerate(requests):
+        for i in open_requests:
+            text, file, score = requests[i]
             try:
                 est = estimate(text, file, score)
             except Exception as exc:   # noqa: BLE001
@@ -333,7 +342,7 @@ def _judge_all(judge, items: list[tuple[str, str, float]], budget: ScanBudget | 
             with ThreadPoolExecutor(max_workers=min(concurrency, len(planned))) as pool:
                 for (i, _), result in zip(planned, pool.map(run, planned)):
                     results[i] = result
-    stats.judge_calls += sum(1 for r in results if r.verdict != "skipped")
+    stats.judge_calls += sum(1 for i in open_requests if results[i].verdict != "skipped")
     return [results[index[text]] for text, _, _ in items]
 
 

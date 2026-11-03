@@ -34,6 +34,7 @@ try:
     import msvcrt
 except ModuleNotFoundError:  # POSIX: msvcrt is Windows-only
     msvcrt = None
+import hashlib
 import http.client
 import json
 import os
@@ -258,6 +259,11 @@ class Judge:
             self.cfg.usd_per_1k_input, self.cfg.usd_per_1k_output)
         self._dead_until: dict[str, float] = {}
         self._failures: dict[str, int] = {}
+        self.cache = None
+        if self.cfg.cache:
+            from read.cache import DEFAULT_JUDGE_CACHE_PATH, JudgeCache
+            cache = JudgeCache(self.cfg.cache_path or DEFAULT_JUDGE_CACHE_PATH)
+            self.cache = cache if cache.enabled else None
 
     # -- endpoint plumbing ---------------------------------------------------
 
@@ -281,6 +287,23 @@ class Judge:
         if self._failures[name] >= self.MAX_TEMPORARY_FAILURES:
             self._mark_dead(name)
             self._failures[name] = 0
+
+    def _cache_key(self, text: str, file: str) -> str:
+        primary = self.cfg.endpoints[0] if self.cfg.endpoints else {}
+        return "\0".join((str(primary.get("model")), str(primary.get("base_url")),
+                          str(primary.get("reasoning_effort")),
+                          hashlib.blake2b(JUDGE_SYSTEM_PROMPT.encode(), digest_size=8).hexdigest(),
+                          file[:300], text))
+
+    def lookup(self, text: str, file: str) -> JudgeResult | None:
+        """A stored verdict for this exact window in this file, if any."""
+        if self.cache is None:
+            return None
+        stored = self.cache.get(self._cache_key(text, file))
+        if stored is None:
+            return None
+        return JudgeResult(stored["verdict"], stored.get("severity"), stored.get("explanation"),
+                           endpoint="cache", can_clear=True)
 
     def _api_key(self, endpoint: dict) -> str | None:
         env = endpoint.get("api_key_env")
@@ -408,6 +431,10 @@ class Judge:
             budget.settle(estimate, usage_total)
         if self._prepare(text)[1]:
             result.can_clear = False   # it did not read the whole window
+        if self.cache is not None and result.verdict in ("attack", "benign") and result.can_clear:
+            self.cache.put(self._cache_key(text, file), {
+                "verdict": result.verdict, "severity": result.severity,
+                "explanation": result.explanation})
         return result
 
     def _review(self, message: str, usage_total: dict) -> JudgeResult:

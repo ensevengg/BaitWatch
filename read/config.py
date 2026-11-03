@@ -105,6 +105,10 @@ class JudgeConfig:
     # Reasoning tokens count against max_tokens, so a small limit returns an
     # empty answer (300 was used up by reasoning on every call).
     max_output_tokens: int = 2_000
+    # Persistent verdict cache (read/cache.py). None path = BAITWATCH_JUDGE_CACHE
+    # or ~/.cache/baitwatch/judge.sqlite.
+    cache: bool = True
+    cache_path: Path | None = None
     max_chunk_chars: int = 4_000           # never send more than this to the judge
     # Hard cap per API key, enforced in code.
     usd_cap: float = field(

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 
+from read.cache import JudgeCache
 from read.config import JudgeConfig
 from read.judge import Judge
 
@@ -25,7 +27,8 @@ class _Response:
 def _judge(tmp_path, **kw):
     endpoint = {"name": "main", "base_url": "http://judge.test/v1", "model": "m",
                 "api_key_env": None, "reasoning_effort": "low", "can_clear": True}
-    return Judge(JudgeConfig(endpoints=(endpoint,), ledger_path=tmp_path / "spend.json", **kw))
+    return Judge(JudgeConfig(endpoints=(endpoint,), ledger_path=tmp_path / "spend.json",
+                             cache_path=tmp_path / "judge.sqlite", **kw))
 
 
 def _answer(verdict="benign"):
@@ -74,3 +77,40 @@ def test_window_over_the_limit_keeps_both_ends_and_cannot_clear(tmp_path, monkey
     assert cut and "HEAD" in snippet and "TAIL" in snippet
     result = judge.review(text, "f", 0.99)
     assert result.verdict == "benign" and result.can_clear is False
+    assert judge.lookup(text, "f") is None
+
+
+def test_verdict_is_cached_and_a_failure_is_not(tmp_path, monkeypatch):
+    calls = []
+
+    def fake(req, timeout):
+        calls.append(1)
+        return _Response(_answer())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+    judge = _judge(tmp_path)
+    judge.review("window", "f", 0.5)
+    assert judge.lookup("window", "f").verdict == "benign"
+    assert judge.lookup("window", "other-file") is None
+    assert judge.lookup("other", "f") is None
+
+    def down(req, timeout):
+        raise urllib.error.URLError("refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", down)
+    assert judge.review("new", "f", 0.5).verdict == "unavailable"
+    assert judge.lookup("new", "f") is None
+
+
+def test_cache_tells_apart_windows_with_the_same_start(tmp_path, monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: _Response(_answer()))
+    judge = _judge(tmp_path, max_chunk_chars=50)
+    judge.cache.put(judge._cache_key("x" * 60 + "A", "f"), {"verdict": "benign"})
+    assert judge.lookup("x" * 60 + "B", "f") is None
+
+
+def test_broken_cache_never_breaks_a_review(tmp_path):
+    cache = JudgeCache(tmp_path / "judge.sqlite")
+    cache._db.close()
+    cache.put("k", {"verdict": "benign"})
+    assert cache.get("k") is None
