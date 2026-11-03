@@ -162,10 +162,10 @@ def test_budget_exhaustion_blocks_calls(mock_api, tmp_path):
 
 def test_token_budget_exhaustion(mock_api, tmp_path):
     judge = make_judge(mock_api, tmp_path, behaviour="echo-attack")
-    # Each call reserves ~(system+user)/4 + 300 worst-case tokens up front and
+    # Each call reserves ~(system+user)/4 + max_output_tokens worst-case up front and
     # settles to the 120 the mock bills; a call whose worst case no longer
     # fits is refused before it spends.
-    budget = ScanBudget(max_calls=10, max_tokens=1_000)
+    budget = ScanBudget(max_calls=10, max_tokens=3_000)
     made = 0
     for _ in range(10):
         result = judge.review("t", "f", 0.5, budget)

@@ -240,9 +240,11 @@ class ScanBudget:
 
 
 class Judge:
-    #: A failed endpoint is skipped for this long so one scan never pays the
-    #: 10 s timeout twice, but a long-lived process can still recover.
+    #: A failed endpoint is skipped for this long so one scan does not keep paying
+    #: for it, but a long-lived process can still recover.
     DEAD_TTL_S = 120.0
+    #: Timeouts, 429s and 5xx in a row before an endpoint is treated as down.
+    MAX_TEMPORARY_FAILURES = 3
 
     def __init__(self, config: JudgeConfig | None = None,
                  ledger: SpendLedger | None = None):
@@ -251,6 +253,7 @@ class Judge:
             self.cfg.ledger_path, self.cfg.usd_cap,
             self.cfg.usd_per_1k_input, self.cfg.usd_per_1k_output)
         self._dead_until: dict[str, float] = {}
+        self._failures: dict[str, int] = {}
 
     # -- endpoint plumbing ---------------------------------------------------
 
@@ -259,6 +262,21 @@ class Judge:
 
     def _mark_dead(self, name: str) -> None:
         self._dead_until[name] = time.monotonic() + self.DEAD_TTL_S
+
+    def _record_failure(self, name: str, exc: Exception) -> None:
+        """Rate limits and timeouts must not end a scan's judging on the first hit."""
+        temporary = (isinstance(exc, TimeoutError)
+                     or (isinstance(exc, urllib.error.HTTPError)
+                         and (exc.code == 429 or exc.code >= 500))
+                     or (isinstance(exc, urllib.error.URLError)
+                         and isinstance(exc.reason, TimeoutError)))
+        if not temporary:
+            self._mark_dead(name)
+            return
+        self._failures[name] = self._failures.get(name, 0) + 1
+        if self._failures[name] >= self.MAX_TEMPORARY_FAILURES:
+            self._mark_dead(name)
+            self._failures[name] = 0
 
     def _api_key(self, endpoint: dict) -> str | None:
         env = endpoint.get("api_key_env")
@@ -275,7 +293,9 @@ class Judge:
                 {"role": "user", "content": user_message},
             ],
             "temperature": 0.0,
-            "max_tokens": 300,
+            "max_tokens": self.cfg.max_output_tokens,
+            **({"reasoning_effort": endpoint["reasoning_effort"]}
+               if endpoint.get("reasoning_effort") else {}),
         }).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         key = self._api_key(endpoint)
@@ -338,7 +358,7 @@ class Judge:
 
     def _estimate_tokens(self, user_message: str) -> int:
         """Worst-case reservation: full prompt + the max_tokens we request."""
-        return (len(JUDGE_SYSTEM_PROMPT) + len(user_message)) // 4 + 300
+        return (len(JUDGE_SYSTEM_PROMPT) + len(user_message)) // 4 + self.cfg.max_output_tokens
 
     def estimate_tokens(self, text: str, file: str, score: float) -> int:
         """Worst-case budget reservation for one review of this chunk."""
@@ -395,8 +415,9 @@ class Judge:
                     OSError, KeyError, IndexError, ValueError, TypeError,
                     AttributeError) as exc:
                 errors.append(f"{name}: {exc}")
-                self._mark_dead(name)   # don't pay the timeout again this scan
+                self._record_failure(name, exc)
                 continue
+            self._failures[name] = 0
             for k in ("input_tokens", "output_tokens"):
                 usage_total[k] = usage_total.get(k, 0) + usage.get(k, 0)
             if env:

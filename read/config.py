@@ -98,22 +98,27 @@ class JudgeConfig:
     # Env overrides are resolved at construction (not import) so runtime
     # configuration actually takes effect.
     endpoints: tuple[dict, ...] | None = None
-    timeout_s: float = 10.0                # per judge call, roadmap D5
-    concurrency: int = 4                   # parallel judge calls per scan
-    max_calls_per_scan: int = 12
-    max_tokens_per_scan: int = 16_000      # judge input+output token budget per scan
+    timeout_s: float = 30.0                # per judge call; p95 at low effort is about 11 s
+    concurrency: int = 8                   # parallel judge calls per scan
+    max_calls_per_scan: int = 60
+    max_tokens_per_scan: int = 200_000     # judge input+output token budget per scan
+    # Reasoning tokens count against max_tokens, so a small limit returns an
+    # empty answer (300 was used up by reasoning on every call).
+    max_output_tokens: int = 2_000
     max_chunk_chars: int = 4_000           # never send more than this to the judge
-    usd_cap: float = 120.0                 # hard cap per API key, enforced in code
+    # Hard cap per API key, enforced in code.
+    usd_cap: float = field(
+        default_factory=lambda: float(os.environ.get("BAITWATCH_JUDGE_USD_CAP", "120")))
     ledger_path: Path = field(
         default_factory=lambda: Path(
             os.environ.get("BAITWATCH_SPEND_LEDGER",
                            str(Path.home() / ".local/state/baitwatch/spend.json"))
         )
     )
-    # Rough per-1k-token prices used only for the local spend estimate; the real
-    # bill is Meta's, so the cap is deliberately conservative.
-    usd_per_1k_input: float = 0.02
-    usd_per_1k_output: float = 0.08
+    # Listed Muse Spark standard prices, used only for the local spend estimate;
+    # the real bill is Meta's. Cached input and the Contributor tier cost less.
+    usd_per_1k_input: float = 0.00125
+    usd_per_1k_output: float = 0.00425
 
     def __post_init__(self) -> None:
         if self.endpoints is None:
@@ -124,6 +129,7 @@ class JudgeConfig:
                                                "https://api.meta.ai/v1"),
                     "model": os.environ.get("BAITWATCH_JUDGE_MODEL", "muse-spark-1.3"),
                     "api_key_env": "META_API_KEY",
+                    "reasoning_effort": "low",
                 },
                 {
                     "name": "llama32_3b_local",
