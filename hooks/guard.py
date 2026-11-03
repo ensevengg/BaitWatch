@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 __all__ = [
+    "DEFAULT_HOOK_DEADLINE_S",
     "Decision",
     "RepoScan",
     "SINK_NETWORK",
@@ -43,6 +44,10 @@ _ALLOWED = ("evil.example",)
 # A prompt longer than this cannot be decoded within the hook deadline; it is
 # treated as risky (not silently allowed) instead of being inspected halfway.
 MAX_PROMPT_CHARS = 65_536
+# First scan of a tree: model plus judge. Later prompts on the same tree use the cache.
+DEFAULT_HOOK_DEADLINE_S = 60.0
+HOOK_DECISION_MARGIN_S = 8.0
+BLOCK_MIN_SCORE = 0.7
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.IGNORECASE)
 _NET_TOOL = (
@@ -340,6 +345,32 @@ def _store_cached_scan(
     )
 
 
+def _verdict_from_read(read_verdict: str, max_score: float) -> str:
+    """Block a confident attack; ask about a low-severity one or incomplete evidence.
+
+    Of 609 attack files the judge caught, 608 had severity 0.7 or more, so asking
+    below that rarely lets an attack off a block, and it still stops the prompt.
+    """
+    if read_verdict == "attack":
+        return "block" if max_score >= BLOCK_MIN_SCORE else "ask"
+    return "ask" if read_verdict == "incomplete" else "allow"
+
+
+def _hook_judge_on() -> bool:
+    """On when a key is present, unless BAITWATCH_HOOK_JUDGE=0."""
+    return os.environ.get("BAITWATCH_HOOK_JUDGE", "1") != "0" and bool(
+        os.environ.get("META_API_KEY")
+    )
+
+
+def _hook_deadline() -> float:
+    try:
+        value = float(os.environ.get("BAITWATCH_HOOK_DEADLINE", str(DEFAULT_HOOK_DEADLINE_S)))
+    except ValueError:
+        return DEFAULT_HOOK_DEADLINE_S
+    return value if value > 0 else DEFAULT_HOOK_DEADLINE_S
+
+
 def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") -> RepoScan:
     """Scan a repository with the READ layer, using the hook cache.
 
@@ -350,7 +381,8 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
     started = time.perf_counter()
     repo = Path(repo)
     mode = os.environ.get("BAITWATCH_HOOK_SCANNER", "read").strip().lower()
-    tag = "keyword" if mode == "keyword" else _read_tag()
+    # A verdict reached without the judge must not answer for one reached with it.
+    tag = "keyword" if mode == "keyword" else _read_tag() + ("+judge" if _hook_judge_on() else "")
     cache_key = None
     if cache is not None and os.environ.get("BAITWATCH_HOOK_REFRESH") != "1":
         # A key is None when the scanned tree cannot be fingerprinted; then the
@@ -400,27 +432,25 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
     from read.scan import scan
 
     cfg = ReadConfig.quick()
-    # Inline judging is off by default: a judge round-trip is the most
-    # expensive thing a hook can do and must never push it into its deadline.
-    # When enabled, keep a small budget so it still finishes in time.
-    judge_on = os.environ.get("BAITWATCH_HOOK_JUDGE", "0") == "1"
+    judge_on = _hook_judge_on()
     cfg.judge.enabled = judge_on
     if judge_on:
-        cfg.judge.max_calls_per_scan = min(cfg.judge.max_calls_per_scan, 2)
-        cfg.judge.timeout_s = min(cfg.judge.timeout_s, 3.0)
+        # Leave time to print a decision before the hook's own deadline. What
+        # the judge did not reach is kept in its cache for the next attempt.
+        cfg.judge.deadline_s = max(1.0, _hook_deadline() - HOOK_DECISION_MARGIN_S)
     result = scan(repo, cfg=cfg)
-    if result.read_verdict == "attack":
-        verdict = "block"
-    elif result.read_verdict == "incomplete":
-        verdict = "ask"
-    else:
-        verdict = "allow"
+    verdict = _verdict_from_read(result.read_verdict, result.max_score)
     files = sorted({finding.file for finding in result.flagged})[:8]
     model = Path(str(result.stats.model_path)).name
     reason = {
         "block": f"READ flagged {result.stats.flagged} chunk(s) (max score {result.max_score:.2f})",
-        "ask": "READ could not cover the repository completely: "
-        + "; ".join(result.stats.incomplete_reasons[:3]),
+        "ask": (
+            f"READ flagged {result.stats.flagged} low-severity chunk(s) "
+            f"(max score {result.max_score:.2f}): review before continuing"
+            if result.read_verdict == "attack"
+            else "READ could not cover the repository completely: "
+            + "; ".join(result.stats.incomplete_reasons[:3])
+        ),
         "allow": "READ found no injection",
     }[verdict]
     scan_result = RepoScan(
@@ -431,7 +461,11 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
         model=model,
         duration_ms=(time.perf_counter() - started) * 1000,
     )
-    _store_cached_scan(cache, repo, tag, cache_key, scan_result, model)
+    # An outage or a deadline is temporary, so scan again next time. Budget cuts
+    # are stable: rescanning would give the same answer at the same cost.
+    stats = result.stats
+    if not (judge_on and (stats.judge_unavailable or stats.judge_deadline_hit)):
+        _store_cached_scan(cache, repo, tag, cache_key, scan_result, model)
     return scan_result
 
 

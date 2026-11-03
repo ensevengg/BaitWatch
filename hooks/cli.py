@@ -25,6 +25,7 @@ from pathlib import Path
 
 from hooks.cache import ApprovalStore, ScanCache, default_cache_path
 from hooks.guard import (
+    DEFAULT_HOOK_DEADLINE_S,
     Decision,
     RepoScan,
     error_decision,
@@ -38,7 +39,7 @@ from hooks.install import detect_claude_version, hook_command, install, settings
 
 __all__ = ["approve_command", "emit", "main", "read_payload", "selftest"]
 
-DEFAULT_DEADLINE_S = 20.0
+DEFAULT_DEADLINE_S = DEFAULT_HOOK_DEADLINE_S
 
 
 def _deadline_seconds() -> float:
@@ -89,6 +90,15 @@ _USER_HOOK_ENV_KEYS = (
     "BAITWATCH_MODEL_PATH",
     "BAITWATCH_MODEL_DIR",
     "BAITWATCH_HOOK_DEADLINE",
+    # The judge can clear a flag, so a repository must not be able to choose it.
+    "BAITWATCH_HOOK_JUDGE",
+    "BAITWATCH_JUDGE_BASE_URL",
+    "BAITWATCH_JUDGE_MODEL",
+    "BAITWATCH_FALLBACK_BASE_URL",
+    "BAITWATCH_FALLBACK_MODEL",
+    "BAITWATCH_JUDGE_USD_CAP",
+    "BAITWATCH_JUDGE_CACHE",
+    "BAITWATCH_SPEND_LEDGER",
 )
 
 
