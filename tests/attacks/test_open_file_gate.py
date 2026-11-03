@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -32,7 +34,7 @@ def test_bash_read_targets(command, expected):
 def seen(monkeypatch):
     calls = []
 
-    def fake(path, rel, *, cache=None):
+    def fake(path, rel, *, cache=None, started=None):
         calls.append(rel)
         return guard.Decision("B", "block", "bad", source="read")
 
@@ -134,3 +136,76 @@ def test_text_with_a_binary_extension_is_scanned(tmp_path, seen):
 def test_real_binary_is_left_alone(tmp_path, seen):
     (tmp_path / "logo.png").write_bytes(b"\x89PNG\x00\x00binary")
     assert decide("read", {"file_path": "logo.png"}, tmp_path, []) is None
+
+
+def test_session_path_through_a_symlink_still_checks_the_file(tmp_path, seen):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "a.md").write_text("x")
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)
+    scan = RepoScan("allow", covered=[])
+    relative = _opened_file_decision("read", {"file_path": "a.md"}, scan, real, alias)
+    absolute = _opened_file_decision("read", {"file_path": str(alias / "a.md")}, scan, real, alias)
+    assert relative.verdict == "block"
+    assert absolute.verdict == "block"
+    assert seen == ["a.md", "a.md"]
+
+
+def test_in_repo_symlink_keeps_its_own_name_through_a_session_symlink(tmp_path, seen):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "target.md").write_text("x")
+    (real / "link.md").symlink_to(real / "target.md")
+    alias = tmp_path / "alias"
+    alias.symlink_to(real)
+    scan = RepoScan("allow", covered=["target.md"])
+    _opened_file_decision("read", {"file_path": str(alias / "link.md")}, scan, real, alias)
+    assert seen == ["link.md"]
+
+
+def test_path_outside_the_project_through_a_symlink_stays_outside(tmp_path, seen):
+    root = tmp_path / "root"
+    root.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "a.md").write_text("x")
+    alias = tmp_path / "alias"
+    alias.symlink_to(other)
+    scan = RepoScan("allow", covered=[])
+    assert (
+        _opened_file_decision("read", {"file_path": str(alias / "a.md")}, scan, root, root) is None
+    )
+
+
+def test_file_digest_matches_without_reading_the_file_at_once(tmp_path, monkeypatch):
+    path = tmp_path / "big.txt"
+    data = b"abc" * 1_000_000
+    path.write_bytes(data)
+
+    def refuse(self):
+        raise AssertionError("the whole file was read into memory")
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+    assert guard._file_digest(path) == hashlib.sha256(data).hexdigest()
+
+
+def test_opened_file_scan_gets_only_the_time_left_in_the_gate(monkeypatch):
+    monkeypatch.setenv("BAITWATCH_HOOK_DEADLINE", "60")
+    now = time.perf_counter()
+    assert guard._judge_time_left(now - 40) == pytest.approx(12, abs=0.5)
+    assert guard._judge_time_left(now - 500) == 0.0
+
+
+def test_gate_time_reaches_the_opened_file_scan(tmp_path, monkeypatch):
+    received = {}
+
+    def fake(path, rel, *, cache=None, started=None):
+        received["started"] = started
+        return guard.Decision("B", "allow", "ok", source="read")
+
+    monkeypatch.setattr(guard, "scan_opened_file", fake)
+    (tmp_path / "a.md").write_text("x")
+    scan = RepoScan("allow", covered=[])
+    _opened_file_decision("read", {"file_path": "a.md"}, scan, tmp_path, tmp_path, started=123.0)
+    assert received["started"] == 123.0

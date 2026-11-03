@@ -629,7 +629,22 @@ def _worth_scanning_on_read(path: Path, rel: str) -> bool:
     )
 
 
-def scan_opened_file(path: Path, rel: str, *, cache=None) -> Decision:
+def _file_digest(path: Path) -> str:
+    """SHA-256 in blocks: a hook must not load a large file into memory to name it."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while block := handle.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _judge_time_left(started: float) -> float:
+    """Seconds the judge may still start calls in a gate that began at ``started``."""
+    elapsed = time.perf_counter() - started
+    return max(0.0, _hook_deadline() - HOOK_DECISION_MARGIN_S - elapsed)
+
+
+def scan_opened_file(path: Path, rel: str, *, cache=None, started: float | None = None) -> Decision:
     """Score one file the repository scan did not cover, as the agent opens it."""
     from hooks.cache import CachedScan
     from read.config import ReadConfig
@@ -637,7 +652,7 @@ def scan_opened_file(path: Path, rel: str, *, cache=None) -> Decision:
     from read.walk import priority_tier
 
     try:
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        digest = _file_digest(path)
     except OSError as exc:
         return Decision("B", "ask", f"could not read {rel} to check it: {exc}", source="read")
     key = f"open|{digest}|{rel}|{_read_tag()}|{_hook_judge_on()}"
@@ -651,7 +666,9 @@ def scan_opened_file(path: Path, rel: str, *, cache=None) -> Decision:
     cfg.judge.max_windows_per_file = cfg.judge.max_windows_per_agent_file
     cfg.judge.enabled = _hook_judge_on()
     if cfg.judge.enabled:
-        cfg.judge.deadline_s = max(1.0, _hook_deadline() - HOOK_DECISION_MARGIN_S)
+        # The repository scan in this gate may already have used most of the deadline.
+        gate_start = time.perf_counter() if started is None else started
+        cfg.judge.deadline_s = _judge_time_left(gate_start)
     result = scan(path, cfg=cfg)
     stats = result.stats
     if result.read_verdict == "attack":
@@ -670,27 +687,45 @@ def scan_opened_file(path: Path, rel: str, *, cache=None) -> Decision:
     return Decision("B", verdict, reason, source="read", files=[rel])
 
 
-def _opened_file_decision(tool, data, repo_scan, root, cwd, *, cache=None) -> Decision | None:
+def _project_path(raw: str, root: Path, cwd) -> Path | None:
+    """The opened path inside ``root``, or None when it is outside the project.
+
+    ``root`` is resolved but the session path may not be, for example through a
+    symlinked project directory. Only the parent is resolved on that path, so an
+    in-repo symlink keeps its own name.
+    """
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path(cwd) / candidate
+    lexical = Path(os.path.normpath(candidate))
+    if lexical.is_relative_to(root):
+        return lexical
+    try:
+        aliased = lexical.parent.resolve() / lexical.name
+    except (OSError, RuntimeError):
+        return None
+    return aliased if aliased.is_relative_to(root) else None
+
+
+def _opened_file_decision(
+    tool, data, repo_scan, root, cwd, *, cache=None, started: float | None = None
+) -> Decision | None:
     """Check files this call opens that the repository scan left out, worst first."""
     if repo_scan is None or repo_scan.covered is None or root is None:
         return None
     covered = set(repo_scan.covered)
     worst: Decision | None = None
     for raw in _read_targets(tool, data):
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            candidate = Path(cwd) / candidate
-        lexical = Path(os.path.normpath(candidate))
-        try:
-            rel = lexical.relative_to(root).as_posix()
-        except ValueError:
+        lexical = _project_path(raw, root, cwd)
+        if lexical is None:
             continue  # outside the project: the credential rules still apply
+        rel = lexical.relative_to(root).as_posix()
         if rel in covered or not lexical.is_file():
             continue
         target = lexical.resolve()
         if not _worth_scanning_on_read(target, rel):
             continue
-        decision = scan_opened_file(target, rel, cache=cache)
+        decision = scan_opened_file(target, rel, cache=cache, started=started)
         if worst is None or _RANK[decision.verdict] > _RANK[worst.verdict]:
             worst = decision
     return worst
@@ -914,6 +949,7 @@ def gate_b(payload: dict, *, scanner=scan_repo, cache=None) -> Decision:
             root,
             repo,
             cache=cache,
+            started=started,
         )
         if opened is not None and _RANK[opened.verdict] > _RANK[policy.verdict]:
             policy = opened
