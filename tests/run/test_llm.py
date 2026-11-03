@@ -18,6 +18,7 @@ from run.llm import (
     ScriptedBackend,
     ToolCall,
     _parse_reply,
+    backend_from_env,
     make_backend,
 )
 
@@ -520,6 +521,34 @@ def test_openai_rejects_bad_base_urls(base_url):
 def test_openai_rejects_bad_model_and_key_env(kwargs):
     with pytest.raises(ValueError):
         OpenAICompatBackend("http://127.0.0.1:1/v1", **kwargs)
+
+
+def test_reasoning_effort_absent_by_default_and_sent_when_set():
+    with fake_server(reply(completion({"content": "done"}))) as server:
+        backend = OpenAICompatBackend(server.base_url, "m")
+        backend.chat([], [])
+        assert "reasoning_effort" not in json.loads(server.requests[0].body)
+    with fake_server(reply(completion({"content": "done"}))) as server:
+        backend = OpenAICompatBackend(server.base_url, "m", reasoning_effort="low")
+        backend.chat([], [])
+        assert json.loads(server.requests[0].body)["reasoning_effort"] == "low"
+
+
+def test_reasoning_effort_invalid_raises():
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        OpenAICompatBackend("http://127.0.0.1:1/v1", "m", reasoning_effort="xhigh")
+
+
+def test_reasoning_effort_from_env(monkeypatch):
+    monkeypatch.setenv("BAITWATCH_DECOY_BASE_URL", "http://127.0.0.1:1/v1")
+    monkeypatch.setenv("BAITWATCH_DECOY_MODEL", "m")
+    monkeypatch.setenv("BAITWATCH_DECOY_REASONING_EFFORT", "low")
+    backend = backend_from_env()
+    assert isinstance(backend, OpenAICompatBackend)
+    assert backend.reasoning_effort == "low"
+    monkeypatch.setenv("BAITWATCH_DECOY_REASONING_EFFORT", "bogus")
+    with pytest.raises(ValueError, match="BAITWATCH_DECOY_REASONING_EFFORT"):
+        backend_from_env()
 
 
 def test_make_backend_scripted(tmp_path):

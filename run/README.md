@@ -92,7 +92,9 @@ exact hosts listed below) are exempt only for validated plain DNS and
 hello-only TLS; other registry contacts are counted as attempts, not
 exfiltration. A
 honeytoken sent over DNS, HTTP or TLS is BLOCK; a decoy that only read one
-(`tool_log`) is FLAG.
+(`tool_output`) does not FLAG, while a token moved into tool-call arguments
+(`tool_args`), the decoy's reply text (`transcript`) or a staged file
+(`file`) is FLAG.
 
 ## Measuring the decoy pwn rate
 
@@ -116,7 +118,12 @@ uv run --no-sync pytest -m gpu tests/run/test_pwnrate_gpu.py -q   # same env; sk
 Env var names: `BAITWATCH_DECOY_BASE_URL`, `BAITWATCH_DECOY_MODEL`,
 `BAITWATCH_DECOY_API_KEY_ENV` (a variable *name*, never a key value in specs,
 logs or reports), `BAITWATCH_DECOY_FALLBACK_BASE_URL`,
-`BAITWATCH_DECOY_FALLBACK_MODEL`, and `BAITWATCH_PWNRATE_RUNS` (default 10).
+`BAITWATCH_DECOY_FALLBACK_MODEL`, `BAITWATCH_DECOY_REASONING_EFFORT`
+(optional; one of `low`, `medium`, `high`; unset sends no `reasoning_effort`
+field, and an invalid value is an error; reasoning tokens count against the
+decoy token budget), `BAITWATCH_DECOY_FALLBACK_REASONING_EFFORT` (same, for
+the fallback backend), and `BAITWATCH_PWNRATE_RUNS` (default 10).
+Model tiers that allow the provider to train on sent text (such as Muse Spark's "contributor" tier) must not be used to scan private repositories, because the decoy sends repository contents to the model.
 The report JSON and Markdown table give, per repo: runs, runs with a counted
 sink hit, runs with honeytoken hits, verdict counts, pwn rate, p50/p95 latency,
 tokens used and fallback count. A counted sink hit is a contact that verdict fusion
