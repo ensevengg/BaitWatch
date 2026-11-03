@@ -416,8 +416,20 @@ def _low_tier(scored: list[tuple[Chunk, float]], cfg: ReadConfig,
     return picked
 
 
+def _whole_file_windows(whole: dict[str, str], scored: list[tuple[Chunk, float]]
+                        ) -> list[tuple[Chunk, float]]:
+    """One window per tier 0 file holding the whole text, at the file's best model score."""
+    best: dict[str, float] = {}
+    for chunk, score in scored:
+        best[chunk.file] = max(best.get(chunk.file, 0.0), score)
+    return [(Chunk(file=rel, view="original", chunk_id=-1, text=text, start_char=0,
+                   end_char=len(text), start_line=1), best.get(rel, 0.0))
+            for rel, text in whole.items()]
+
+
 def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], judged, budget,
-                 cfg: ReadConfig, stats: ScanStats, started: float) -> None:
+                 cfg: ReadConfig, stats: ScanStats, started: float,
+                 whole: dict[str, str] | None = None) -> None:
     """Judge flags first, then the review band, then low-tier windows, and record each outcome."""
     high = sorted((w for w in scored if w[1] >= cfg.flag_threshold), key=lambda w: -w[1])
     band = sorted((w for w in scored if cfg.review_low <= w[1] < cfg.flag_threshold),
@@ -436,6 +448,7 @@ def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], jud
                 stats.judge_low_unjudged += 1
                 unread.add(window[0].file)
         low = kept
+    low = _whole_file_windows(whole or {}, scored) + low
     tiers = [("high", w) for w in high] + [("band", w) for w in band] + [("low", w) for w in low]
     if not tiers:
         return
@@ -583,6 +596,7 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
 
     # Pass 1: read text (head + tail), build decoded views, mask blobs, chunk.
     chunks: list[Chunk] = []
+    whole_files: dict[str, str] = {}
     for fpath, rel, encoding in scanned_files:
         best_effort = cfg.bulk_best_effort and priority_tier(rel) >= 2
         if (best_effort and cfg.max_chunks_per_scan is not None
@@ -603,6 +617,8 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
             stats.files_skipped_binary += 1     # single-file binary sniff rejection
             continue
         stats.files_scanned += 1
+        if cfg.judge_whole_agent_files and priority_tier(rel) == 0 and ft.text.strip():
+            whole_files[rel] = f"{ft.text}\n{ft.tail}" if ft.tail else ft.text
         partial = ft.truncated
         if ft.truncated:
             stats.files_truncated += 1
@@ -770,7 +786,7 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
         stats.chunks_scored = len(chunks)
         scored = [(chunk, float(score)) for chunk, score in zip(chunks, scores)]
         if judged is not None:
-            _apply_judge(scored, findings, judged, budget, cfg, stats, started)
+            _apply_judge(scored, findings, judged, budget, cfg, stats, started, whole_files)
         else:
             for chunk, score in scored:
                 evidence = _evidence(chunk, score)

@@ -191,6 +191,10 @@ class ReadConfig:
     max_chunks_per_scan: int | None = None  # tier 2/3 files stop being chunked past this
     judge_floor: float = 0.05              # below review_low, still judged from this score up
     judge_clears_flags: bool = True        # a "benign" verdict may remove a model flag
+    # Also judge each tier 0 file whole. The judge then sees an attack split across
+    # windows or scored low by the model: on held-out sets this added up to 11 points of
+    # recall and raised 3 alarms on 550 public agent files.
+    judge_whole_agent_files: bool = False
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     walker: WalkerConfig = field(default_factory=WalkerConfig)
 
@@ -218,6 +222,7 @@ class ReadConfig:
         cfg.max_file_tokens = 60_000
         cfg.max_chunks_per_file = 160
         cfg.bulk_best_effort = True
+        cfg.judge_whole_agent_files = True
         # read.batches limits low-score judging; flags and the band are always judged.
         cfg.judge.concurrency = 16
         cfg.judge.max_calls_per_scan = 5_000
