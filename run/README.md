@@ -280,3 +280,4 @@ The sandbox boundary has its own [known limits](SANDBOX.md#known-limits); the tw
 - When a call fails after the wall deadline, the decoy records `DECOY_TIME_BUDGET`, and the underlying error kind isn't shown.
 - If the cage deadline expires during model inference and that call then fails, it's recorded as `DECOY_FAILED`, not a deadline code (`DECOY_DEADLINE` is only checked between calls). It's still non-ALLOW.
 - A honeytoken value split across two files or two entries is not detected.
+- A decoy that deletes a planted honeytoken file outright leaves no honeytoken hit; only added or modified files are scanned.

@@ -8,6 +8,8 @@ import string
 import urllib.parse
 from pathlib import Path
 
+import pytest
+
 from run.evidence import CommandResult, State
 from run.honeytokens import (
     CANARY_HOST_SUFFIX,
@@ -662,6 +664,43 @@ def test_file_scan_reads_cage_home_diffs(tmp_path: Path):
     )
     assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-fixture", "file")]
     assert not scan.incomplete
+
+
+@pytest.mark.parametrize("rel", ["../escape.txt", "a/../b.txt", "a//b.txt", "./c.txt"])
+def test_file_scan_refuses_unsafe_relative_paths(tmp_path: Path, rel: str):
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    (tmp_path / "escape.txt").write_text(token.value)
+    staged = tmp_path / "repo"
+    staged.mkdir()
+    scan = scan_files(staged, [FileDiff(path=rel, change="added")], (token,))
+    assert scan.hits == ()
+    assert scan.incomplete
+
+
+@pytest.mark.parametrize("home_root_given", [True, False])
+def test_file_scan_home_prefix_lookalike_or_missing_root_is_incomplete(
+    tmp_path: Path, home_root_given: bool
+):
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+    from run.verdict import CAGE_HOME
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "x.txt").write_text(token.value)
+    path = f"{CAGE_HOME}X/x.txt" if home_root_given else f"{CAGE_HOME}/x.txt"
+    scan = scan_files(
+        tmp_path,
+        [FileDiff(path=path, change="added")],
+        (token,),
+        home_root=home if home_root_given else None,
+    )
+    assert scan.hits == ()
+    assert scan.incomplete
 
 
 def test_file_scan_unknown_absolute_path_is_incomplete(tmp_path: Path):

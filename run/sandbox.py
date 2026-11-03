@@ -684,7 +684,7 @@ class Sandbox:
         except Exception:
             self._error(
                 "HONEYTOKEN_SCAN_INCOMPLETE",
-                "honeytoken detection hit a size bound; records past it were not scanned",
+                "honeytoken file scan could not locate the staged or home tree",
                 component=None,
             )
             return
