@@ -289,6 +289,24 @@ def test_a_decoy_that_reads_the_planted_env_is_a_tool_output_hit(repo: Path, eng
     assert_no_leftovers(engine, evidence)
 
 
+def test_a_decoy_copying_the_planted_env_to_a_file_is_flag(repo: Path, engine):
+    from run.verdict import ReadOutcome, fuse
+
+    evidence = detonate(
+        repo,
+        config=SandboxConfig(image=PYTHON_IMAGE, decoy_seconds=90),
+        backend=Scripted([("run_cmd", {"command": "cat .env > leaked.txt"})]),
+    )
+    assert not evidence.errors, [error.model_dump_json() for error in evidence.errors]
+    assert evidence.status == "complete"
+    hits = {(hit.token_id, hit.source) for hit in evidence.honeytoken_hits}
+    assert hits and all(source == "file" for _, source in hits)
+    assert ("leaked.txt", "added") in {(d.path, d.change) for d in evidence.file_diffs}
+    report = fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), evidence)
+    assert report.verdict == "FLAG"
+    assert_no_leftovers(engine, evidence)
+
+
 def test_cleanup_unlocks_cage_growth_past_snapshot_limits(repo: Path, engine):
     sandbox = Sandbox(
         repo, SandboxConfig(image=PYTHON_IMAGE, staging=StagingLimits(max_entries=1, max_depth=0))
