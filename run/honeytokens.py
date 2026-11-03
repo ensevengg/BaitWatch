@@ -17,6 +17,7 @@ from pathlib import Path
 
 from run.evidence import CommandResult, HoneytokenHit
 from run.sink_logs import DEFAULT_MAX_BYTES
+from run.verdict import CAGE_HOME
 
 FAKE_PREFIX = "BAITWATCH_FAKE_"
 CANARY_HOST_SUFFIX = ".canary.example"
@@ -466,19 +467,22 @@ def _read_staged_file(root: Path, rel: str) -> bytes | None:
             file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
         except OSError:
             return None
-        opened = os.fstat(file_fd)
-        if not stat.S_ISREG(opened.st_mode):
+        try:
+            opened = os.fstat(file_fd)
+            if not stat.S_ISREG(opened.st_mode):
+                return None
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(file_fd, 64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > FILE_BYTE_LIMIT:
+                    break
+        except OSError:
             return None
-        chunks: list[bytes] = []
-        total = 0
-        while True:
-            chunk = os.read(file_fd, 64 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            total += len(chunk)
-            if total > FILE_BYTE_LIMIT:
-                break
         return b"".join(chunks)
     finally:
         if file_fd is not None:
@@ -490,29 +494,42 @@ def scan_files(
     root: Path,
     diffs,
     tokens: tuple[Honeytoken, ...],
-    planted_locations: frozenset[str] | set[str] = frozenset(),
+    planted_by_location=None,
+    home_root: Path | None = None,
 ) -> HoneytokenScan:
     prepared = _prepare(tokens)
     if not prepared:
         return HoneytokenScan((), False)
-    candidates = [
-        diff.path
-        for diff in diffs
-        if diff.change in ("added", "modified")
-        and diff.path not in planted_locations
-        and not diff.path.startswith("/")
-    ]
-    hits: dict[tuple[str, str, str | None], HoneytokenHit] = {}
+    planted: dict[str, set[str]] = {}
+    if planted_by_location:
+        for location, ids in planted_by_location.items():
+            planted[location] = {ids} if isinstance(ids, str) else set(ids)
+    candidates: list[tuple[Path, str, str]] = []
     incomplete = False
+    for diff in diffs:
+        if diff.change not in ("added", "modified"):
+            continue
+        path = diff.path
+        if path.startswith(f"{CAGE_HOME}/"):
+            rel = path[len(CAGE_HOME) + 1 :]
+            if home_root is None:
+                incomplete = True
+                continue
+            candidates.append((home_root, rel, path))
+        elif path.startswith("/"):
+            incomplete = True
+        else:
+            candidates.append((root, path, path))
+    hits: dict[tuple[str, str, str | None], HoneytokenHit] = {}
     if len(candidates) > FILE_COUNT_LIMIT:
         incomplete = True
         candidates = candidates[:FILE_COUNT_LIMIT]
     scanned = 0
-    for rel in candidates:
+    for file_root, rel, location in candidates:
         if scanned >= SCAN_TOTAL_BYTES:
             incomplete = True
             break
-        data = _read_staged_file(root, rel)
+        data = _read_staged_file(file_root, rel)
         if data is None:
             incomplete = True
             continue
@@ -524,7 +541,10 @@ def scan_files(
             data = data[: SCAN_TOTAL_BYTES - scanned]
         scanned += len(data)
         text = data.decode("utf-8", errors="ignore")
+        own = planted.get(location, set())
         for entry in prepared:
+            if entry.token.token_id in own:
+                continue
             key = (entry.token.token_id, "file", None)
             if key not in hits and _search(text, "squash", entry.variants):
                 hits[key] = _hit(entry.token.token_id, "file", None)

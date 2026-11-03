@@ -675,17 +675,25 @@ class Sandbox:
         if self._file_honeytoken_scanned or not self._honeytokens:
             return
         self._file_honeytoken_scanned = True
-        planted = {token.location for token in self._honeytokens}
+        planted: dict[str, set[str]] = {}
+        for token in self._honeytokens:
+            planted.setdefault(token.location, set()).add(token.token_id)
         try:
             root = self.staged_path
+            home = self.home_path
         except Exception:
+            self._error(
+                "HONEYTOKEN_SCAN_INCOMPLETE",
+                "honeytoken detection hit a size bound; records past it were not scanned",
+                component=None,
+            )
             return
         diffs = self.evidence.file_diffs
         if self._trace_after_kinds is not None:
             diffs = [
                 diff for diff in diffs if self._trace_after_kinds.get(diff.path, "file") == "file"
             ]
-        scan = scan_files(root, diffs, self._honeytokens, planted)
+        scan = scan_files(root, diffs, self._honeytokens, planted, home_root=home)
         existing = {(hit.token_id, hit.source) for hit in self.evidence.honeytoken_hits}
         self.evidence.honeytoken_hits.extend(
             hit for hit in scan.hits if (hit.token_id, hit.source) not in existing
