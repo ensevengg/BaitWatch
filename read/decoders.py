@@ -302,6 +302,16 @@ def _english_hits(text: str) -> int:
     return sum(1 for w in re.findall(r"[a-z]+", text.lower()) if w in _COMMON_WORDS)
 
 
+def _reads_as_english_only_decoded(line: str, decoded: str) -> bool:
+    """Three different common words after decoding, and clearly more than before.
+
+    Two were enough before, and lockfile lines and gitignore paths passed by
+    chance, which put gibberish in front of the model.
+    """
+    words = {w for w in re.findall(r"[a-z]+", decoded.lower()) if w in _COMMON_WORDS}
+    return len(words) >= 3 and _english_hits(decoded) >= 2 * _english_hits(line) + 1
+
+
 class Rot13Decoder:
     """ROT13-decodes lines that read as English only after decoding.
 
@@ -317,7 +327,7 @@ class Rot13Decoder:
             if len(line) < 12:
                 continue
             decoded = codecs.decode(line, "rot_13")
-            if _english_hits(decoded) >= 2 and _english_hits(decoded) > _english_hits(line):
+            if _reads_as_english_only_decoded(line, decoded):
                 cands.append(decoded)
         return ["\n".join(cands)] if cands else []
 
@@ -332,7 +342,7 @@ class ReversedDecoder:
             if len(line) < 12:
                 continue
             decoded = line[::-1]
-            if _english_hits(decoded) >= 2 and _english_hits(decoded) > _english_hits(line):
+            if _reads_as_english_only_decoded(line, decoded):
                 cands.append(decoded)
         return ["\n".join(cands)] if cands else []
 
@@ -551,7 +561,7 @@ def produce_views(text: str, decoders: list[Decoder] | None,
                   depth: int = 3, max_segments: int = 256,
                   overflow: list[int] | None = None,
                   max_input_chars: int = 262_144,
-                  max_work_chars: int = 4_000_000) -> list[View]:
+                  max_work_chars: int | None = None) -> list[View]:
     """Original text first, then one view per decoder.
 
     Each decoder's segments (every HTML comment, every decoded blob) are
@@ -571,13 +581,17 @@ def produce_views(text: str, decoders: list[Decoder] | None,
 
     Every call is bounded. A source string longer than ``max_input_chars`` is
     decoded from its prefix only, and ``max_work_chars`` caps the total text
-    handed to all decoders for this segment. Either limit being spent is
+    handed to all decoders for this segment; by default that is two full
+    passes of every decoder over the largest input, so a file at the size limit
+    is decoded completely and nested output can still be followed. Either limit being spent is
     recorded in ``errors`` (so the scan reports incomplete coverage, never a
     clean result) and the coverage loop stops instead of scanning forever.
     """
     views = [View(text=text, decoder=None)]
     if not decoders:
         return views
+    if max_work_chars is None:
+        max_work_chars = 2 * max_input_chars * len(decoders)
     seen = {text}
     found_by: dict[str, list[str]] = {}
     joins: dict[str, bool] = {}
