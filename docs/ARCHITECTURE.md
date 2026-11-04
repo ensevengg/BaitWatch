@@ -65,8 +65,8 @@ The installer (`python -m hooks install`) adds two Claude Code hooks to `setting
 3. It decides from the findings:
    - **block:** the judge confirms text aimed at the agent, in a window the detector flagged by itself, in a tier 0 or 1 file. A BaitWatch failure also blocks.
    - **ask:** other findings where the detector and judge agree, the judge alone in a tier 0 or 1 file, or a detector flag with no judge to confirm it.
-   - **allow, with a notice:** the judge alone in a lower-tier file, or attack text the judge reads as quoted. Gate B stops the agent if it later opens that file.
-4. It caches the verdict, keyed by the repo path, Git HEAD, a fingerprint of the file contents, and the scanner settings. Any edit triggers a new scan.
+   - **allow, with a notice:** the judge alone in a lower-tier file, or attack text the judge reads as quoted in a file that is not an agent instruction file. Gate B stops the agent if it later opens that file.
+4. It caches the verdict, keyed by the repo path, Git HEAD, a fingerprint of the file contents, and the scanner settings. An edit to an agent-facing file always triggers a new scan, because those files are compared by content. An edit to a large other file that keeps its size and modification time can reuse the old verdict.
 
 **Gate B** runs before each tool call that matches the installed list: `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `Read` and `Grep` (`TOOL_MATCHER` in `hooks/install.py`). Other tools do not trigger it.
 
@@ -98,7 +98,7 @@ Details: [`docs/HOOKS.md`](HOOKS.md).
 | A honeytoken sent over DNS, HTTP or TLS | BLOCK |
 | Any network contact outside the package registries | BLOCK |
 | A write to agent config, editor settings, Git hooks, CI workflows or shell startup files | BLOCK |
-| Half or more of the repo's files deleted, or more than 200 | BLOCK |
+| Half or more of the repo's own files deleted or emptied, or more than 200, not counting build and cache folders or planted honeytokens | BLOCK |
 | A READ attack at or above the pinned `hard_high` score (0.9965 for v1.7) | BLOCK |
 | A honeytoken moved into a command, the decoy's reply or a file | FLAG |
 | A lower-scoring READ attack, a package-registry contact other than a plain lookup, or a deleted or emptied file | FLAG |
