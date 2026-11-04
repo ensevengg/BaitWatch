@@ -34,6 +34,8 @@ Deeper scan on demand: baitwatch scan runs READ and RUN together
 - **Sinks:** these record any DNS or HTTP(S) request the decoy tries.
 - **Honeytokens:** these fake credentials show whether the decoy tried to steal secrets.
 
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the full design, security model and limits.
+
 ## Results
 
 | Test | Result |

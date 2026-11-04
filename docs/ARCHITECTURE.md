@@ -188,4 +188,4 @@ docs/            schema, hook docs, results and reports
 | Sandbox boundary and limits | [`run/SANDBOX.md`](../run/SANDBOX.md) |
 | Evidence and verdict contract | [`run/CONTRACT.md`](../run/CONTRACT.md) |
 | Attack repos and safety rails | [`attacks/README.md`](../attacks/README.md) |
-| Results sources | `docs/RESULTS.md` |
+| Builds, dates and methods behind the results | [`docs/RESULTS.md`](RESULTS.md) |
