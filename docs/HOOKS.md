@@ -194,10 +194,12 @@ another, because security comes before speed (`read/batches.py`):
 
 - Most repositories finish in under 3 minutes of model time; the largest we tried
   take about 9. A status message shows while it runs.
-- Each batch saves its work. A scan that runs out of time resumes where it stopped, and
+- Each batch saves its work. A scan that runs out of time asks, and says how many files
+  it did not reach. It never allows. Submitting the prompt again resumes where it stopped, and
   a later scan reads only the files that changed.
 - A confirmed attack stops the scan: the verdict is decided.
-- The judge reads every agent instruction file whole, and every flag and suspicious
+- The judge reads every agent instruction file in full, in overlapping pieces of up to
+  16,000 characters, and every flag and suspicious
   window in agent-facing files. Low-score windows in other files stop after 150 per
   scan, and those files are checked on open.
 
@@ -223,13 +225,14 @@ Known limits:
 
 A finding counts as two signals when the judge confirms a window the model also scored
 high. All 17 attack repositories we test have one; the judge alone mostly reacts to
-ordinary install instructions that the model scores near zero.
+ordinary install instructions that the model scores near zero. A block takes more: the
+model has to have flagged the window by itself, at its full threshold.
 
 | Finding | Result |
 |---|---|
-| Two signals in an agent-facing file, score 0.7 or more | **block** |
+| The judge confirms text aimed at the agent, in a window the model flagged by itself, in an agent-facing file | **block** |
 | BaitWatch itself failed | **block** |
-| Two signals in any other file | ask |
+| Other two-signal findings, anywhere | ask |
 | Judge alone in an agent-facing file | ask |
 | Low score, incomplete evidence, or no judge to confirm a model flag | ask |
 | Judge alone in any other file | prompt runs, the person is told, the agent is stopped if it opens the file |
@@ -239,9 +242,13 @@ blocks. Set `META_API_KEY` to turn the judge on. The person sees the file, line 
 the judge's reading; the agent does not.
 
 - `python -m hooks approve` continues past an ask. `python -m hooks approve
-  --allow-block` continues past a block. Both last 15 minutes by default and hold
-  only for the exact tree approved: any edit voids them. Dangerous actions are still
-  refused, and prompt risk cannot be approved.
+  --allow-block` continues past a block. Flagged files stay accepted until their content
+  changes, and BaitWatch still reads the rest of the repository. The list lives in your own
+  cache folder, so a repository cannot add to it, and `--revoke` clears it. Other gaps,
+  such as a scan that ran out of time, are approved for 15 minutes by default and only for the exact
+  tree approved. Dangerous actions are still refused, and prompt risk cannot be approved.
+- Agents cannot approve for themselves: a command that runs `hooks approve` or names
+  these files is refused. Approve in your own terminal.
 
 ## Fail-closed matrix
 
@@ -254,10 +261,16 @@ the judge's reading; the agent does not.
 | prompt longer than 65 536 chars | ask | shorten it |
 | prompt decoding exceeds its budget | ask | shorten it |
 | READ verdict `incomplete` | ask | — |
-| agent opens an unscanned file: READ flags it | block (ask without a judge) | — |
+| agent opens an unscanned file: model and judge both flag it | block | `hooks approve --allow-block` |
+| agent opens an unscanned file: only one of them flags it | ask | — |
 | agent opens an unscanned tier 0-2 file too large to check in full | ask | — |
-| READ verdict `attack`, two signals in an agent-facing file | block | `hooks approve --allow-block` |
+| READ verdict `attack`, the judge confirms a model flag in an agent-facing file | block | `hooks approve --allow-block` |
 | READ verdict `attack`, anything less certain | ask | `hooks approve` |
+| Attack text the judge reads as quoted or meant for another program, outside agent instruction files | notice; the agent is stopped if it opens the file | `hooks approve` |
+| The judge cleared a model flag | notice; the agent has to ask before it opens the file | `hooks approve` |
+| Scan ran out of time | ask; submitting again resumes | `hooks approve` |
+| Agent instruction file too large to read in full | ask | `hooks approve` |
+| Any other file too large to read in full | notice; the agent is asked about it if it opens the file | — |
 | hook disabled | allow | `BAITWATCH_HOOK=off` |
 | cache unreadable | scan again | — |
 | cache fresh | cached verdict | `BAITWATCH_HOOK_REFRESH=1` |
@@ -279,7 +292,7 @@ approval:
 ```bash
 "<installed python>" -I -m hooks approve --minutes 15   # approve the current root
 "<installed python>" -I -m hooks approve --repo PATH
-"<installed python>" -I -m hooks approve --revoke
+"<installed python>" -I -m hooks approve --revoke       # also clears accepted files
 ```
 
 The Gate A block prints this command with the interpreter that installed the
@@ -318,6 +331,20 @@ gate is well under one second.
 Measured in `tests/attacks/test_hooks.py::test_hook_under_three_seconds`: the
 first call in a fresh process (imports plus the first walk) must stay under
 10 s, and the steady-state call must stay under 3 s.
+
+## What leaves your machine
+
+With `META_API_KEY` set, the judge sends text from the repository to Meta's API: suspicious
+windows from any file, and agent instruction files in full. The rest of the repository stays
+on your machine. Use the standard `muse-spark-1.3` model on private code. The cheaper
+Contributor model lets Meta train on what it receives, so it only suits public text. Without a
+key nothing is sent, and model flags ask instead of being judged.
+
+## Upgrading
+
+Run `python -m hooks install` again after upgrading BaitWatch. An older install keeps its
+shorter hook timeout, so Claude Code stops long scans and blocks the prompt with no
+explanation. `python -m hooks status` warns about this.
 
 ## Environment variables
 
