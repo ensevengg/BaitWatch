@@ -6,7 +6,7 @@ BaitWatch checks a repository for prompt-injection attacks aimed at AI coding ag
 
 | | Agent hook | `baitwatch scan` |
 |---|---|---|
-| When | Every prompt and tool call in Claude Code | On demand, before you trust a repo |
+| When | Every prompt, and every `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `Read` or `Grep` call in Claude Code | On demand, before you trust a repo |
 | Layers | READ | READ and RUN |
 | Verdicts | allow, ask, block | ALLOW, FLAG, BLOCK |
 | Needs | the detector checkpoint, optional `META_API_KEY` | the same, plus Linux, Docker Engine 28 or later, and a decoy model |
@@ -15,7 +15,7 @@ BaitWatch checks a repository for prompt-injection attacks aimed at AI coding ag
 ```
 Everyday use
   prompt ──► Gate A: READ scans the repo ──► allow / ask / block
-  tool call ──► Gate B: repo verdict + tool policy + scan-on-open ──► allow / ask / block
+  matched tool call ──► Gate B: repo verdict + tool policy + scan-on-open ──► allow / ask / block
 
 Deeper scan
   repo ──► READ (files) ─┐
@@ -68,10 +68,10 @@ The installer (`python -m hooks install`) adds two Claude Code hooks to `setting
    - **allow, with a notice:** the judge alone in a lower-tier file, or attack text the judge reads as quoted. Gate B stops the agent if it later opens that file.
 4. It caches the verdict, keyed by the repo path, Git HEAD, a fingerprint of the file contents, and the scanner settings. Any edit triggers a new scan.
 
-**Gate B** runs before each tool call:
+**Gate B** runs before each tool call that matches the installed list: `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `Read` and `Grep` (`TOOL_MATCHER` in `hooks/install.py`). Other tools do not trigger it.
 
 - A **static policy** blocks or asks about dangerous actions, such as piping `curl` into `sh`, sending `.env` or SSH keys over the network, `rm -rf /`, editing agent instruction files, or contacting the test attacker hosts.
-- If the repo verdict is attack, every tool call is blocked.
+- If the repo verdict is attack, every matched tool call is blocked.
 - **Scan on open:** when the agent opens a file Gate A did not fully cover (with `Read`, `Grep` on that file, `cat`, `head` and similar), Gate B scans it first. This includes files the judge cleared and excluded directories such as `dist/`.
 
 **Approvals.** `python -m hooks approve` lets the person continue past an ask, and `--allow-block` past a block. Approvals live in the user's own cache folder, so a repo cannot add to them. An accepted file stays accepted until its content changes. Other approvals, such as for a scan that ran out of time, cover only the exact tree and expire after 15 minutes by default. An agent cannot approve for itself. The hook refuses any tool call that runs `hooks approve`.
@@ -128,7 +128,7 @@ How BaitWatch keeps that line:
 ## Known limits
 
 - **An allow is not proof.** BaitWatch still misses about 29% of real malicious skills ([`docs/HOOKS.md`](HOOKS.md#coverage)).
-- **Hook coverage has gaps.** Gate B does not check a file on open when the agent reads it with `grep -r`, `python -c` or a build script. The hook does not scan tool output or fetched web pages. Hosts that load instruction files from excluded folders without a tool call are not covered.
+- **Hook coverage has gaps.** Gate B runs only for the tools in its matcher, so other tools, such as `Glob` or `WebSearch`, are not checked. Gate B does not check a file on open when the agent reads it with `grep -r`, `python -c` or a build script. The hook does not scan tool output or fetched web pages. Hosts that load instruction files from excluded folders without a tool call are not covered.
 - **One incomplete case can still allow.** If a scan does not finish, and every finding it made only matters when a file is opened, Gate A allows the prompt instead of asking.
 - **The judge can be fooled.** A fooled judge clears a flag, and the only remaining check is the ask when the agent opens that file.
 - **The sandbox does not see everything.** The network blocks traffic to raw IP addresses or unlisted ports but does not log it. The trace cannot see writes undone before the after-snapshot. The sandbox makes no claim against kernel or container escapes. See [`run/SANDBOX.md`](../run/SANDBOX.md#known-limits).
