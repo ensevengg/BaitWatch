@@ -349,3 +349,20 @@ def test_override_for_a_block_is_explicit_and_bound_to_the_tree(tmp_path, monkey
 def test_generated_file_is_always_scanned_when_opened(tmp_path, seen):
     (tmp_path / "package-lock.json").write_text("{}\n")
     assert decide("read", {"file_path": "package-lock.json"}, tmp_path, []).verdict == "block"
+
+
+def test_opening_a_file_the_judge_cleared_asks_without_loading_the_model(tmp_path, seen):
+    (tmp_path / "README.md").write_text("hello\n")
+    scan = RepoScan("allow", covered=[], cleared=["README.md"])
+    decision = _opened_file_decision("read", {"file_path": "README.md"}, scan, tmp_path, tmp_path)
+    assert decision.verdict == "ask"
+    assert "judge cleared" in decision.reason
+    assert seen == []
+
+
+def test_a_cached_scan_remembers_cleared_files(tmp_path):
+    from hooks.cache import CachedScan, ScanCache
+
+    cache = ScanCache(tmp_path / "cache.json")
+    cache.set("k", CachedScan("allow", 0.0, "r", [], "m", time.time(), [], "", "", ["README.md"]))
+    assert cache.get("k").cleared == ["README.md"]

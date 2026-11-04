@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-from hooks.cache import ApprovalStore, ScanCache, default_cache_path
+from hooks.cache import ApprovalStore, ScanCache, TrustStore, default_cache_path
 from hooks.guard import (
     DEFAULT_HOOK_DEADLINE_S,
     Decision,
@@ -35,7 +35,14 @@ from hooks.guard import (
     resolve_project_root,
     run_gate,
 )
-from hooks.install import detect_claude_version, hook_command, install, settings_path, uninstall
+from hooks.install import (
+    detect_claude_version,
+    hook_command,
+    install,
+    settings_path,
+    stale_install_warnings,
+    uninstall,
+)
 
 __all__ = ["approve_command", "emit", "main", "read_payload", "selftest"]
 
@@ -196,7 +203,7 @@ def emit(decision: Decision, host: str = "claude") -> None:
                 f"BaitWatch needs approval before this prompt runs: {decision.reason}. "
                 + (f"{decision.detail} " if decision.detail else "")
                 + f"Inspect the repository, then run `{approve_command()}` "
-                "and resubmit the prompt."
+                "and resubmit the prompt. Flagged files stay accepted until they change."
             )
             payload = {"decision": "block", "reason": reason}
         else:
@@ -399,6 +406,11 @@ def _install_command(args: argparse.Namespace) -> int:
     print(
         f"{verb} {report.path} ({report.action}: {report.added} added, {report.removed} replaced)"
     )
+    if not args.uninstall:
+        print(
+            "With META_API_KEY set, suspicious text and agent instruction files from scanned "
+            "repositories are sent to Meta's API. See docs/HOOKS.md."
+        )
     return 0
 
 
@@ -425,16 +437,26 @@ def _approve_command(args: argparse.Namespace) -> int:
     # too, or a custom approval path would leave the block in place.
     with _applied_user_hook_env():
         store = ApprovalStore()
+        trust = TrustStore()
         if args.revoke:
             removed = store.revoke(root)
-            print(f"revoked {removed} approval(s) for {root}")
+            accepted = trust.revoke(root)
+            print(f"revoked {removed} approval(s) and {accepted} accepted file(s) for {root}")
             return 0
         try:
             fingerprint = store.approve(root, args.minutes, allow_block=args.allow_block)
         except (OSError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        accepted, refused = trust.accept_pending(root, allow_block=args.allow_block)
     print(f"approved {root} for {args.minutes:g} minute(s); fingerprint {fingerprint[:16]}...")
+    if accepted:
+        print(f"accepted until they change: {', '.join(accepted)}")
+    if refused:
+        print(
+            f"not accepted: {', '.join(refused)} (changed since it was flagged, or "
+            "blocked, which needs --allow-block)"
+        )
     return 0
 
 
@@ -447,6 +469,8 @@ def _status() -> int:
     print(f"inline_judge: {os.environ.get('BAITWATCH_HOOK_JUDGE', '0')}")
     print(f"approvals: {ApprovalStore().path}")
     print(f"claude user settings: {settings_path('user')}")
+    for warning in stale_install_warnings():
+        print(f"warning: {warning}")
     print(f"CLI: {hook_command('a')} | {hook_command('b')}")
     return 0
 

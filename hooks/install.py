@@ -37,6 +37,7 @@ TOOL_MATCHER = "Bash|Write|Edit|MultiEdit|NotebookEdit|WebFetch|Read|Grep"
 # ``onFailure: "block"`` needs a host that honours it.  2.1.295 is the first
 # Claude Code release with the documented fail-closed hook contract.
 MIN_CLAUDE_VERSION = (2, 1, 295)
+INSTALLED_TIMEOUT_S = 630  # the first scan of a large repository can take its full 600 s
 
 
 @dataclass
@@ -46,6 +47,32 @@ class InstallReport:
     action: str
     removed: int = 0
     added: int = 0
+
+
+def stale_install_warnings() -> list[str]:
+    """Installs that kept an older, shorter timeout: the host kills long scans there."""
+    warnings: list[str] = []
+    for scope in ("user", "project"):
+        path = settings_path(scope)
+        try:
+            events = json.loads(path.read_text(encoding="utf-8")).get("hooks", {})
+        except (OSError, ValueError, AttributeError):
+            continue
+        for entries in events.values() if isinstance(events, dict) else ():
+            for entry in entries if isinstance(entries, list) else ():
+                for hook in entry.get("hooks", []) if isinstance(entry, dict) else ():
+                    if (
+                        isinstance(hook, dict)
+                        and "hooks" in str(hook.get("command", ""))
+                        and "gate-" in str(hook.get("command", ""))
+                        and int(hook.get("timeout", 0) or 0) < INSTALLED_TIMEOUT_S
+                    ):
+                        warnings.append(
+                            f"{path} has a hook timeout of {hook.get('timeout')}s, shorter than "
+                            f"{INSTALLED_TIMEOUT_S}s. Long scans will be stopped: run "
+                            "`python -m hooks install` again."
+                        )
+    return sorted(set(warnings))
 
 
 def hook_command(gate: str, python: str | None = None) -> str:
@@ -116,7 +143,7 @@ def _hook_entry(gate: str, python: str | None, *, matcher: str | None) -> dict:
             {
                 "type": "command",
                 "command": hook_command(gate, python),
-                "timeout": 630,
+                "timeout": INSTALLED_TIMEOUT_S,
                 "statusMessage": "BaitWatch is checking this repository",
                 # A timeout or startup failure must never let the action
                 # continue.  The CLI also enforces an internal deadline below

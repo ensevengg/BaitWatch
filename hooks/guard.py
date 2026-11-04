@@ -52,6 +52,9 @@ MAX_PROMPT_CHARS = 65_536
 DEFAULT_HOOK_DEADLINE_S = 600.0
 HOOK_DECISION_MARGIN_S = 8.0
 BLOCK_MIN_SCORE = 0.7
+# No new batch starts this close to the deadline: scoring one takes 15-30 s and cannot be
+# stopped part way. Without this a slow scan ends in the deadline's generic failure.
+SCAN_STOP_MARGIN_S = 60.0
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+", re.IGNORECASE)
 _NET_TOOL = (
@@ -137,6 +140,8 @@ class Decision:
             "files": self.files,
             "duration_ms": round(self.duration_ms, 1),
             "approvable": self.approvable,
+            "detail": self.detail,
+            "notice": self.notice,
         }
 
 
@@ -152,6 +157,7 @@ class RepoScan:
     covered: list[str] | None = None  # files read in full; None: not recorded
     detail: str = ""  # what was flagged and why, for the person at Gate A
     notice: str = ""  # what the scan did and did not check
+    cleared: list[str] | None = None  # files with a model flag the judge cleared
 
 
 _RANK = {"allow": 0, "ask": 1, "block": 2}
@@ -352,37 +358,53 @@ def _store_cached_scan(
             created=time.time(),
             covered=scan_result.covered,
             detail=scan_result.detail,
+            cleared=scan_result.cleared,
         ),
     )
 
 
 def _verdict_from_read(
-    read_verdict: str, flagged: list, min_model_score: float
+    read_verdict: str, flagged: list, min_model_score: float, block_model_score: float = 0.0
 ) -> tuple[str, list]:
     """The verdict, and the flagged files that only matter if an agent opens them.
 
-    - Block: the model and the judge agree on an agent-facing file, the score is at
-      least 0.7, or BaitWatch itself failed. All 17 attack repositories we test have
-      two such signals.
-    - Ask: they agree somewhere else, the judge alone flags an agent-facing file, the
+    - Block: the judge confirms, in an agent-facing file, a window the model flagged by
+      itself (``block_model_score``), or BaitWatch itself failed. A real repository rarely
+      has this; weaker agreement also hit ordinary skills and example configs, so it asks.
+    - Ask: they agree anywhere else, the judge alone flags an agent-facing file, the
       score is low, or no judge confirmed a model flag. Asking still stops the prompt.
     - The judge alone on any other file does not stop the prompt: it mostly reacts to
       ordinary install instructions there. That file is refused when opened.
+    - The same goes for attack text the judge read as quoted or meant for another
+      program. read.scan never gives that reading to an agent instruction file.
     """
     from hooks.lightread import load
 
     if read_verdict != "attack":
         return ("ask" if read_verdict == "incomplete" else "allow"), []
     tier = load("tiers").priority_tier
+    block_at = max(min_model_score, block_model_score)
     deferred: list[str] = []
     verdict = "allow"
     for finding in flagged:
         if finding.layer == "system":
             return "block", []
+        if finding.evidence.get("judge_mention"):
+            deferred.append(finding.file)
+            continue
         confirmed = finding.layer != "model" or bool(finding.evidence.get("judge_confirmed"))
-        two_signal = confirmed and finding.evidence.get("model_score", 0.0) >= min_model_score
+        model_score = finding.evidence.get("model_score", 0.0)
+        two_signal = confirmed and model_score >= min_model_score
         agent_facing = tier(finding.file) <= 1
-        if two_signal and agent_facing and finding.score >= BLOCK_MIN_SCORE:
+        if (
+            confirmed
+            and model_score >= block_at
+            and agent_facing
+            and finding.score >= BLOCK_MIN_SCORE
+            # Code that sends a secret to the project's own site speaks to nobody. It is
+            # worth asking about, but only text aimed at the agent is sure to be an attack.
+            and finding.evidence.get("judge_addressee", "reading_agent") == "reading_agent"
+        ):
             return "block", []
         if not confirmed or two_signal or agent_facing:
             verdict = "ask"
@@ -434,6 +456,10 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
     mode = os.environ.get("BAITWATCH_HOOK_SCANNER", "read").strip().lower()
     # A verdict reached without the judge must not answer for one reached with it.
     tag = "keyword" if mode == "keyword" else _read_tag() + ("+judge" if _hook_judge_on() else "")
+    if mode != "keyword":
+        from hooks.cache import TrustStore
+
+        tag += TrustStore().tag(repo)
     cache_key = None
     if cache is not None and os.environ.get("BAITWATCH_HOOK_REFRESH") != "1":
         # A key is None when the scanned tree cannot be fingerprinted; then the
@@ -452,6 +478,7 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
                     duration_ms=(time.perf_counter() - started) * 1000,
                     covered=cached.covered,
                     detail=cached.detail,
+                    cleared=cached.cleared,
                 )
 
     if mode == "keyword":
@@ -481,7 +508,7 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
         _store_cached_scan(cache, repo, tag, cache_key, scan_result, "keyword")
         return scan_result
 
-    from hooks.cache import scanner_signature
+    from hooks.cache import TrustStore, scanner_signature
     from read.batches import scan_in_batches
     from read.cache import DEFAULT_FILE_CACHE_PATH, FileResultCache
     from read.config import ReadConfig  # lazy: keeps hooks importable on CPU
@@ -489,6 +516,7 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
     cfg = ReadConfig.quick()
     judge_on = _hook_judge_on()
     cfg.judge.enabled = judge_on
+    trust = TrustStore()
     store = FileResultCache(DEFAULT_FILE_CACHE_PATH)
     # Leave time to print a decision before the hook's own deadline. What a scan
     # did not reach is picked up by the next one.
@@ -497,20 +525,35 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
         cfg,
         store=store if store.enabled else None,
         store_salt=f"{tag}|{scanner_signature()}",
-        time_limit_s=max(1.0, _hook_deadline() - HOOK_DECISION_MARGIN_S),
+        time_limit_s=max(1.0, _hook_deadline() - SCAN_STOP_MARGIN_S),
         stop_score=BLOCK_MIN_SCORE,
+        trusted=lambda rel: trust.is_trusted(repo, rel),
     )
     stats = result.stats
     flagged = result.flagged
     confirmed = any(
         finding.layer != "model" or finding.evidence.get("judge_confirmed") for finding in flagged
     )
-    verdict, deferred = _verdict_from_read(result.read_verdict, flagged, cfg.review_low)
+    verdict, deferred = _verdict_from_read(
+        result.read_verdict, flagged, cfg.review_low, cfg.flag_threshold
+    )
+    # A judge can be fooled, so a flag it cleared is not forgotten: the person is told, and
+    # an agent has to ask before it opens the file. Stopping the prompt for these would
+    # stop most repositories: about 4 files per popular repository have one.
+    cleared = sorted({f.file for f in result.findings if f.evidence.get("cleared_by_judge")})
+    trust.set_pending(repo, verdict, [f.file for f in flagged if f.layer != "system"] + cleared)
     files = sorted({finding.file for finding in flagged})[:8]
     names = ", ".join(files[:3])
     model = Path(str(stats.model_path)).name
     total = stats.best_effort_gaps + len(stats.files_covered)
-    if result.read_verdict != "attack":
+    out_of_time = stats.scan_time_limit_hit or (judge_on and stats.judge_deadline_hit)
+    if out_of_time and verdict == "ask":
+        # Not a finding: the next try starts from what this one saved.
+        ask_reason = (
+            "BaitWatch ran out of time before it finished reading this repository. "
+            "Submit the prompt again to continue from where it stopped"
+        )
+    elif result.read_verdict != "attack":
         ask_reason = "READ could not cover the repository completely: " + "; ".join(
             stats.incomplete_reasons[:3]
         )
@@ -534,16 +577,20 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
         "block": f"READ flagged {stats.flagged} chunk(s) in {names} "
         f"(max score {result.max_score:.2f})",
         "ask": ask_reason,
-        "allow": f"READ found no injection in the {len(stats.files_covered)} files it checked",
+        "allow": f"READ found nothing new in the {len(stats.files_covered)} files it checked, "
+        "apart from any files you accepted"
+        if trust.tag(repo)
+        else f"READ found no injection in the {len(stats.files_covered)} files it checked",
     }[verdict]
-    # A deferred file stays out of "covered", so Gate B refuses it when it is opened.
-    covered = [rel for rel in stats.files_covered if rel not in deferred]
+    # A deferred or cleared file stays out of "covered", so Gate B stops at it when opened.
+    covered = [rel for rel in stats.files_covered if rel not in deferred and rel not in cleared]
     notice = ""
     if deferred:
         notice = (
-            f"BaitWatch found text aimed at agents in {', '.join(deferred[:3])}"
-            f"{' and others' if len(deferred) > 3 else ''}. The prompt can run, "
-            "but an agent is stopped if it opens these files."
+            f"BaitWatch found attack-like text in {', '.join(deferred[:3])}"
+            f"{' and others' if len(deferred) > 3 else ''}. It looks quoted, meant for "
+            "another program, or only the judge flagged it, so the prompt can run. An "
+            "agent is stopped if it opens these files."
         )
     elif verdict == "allow" and not stats.files_cached:
         notice = (
@@ -554,6 +601,11 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
             notice += (
                 " Files it skipped, such as generated ones, are checked if an agent opens them."
             )
+    if cleared and verdict == "allow":
+        notice = (
+            f"{notice} The model flagged {len(cleared)} more file(s) and the judge cleared them, "
+            f"such as {cleared[0]}. An agent has to ask before it opens one."
+        ).strip()
     if verdict == "allow" and not judge_on:
         notice = f"{notice} No judge is running: set META_API_KEY for better results.".strip()
     scan_result = RepoScan(
@@ -566,6 +618,7 @@ def scan_repo(repo: str | Path, *, cache=None, model_tag: str = "read-quick") ->
         covered=covered,
         detail=_flag_detail(flagged) if verdict != "allow" else "",
         notice=notice,
+        cleared=cleared,
     )
     # An outage or running out of time is temporary, so scan again next time. Budget
     # cuts are stable: rescanning would give the same answer at the same cost.
@@ -664,6 +717,10 @@ _BINARY_LOOKING = {
     ".docx",
     ".xlsx",
 }
+# Text in a repository could otherwise talk the agent into approving that repository.
+_SELF_APPROVE_RE = re.compile(
+    r"\bhooks(?:\.cli)?\s+approve\b|\b(?:trusted-files|approvals)\.json\b", re.IGNORECASE
+)
 _READING_COMMANDS = {"cat", "head", "tail", "less", "more", "bat", "nl", "sed", "awk"}
 _MAX_READ_TARGETS = 5
 _SHELL_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
@@ -747,6 +804,10 @@ def _judge_time_left(started: float) -> float:
     return max(0.0, _hook_deadline() - HOOK_DECISION_MARGIN_S - elapsed)
 
 
+def _cleared_reason(rel: str) -> str:
+    return f"the model flagged {rel} and the judge cleared it: confirm the agent should read it"
+
+
 def scan_opened_file(path: Path, rel: str, *, cache=None, started: float | None = None) -> Decision:
     """Score one file the repository scan did not cover, as the agent opens it."""
     from hooks.cache import CachedScan
@@ -775,8 +836,20 @@ def scan_opened_file(path: Path, rel: str, *, cache=None, started: float | None 
     result = scan(path, cfg=cfg)
     stats = result.stats
     if result.read_verdict == "attack":
-        verdict = "block" if cfg.judge.enabled and result.max_score >= BLOCK_MIN_SCORE else "ask"
+        # The agent is about to read this file, so any tier counts as agent-facing. The
+        # same rule as at the prompt: the judge has to confirm a window the model flagged
+        # by itself. Anything less, such as a judge that did not answer, asks.
+        two_signal = any(
+            finding.score >= BLOCK_MIN_SCORE
+            and finding.evidence.get("judge_confirmed")
+            and finding.evidence.get("judge_addressee", "reading_agent") == "reading_agent"
+            and finding.evidence.get("model_score", 0.0) >= cfg.flag_threshold
+            for finding in result.flagged
+        )
+        verdict = "block" if two_signal else "ask"
         reason = f"{rel} contains text aimed at the agent (score {result.max_score:.2f})"
+    elif any(f.evidence.get("cleared_by_judge") for f in result.findings):
+        verdict, reason = "ask", _cleared_reason(rel)
     elif stats.partial_files and priority_tier(rel) <= 2:
         verdict, reason = "ask", f"{rel} is too large to check in full"
     elif stats.judge_overflow_files:
@@ -797,7 +870,12 @@ def _project_path(raw: str, root: Path, cwd) -> Path | None:
     symlinked project directory. Only the parent is resolved on that path, so an
     in-repo symlink keeps its own name.
     """
-    candidate = Path(raw).expanduser()
+    if "\0" in raw:
+        return None  # no such file can exist
+    # os.path, not pathlib: for an unknown ~user the shell keeps the name as it is, so
+    # it is a real relative path. pathlib raises, and skipping it would leave a file
+    # called ~x.md unchecked.
+    candidate = Path(os.path.expanduser(raw))
     if not candidate.is_absolute():
         candidate = Path(cwd) / candidate
     lexical = Path(os.path.normpath(candidate))
@@ -816,14 +894,23 @@ def _opened_file_decision(
     """Check files this call opens that the repository scan left out, worst first."""
     if repo_scan is None or repo_scan.covered is None or root is None:
         return None
+    from hooks.cache import TrustStore
+
     covered = set(repo_scan.covered)
+    cleared = set(repo_scan.cleared or ())
+    trust = TrustStore()
     worst: Decision | None = None
     for raw in _read_targets(tool, data):
         lexical = _project_path(raw, root, cwd)
         if lexical is None:
             continue  # outside the project: the credential rules still apply
         rel = lexical.relative_to(root).as_posix()
-        if rel in covered or not lexical.is_file():
+        if rel in covered or not lexical.is_file() or trust.is_trusted(root, rel):
+            continue
+        if rel in cleared:
+            # Already decided by the repository scan, so no model load.
+            if worst is None or _RANK[worst.verdict] < _RANK["ask"]:
+                worst = Decision("B", "ask", _cleared_reason(rel), source="read", files=[rel])
             continue
         target = lexical.resolve()
         if not _worth_scanning_on_read(target, rel):
@@ -875,6 +962,12 @@ def static_tool_decision(tool_name: str, tool_input: dict) -> Decision:
         command = str(data.get("command") or data.get("cmd") or "")
         if not command:
             return Decision("B", "allow", "no command to inspect")
+        if _SELF_APPROVE_RE.search(command):
+            return Decision(
+                "B",
+                "block",
+                "only a person can approve a repository: run this in your own terminal",
+            )
         bad = _bad_urls(command)
         if bad:
             return Decision("B", "block", f"command contacts the BaitWatch test sink: {bad[0]}")
@@ -1089,6 +1182,12 @@ def gate_b(payload: dict, *, scanner=scan_repo, cache=None) -> Decision:
             cache=cache,
             started=started,
         )
+        if opened is not None and opened.verdict == "block":
+            from hooks.cache import ApprovalStore
+
+            if ApprovalStore().is_approved(root, block=True):
+                # The person chose to continue past blocks: ask them about this file too.
+                opened = replace(opened, verdict="ask")
         if opened is not None and _RANK[opened.verdict] > _RANK[policy.verdict]:
             policy = opened
     if (
