@@ -48,7 +48,7 @@ walk ──► decode ──► chunk ──► detector ──► judge ──�
 4. **Detector** (`read/detector.py`). A fine-tuned Llama Prompt Guard 2 (86M) scores each window. The checkpoint lives outside the repo. `read/model_config.json` pins it by SHA-256 and holds its thresholds.
 5. **Judge** (`read/judge.py`). Muse Spark reads flagged windows, windows in the uncertain band, a bounded number of low-score windows, and every agent instruction file in full. It answers three questions: is there harm, who is it addressed to, and is it active or quoted. Code turns those answers into attack, mention or benign. The judge's reply must be exactly one JSON object, and anything else counts as no answer.
 
-When the judge answers, it decides. When it does not, the detector's flag stands. The judge can clear a detector flag only if it ran on the primary endpoint and read the window in full. A cleared flag stays as a finding marked `cleared_by_judge`, and in the hook an agent has to ask before it opens that file.
+An attack or mention answer from the judge adds a flagged finding. A benign answer clears a detector flag only if it came from the primary endpoint, or from the judge's cache of earlier primary answers, and the judge read the window in full. A benign answer from the local fallback model, a window cut short, or no answer at all leaves the detector's flag in place. `ReadConfig.judge_clears_flags = False` turns clearing off. A cleared flag stays as a finding marked `cleared_by_judge`, and in the hook an agent has to ask before it opens that file.
 
 `read/batches.py` runs the scan in tier order and saves each batch, so a scan that runs out of time can resume. `read/scan.py` returns findings plus a verdict of clean, attack or incomplete.
 
@@ -72,7 +72,7 @@ The installer (`python -m hooks install`) adds two Claude Code hooks to `setting
 
 - A **static policy** blocks or asks about dangerous actions, such as piping `curl` into `sh`, sending `.env` or SSH keys over the network, `rm -rf /`, editing agent instruction files, or contacting the test attacker hosts.
 - If the repo verdict is attack, every matched tool call is blocked.
-- **Scan on open:** when the agent opens a file Gate A did not fully cover (with `Read`, `Grep` on that file, `cat`, `head` and similar), Gate B scans it first. This includes files the judge cleared and excluded directories such as `dist/`. For source code (tier 3), Gate B scans only files that look agent-directed: text addressed to an agent, a rule hit, or imperative prose, in the file or its decoded views (`_worth_scanning_on_read`). That check sees about 91% of real attack windows. Other source files open without a scan.
+- **Scan on open:** when the agent opens a file Gate A did not fully cover (with `Read`, `Grep` on that file, `cat`, `head` and similar), Gate B checks it first. For a file the judge cleared, Gate B asks without scanning again. It scans tier 0 to 2 files and generated files, including excluded directories such as `dist/`. For source code (tier 3), Gate B scans only files that look agent-directed: text addressed to an agent, a rule hit, or imperative prose, in the file or its decoded views (`_worth_scanning_on_read`). That check sees about 91% of real attack windows. Other source files open without a scan.
 
 **Approvals.** `python -m hooks approve` lets the person continue past an ask, and `--allow-block` past a block. Approvals live in the user's own cache folder, so a repo cannot add to them. An accepted file stays accepted until its content changes. Other approvals, such as for a scan that ran out of time, cover only the exact tree and expire after 15 minutes by default. An agent cannot approve for itself. The hook refuses any tool call that runs `hooks approve`.
 
@@ -97,12 +97,14 @@ Details: [`docs/HOOKS.md`](HOOKS.md).
 |---|---|
 | A honeytoken sent over DNS, HTTP or TLS | BLOCK |
 | Any network contact outside the package registries | BLOCK |
-| A write to agent config, editor settings, Git hooks, CI workflows or shell startup files | BLOCK |
+| A write to agent config, editor settings, Git hooks or CI workflows, anywhere in the copy or the cage home | BLOCK |
+| A write to shell startup files, `.ssh`, `.gitconfig`, package-manager config or cron files in the cage home | BLOCK |
 | Half or more of the repo's own files deleted or emptied, or more than 200, not counting build and cache folders or planted honeytokens | BLOCK |
 | A READ attack at or above the pinned `hard_high` score (0.9965 for v1.7) | BLOCK |
 | A honeytoken moved into a command, the decoy's reply or a file | FLAG |
 | A lower-scoring READ attack, a package-registry contact other than a plain lookup, or a deleted or emptied file | FLAG |
 | Any error, timeout, limit hit, incomplete READ, or a decoy that ran no command | FLAG |
+| Any path left out of the copy, other than the top-level `.git` | FLAG |
 | READ clean and RUN complete with none of the above | ALLOW |
 
 ALLOW needs complete evidence from every part. The verdict schema (`docs/verdict.schema.json`) rejects an ALLOW that has errors or honeytoken hits other than a plain read. A decoy reading `.env` is normal setup behaviour and does not change the verdict by itself.
