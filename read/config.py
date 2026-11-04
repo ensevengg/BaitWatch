@@ -106,8 +106,9 @@ class JudgeConfig:
     max_bulk_calls_per_scan: int | None = None
     max_tokens_per_scan: int = 200_000     # judge input+output token budget per scan
     # Reasoning tokens count against max_tokens, so a small limit returns an
-    # empty answer (300 was used up by reasoning on every call).
-    max_output_tokens: int = 2_000
+    # empty answer (300 was used up by reasoning on every call). At 2,000 about 0.6% of
+    # answers were still cut off, mostly on attacks, which take longer to reason about.
+    max_output_tokens: int = 4_000
     max_windows_per_file: int = 3          # low-score windows judged per tier 2/3 file
     # The same for tier 0/1 files. More rule-matching windows than this in one
     # such file makes the verdict incomplete: at most 14 in 34 public repos.
@@ -118,7 +119,12 @@ class JudgeConfig:
     # or ~/.cache/baitwatch/judge.sqlite.
     cache: bool = True
     cache_path: Path | None = None
-    max_chunk_chars: int = 4_000           # never send more than this to the judge
+    # Never send more than this to the judge at once. About 4,000 tokens, or half a
+    # cent at standard prices. 4,000 cut 43% of public agent files in the middle.
+    max_chunk_chars: int = 16_000
+    # A longer agent file is read in overlapping pieces of that size. More pieces than
+    # this leaves the verdict incomplete rather than unread text unreported.
+    max_whole_file_pieces: int = 24
     # Hard cap per API key, enforced in code.
     usd_cap: float = field(
         default_factory=lambda: float(os.environ.get("BAITWATCH_JUDGE_USD_CAP", "120")))

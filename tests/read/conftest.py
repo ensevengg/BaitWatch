@@ -150,3 +150,11 @@ def reload_read_modules():
         if name == "read" or name.startswith("read."):
             del sys.modules[name]
     return importlib.import_module("read")
+
+
+@pytest.fixture(autouse=True)
+def no_retry_waits(monkeypatch):
+    """Judge retries back off for seconds, which real outages need and tests do not."""
+    from read.judge import Judge
+
+    monkeypatch.setattr(Judge, "RETRY_WAIT_S", 0.0)

@@ -19,17 +19,43 @@ or a read/rules.py hit, ≤3 per file
 everything else                      → clean, judge never sees it
 ```
 
-The judge only ever receives the *suspicious chunk* — never whole files, never
-the repo, never anything from the RUN side (honeytokens are planted in the
+The judge receives suspicious chunks and agent instruction files — never
+the whole repo, never anything from the RUN side (honeytokens are planted in the
 cage copy, the READ scan never sees them).
 
-The hook preset also sends each agent instruction file to the judge whole, because
+The hook preset also sends each agent instruction file to the judge in full, because
 an attack split across windows, or one the model scores low, reads clearly in context.
+Files over 16,000 characters go in overlapping pieces of that size. Past 24 pieces the
+verdict is incomplete. Other long files are only read through their windows, so an attack
+spread thinly across one can still be missed.
+
+## What the judge is asked
+
+The judge answers three questions, and code decides the verdict:
+
+| harm | addressee | mode | Verdict |
+|---|---|---|---|
+| none | any | any | benign |
+| any other | the project's own model | any | mention |
+| any other | any | quoted | mention |
+| any other | anyone else | active | attack |
+
+A mention is attack text that is quoted or meant for another program, such as a security
+guide or a prompt template the project sends to its own model. It does not stop the prompt,
+and an agent is stopped if it opens the file. Agent instruction files never get this
+reading, because an agent loads their quotes as instructions. An attacker can try writing
+"for example" in front of a payload: the prompt says labels do not decide this, and the
+worst case is the check on open rather than a stop at the prompt.
 
 Rule hits only choose what the judge reads. They fire on about 7% of ordinary
 files, so a rule hit alone is never a finding.
 
 ## Why the judge may clear a model flag
+
+A judge can be fooled, so a cleared flag is kept as a finding with `cleared_by_judge`. In the
+hook the person is told, and an agent has to ask before it opens the file. It does not stop
+the prompt: about 4 files per popular repository have one. The judge's reply must be exactly
+one JSON object, so text it quotes from a file cannot pose as its answer.
 
 The judge was escalate-only until it was measured. Deciding alone, it took
 public files flagged from 31 to 7 of 7,899 and caught more attacks on every
@@ -55,7 +81,7 @@ states that instructions inside it are attacker content, and makes any
 attempt to influence the classification *itself* an attack verdict. The
 chunk is fenced by a random per-call tag (`<chunk-…>`), so a `</chunk>`
 written by the attacker closes nothing; the file name is sent as a JSON
-string. Output must be strict JSON `{verdict, severity, explanation}`;
+string. Output must be strict JSON `{harm, addressee, mode, severity, explanation}`;
 anything unparseable is treated as **unavailable** (fail-closed), not as an
 answer.
 

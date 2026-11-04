@@ -120,7 +120,8 @@ def _judge(tmp_path, **kw):
 
 def _answer(verdict="benign"):
     return {"choices": [{"message": {"content": json.dumps(
-        {"verdict": verdict, "severity": 0.1, "explanation": "x"})}}], "usage": {}}
+        {"harm": "exfiltrate" if verdict == "attack" else "none", "addressee": "reading_agent",
+         "mode": "active", "severity": 0.1, "explanation": "x"})}}], "usage": {}}
 
 
 def test_request_leaves_room_for_reasoning(tmp_path, monkeypatch):
@@ -166,8 +167,8 @@ def test_one_timeout_does_not_end_judging(tmp_path, monkeypatch):
     judge = _judge(tmp_path)
     judge.review("a", "f", 0.5)
     assert not judge._is_dead("main")
-    judge.review("b", "f", 0.5)
-    judge.review("c", "f", 0.5)
+    for number in range(Judge.MAX_TEMPORARY_FAILURES - 1):
+        judge.review(str(number), "f", 0.5)
     assert judge._is_dead("main")
 
 
@@ -202,7 +203,7 @@ def test_padding_cannot_push_text_out_of_the_judges_view(tmp_path):
 
 def test_window_over_the_limit_keeps_both_ends_and_cannot_clear(tmp_path, monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: _Response(_answer()))
-    judge = _judge(tmp_path)
+    judge = _judge(tmp_path, max_chunk_chars=4_000)
     text = "HEAD " + "word " * 3000 + "TAIL"
     snippet, cut = judge._prepare(text)
     assert cut and "HEAD" in snippet and "TAIL" in snippet
@@ -268,3 +269,33 @@ def test_permanent_failure_is_not_retried(tmp_path, monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", refused)
     assert _judge(tmp_path).review("t", "f", 0.5).verdict == "unavailable"
     assert len(calls) == 1
+
+
+def test_a_cut_off_answer_is_asked_again_once(tmp_path, monkeypatch):
+    answers = [{"choices": [{"message": {"content": '{"harm'}}], "usage": {}}, _answer("attack")]
+    sent = []
+
+    def respond(req, timeout):
+        sent.append(req)
+        return _Response(answers[len(sent) - 1])
+
+    monkeypatch.setattr("urllib.request.urlopen", respond)
+    result = _judge(tmp_path).review("text", "f", 0.5)
+    assert result.verdict == "attack"
+    assert len(sent) == 2
+
+
+def test_a_burst_of_rate_limits_does_not_turn_the_judge_off(tmp_path, monkeypatch):
+    calls = []
+
+    def limited(req, timeout):
+        calls.append(1)
+        if len(calls) <= 3:
+            raise urllib.error.HTTPError("u", 429, "busy", {}, None)
+        return _Response(_answer())
+
+    monkeypatch.setattr("urllib.request.urlopen", limited)
+    judge = _judge(tmp_path)
+    assert judge.review("t", "f", 0.5).verdict == "benign"
+    assert len(calls) == 4
+    assert not judge._is_dead(judge.cfg.endpoints[0]["name"])
