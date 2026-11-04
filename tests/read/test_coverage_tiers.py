@@ -274,3 +274,23 @@ def test_whole_file_judging_is_off_by_default(fake_detector, tmp_path):
     judge = FakeJudge("benign")
     scan(tmp_path, preset(flag_threshold=0.9, review_low=0.3), detector=fake_detector, judge=judge)
     assert not judge.calls
+
+
+def test_agent_files_in_sample_folders_are_not_loaded_as_instructions():
+    from read.tiers import priority_tier
+
+    assert priority_tier("skills/x/evals/fixtures/attack/SKILL.md") == 2
+    assert priority_tier("examples/demo/.mcp.json") == 2
+    assert priority_tier("packages/a/AGENTS.md") == 0
+    assert priority_tier(".claude/skills/release/SKILL.md") == 0
+
+
+def test_a_broken_symlink_is_not_a_failure_in_the_hook_preset(fake_detector, tmp_path):
+    from read.batches import scan_in_batches
+    from read.config import ReadConfig
+
+    (tmp_path / "AGENTS.md").write_text("fine\n")
+    (tmp_path / "link").symlink_to(tmp_path / "missing-submodule")
+    config = ReadConfig.quick()
+    config.judge.enabled = False
+    assert scan_in_batches(tmp_path, config, detector=fake_detector).read_verdict == "clean"

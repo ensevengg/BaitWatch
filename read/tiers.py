@@ -34,13 +34,20 @@ TEXT_SUFFIXES = (".md", ".mdx", ".rst", ".txt", ".adoc", ".org", ".ipynb",
 # Long release histories, at the root but rarely read as instructions.
 _HISTORY_PREFIXES = ("changelog", "changes", "history", "news", "license", "copying")
 
+# A host does not load agent files from these on its own: they are samples, such as the
+# fixture in a skill's own test suite. The check on open still covers them.
+_SAMPLE_DIRS = ("test/", "tests/", "testdata/", "fixtures/", "__fixtures__/", "evals/",
+                "examples/")
+
+
 def priority_tier(rel_path: str) -> int:
     rel = rel_path.replace(os.sep, "/").lower()
     name = rel.rsplit("/", 1)[-1]
     depth = rel.count("/")
-    if name in AGENT_FILE_NAMES or rel.startswith(AGENT_DIR_PREFIXES) \
-            or any(f"/{p}" in f"/{rel}" for p in AGENT_DIR_PREFIXES):
-        return 0
+    agent_file = name in AGENT_FILE_NAMES or rel.startswith(AGENT_DIR_PREFIXES) \
+        or any(f"/{p}" in f"/{rel}" for p in AGENT_DIR_PREFIXES)
+    if agent_file:
+        return 2 if any(f"/{d}" in f"/{rel}" for d in _SAMPLE_DIRS) else 0
     text_like = name.endswith(TEXT_SUFFIXES)
     if rel.startswith(TIER1_DIR_PREFIXES):
         return 1

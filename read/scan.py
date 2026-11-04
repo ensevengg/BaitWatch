@@ -11,7 +11,8 @@ Fail-closed rules implemented here (each has a test):
   verdict becomes "incomplete", never "clean" and never "attack" (no attack
   was found, but none was ruled out either). The same holds when no judge is
   configured at all.
-- The judge decides when it answers: "attack" flags a window from any tier and
+- The judge decides when it answers: "mention" records quoted attack text outside
+  agent instruction files, "attack" flags a window from any tier and
   "benign" clears one, including a window above flag_threshold. Only the
   primary endpoint may clear a flag. A flagged window the judge did not answer
   for stays flagged. Windows below the review band are best effort: when no
@@ -416,15 +417,38 @@ def _low_tier(scored: list[tuple[Chunk, float]], cfg: ReadConfig,
     return picked
 
 
-def _whole_file_windows(whole: dict[str, str], scored: list[tuple[Chunk, float]]
-                        ) -> list[tuple[Chunk, float]]:
-    """One window per tier 0 file holding the whole text, at the file's best model score."""
-    best: dict[str, float] = {}
-    for chunk, score in scored:
-        best[chunk.file] = max(best.get(chunk.file, 0.0), score)
-    return [(Chunk(file=rel, view="original", chunk_id=-1, text=text, start_char=0,
-                   end_char=len(text), start_line=1), best.get(rel, 0.0))
-            for rel, text in whole.items()]
+WHOLE_FILE_OVERLAP_CHARS = 400     # long enough to hold one instruction across a cut
+
+
+def is_broken_symlink(reason: str) -> bool:
+    """Nothing can be read through one, by us or by an agent: an uninitialised submodule
+    leaves them behind in ordinary repositories."""
+    return reason.startswith("broken symlink")
+
+
+def _whole_file_windows(whole: dict[str, str], scored: list[tuple[Chunk, float]],
+                        cfg: ReadConfig, stats: ScanStats) -> list[tuple[Chunk, float]]:
+    """Tier 0 files for the judge to read, split so that no text is cut out. A piece gets
+    the best model score inside it, so that the model and the judge have to agree about
+    the same text. Decoded text has no position in the file and counts for every piece.
+    Whitespace padding only adds pieces: _prepare collapses it."""
+    size = cfg.judge.max_chunk_chars
+    windows: list[tuple[Chunk, float]] = []
+    for rel, text in whole.items():
+        starts = list(range(0, max(1, len(text) - WHOLE_FILE_OVERLAP_CHARS),
+                            size - WHOLE_FILE_OVERLAP_CHARS))
+        if len(starts) > cfg.judge.max_whole_file_pieces:
+            stats.judge_overflow_files.append(rel)
+            starts = starts[:cfg.judge.max_whole_file_pieces]
+        for number, start in enumerate(starts):
+            end = min(len(text), start + size)
+            best = max((score for chunk, score in scored if chunk.file == rel and (
+                chunk.view != "original" or (chunk.start_char < end and chunk.end_char > start))),
+                default=0.0)
+            windows.append((Chunk(file=rel, view="original", chunk_id=-1 - number,
+                                  text=text[start:end], start_char=start, end_char=end,
+                                  start_line=1 + text.count("\n", 0, start)), best))
+    return windows
 
 
 def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], judged, budget,
@@ -435,6 +459,7 @@ def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], jud
     band = sorted((w for w in scored if cfg.review_low <= w[1] < cfg.flag_threshold),
                   key=lambda w: -w[1])
     low = _low_tier(scored, cfg, stats)
+    whole_windows = _whole_file_windows(whole or {}, scored, cfg, stats)
     unread: set[str] = set(stats.judge_overflow_files)
     if cfg.judge.max_bulk_calls_per_scan is not None:
         kept = []
@@ -448,7 +473,7 @@ def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], jud
                 stats.judge_low_unjudged += 1
                 unread.add(window[0].file)
         low = kept
-    low = _whole_file_windows(whole or {}, scored) + low
+    low = whole_windows + low
     tiers = [("high", w) for w in high] + [("band", w) for w in band] + [("low", w) for w in low]
     if not tiers:
         return
@@ -460,11 +485,21 @@ def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], jud
                          budget, cfg.judge.concurrency, stats)
     for (tier, (chunk, score)), result in zip(tiers, results):
         evidence = _evidence(chunk, score)
+        if getattr(result, "answers", None):
+            evidence["judge_addressee"] = result.answers.get("addressee")
         if result.verdict == "skipped" and "deadline" in (result.error or ""):
             stats.judge_deadline_hit = True
         if result.verdict == "unavailable" and result.error:
             stats.judge_last_error = result.error[:160]
-        if result.verdict == "attack":
+        if (result.verdict == "mention" and priority_tier(chunk.file) >= 1
+                and getattr(result, "can_clear", True)):
+            # Attack text that is quoted or meant for another program. It cannot stop
+            # the prompt, and an agent is stopped if it opens the file. Agent instruction
+            # files never get this: an agent loads their quotes as instructions.
+            findings.append(_finding(
+                chunk, score, LAYER_MODEL, {**evidence, "judge_mention": True},
+                STATUS_FLAGGED, result.explanation))
+        elif result.verdict in ("attack", "mention"):
             sev = result.severity if result.severity is not None else score
             raised = sev > score
             if tier == "low":
@@ -738,7 +773,11 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
         if partial:
             stats.partial_files += 1
         if partial or spent:
-            if best_effort:
+            # Only an agent instruction file stops the prompt for this: a host may load it
+            # with no tool call to check. Other files are checked when an agent opens them,
+            # which asks if they are still too large to read in full. A huge generated doc
+            # at the repository root stopped the prompt otherwise.
+            if cfg.bulk_best_effort and priority_tier(rel) >= 1:
                 # Recorded as a gap, not as evidence the whole scan fell short.
                 stats.views_dropped, stats.decoded_views_uncovered = before[:2]
                 del decoder_errors[before[2]:]
@@ -812,7 +851,8 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
     if walk_result is not None and cfg.on_file_error == "flag":
         # lstat-level failures never reached the read loop; flag them too.
         findings.extend(system_finding(rel, f"unreadable file: {reason}")
-                        for rel, reason in walk_result.unreadable)
+                        for rel, reason in walk_result.unreadable
+                        if not (cfg.bulk_best_effort and is_broken_symlink(reason)))
 
     reasons: list[str] = []
     if cfg.bulk_best_effort:
@@ -822,7 +862,7 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
                            f"max_files={cfg.walker.max_files} not scanned")
         if stats.agent_files_partial:
             names = ", ".join(stats.agent_files_partial[:3])
-            reasons.append(f"partial coverage: {len(stats.agent_files_partial)} agent-facing "
+            reasons.append(f"partial coverage: {len(stats.agent_files_partial)} agent instruction "
                            f"file(s) only partly scanned ({names})")
     elif stats.truncated_scan:
         reasons.append(f"file cap: {stats.files_over_cap} file(s) beyond "
@@ -833,9 +873,9 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
     if stats.decoded_views_uncovered:
         reasons.append(f"decoded chunk budget: {stats.decoded_views_uncovered} decoded "
                        f"view(s) not fully scored")
-    crowded = [f for f in stats.judge_overflow_files if priority_tier(f) <= 1]
+    crowded = [f for f in stats.judge_overflow_files if priority_tier(f) == 0]
     if crowded:
-        reasons.append(f"judge coverage: {len(crowded)} agent-facing file(s) with more suspicious "
+        reasons.append(f"judge coverage: {len(crowded)} agent instruction file(s) with more suspicious "
                        f"windows than the judge reads ({', '.join(crowded[:3])})")
     if stats.judge_skipped:
         cause = "judge time limit" if stats.judge_deadline_hit else "judge budget"

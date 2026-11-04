@@ -5,19 +5,26 @@ then source. Generated files are left for the check on open. Each batch saves it
 scores, verdicts and per-file results, so a scan that runs out of time resumes where
 it stopped, and a later scan only reads the files that changed. Once ``stop_score``
 is reached the verdict is decided and the remaining batches are skipped.
+
+Gaps that belong to the whole repository are worked out here on every scan, so a
+scan answered entirely from saved results still reports them, and a scan that ran
+out of time says what it did not reach.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from read.cache import FileResultCache
 from read.config import ReadConfig, resolve_model_path
-from read.findings import LAYER_MODEL, LAYER_SYSTEM, STATUS_REVIEWED, Finding
-from read.scan import ScanResult, ScanStats, scan
+from read.findings import LAYER_MODEL, LAYER_SYSTEM, STATUS_REVIEWED, Finding, system_finding
+from read.judge import JUDGE_SYSTEM_PROMPT
+from read.scan import ScanResult, ScanStats, is_broken_symlink, scan
 from read.tiers import is_generated, priority_tier
 from read.walk import ScannedFile, walk
 
@@ -57,6 +64,30 @@ def _digest(path: Path) -> str | None:
     return digest.hexdigest()
 
 
+def result_salt(cfg: ReadConfig) -> str:
+    """Everything in ``cfg`` that changes a file's result, so a saved one is never
+    reused under other settings. Budgets and time limits are left out: a file whose
+    work they cut short is not saved at all."""
+    settings = dataclasses.asdict(cfg)
+    settings.pop("model_path", None)
+    judge = settings.pop("judge")
+    wanted = {
+        "enabled": judge["enabled"],
+        "max_chunk_chars": judge["max_chunk_chars"],
+        "max_windows_per_file": judge["max_windows_per_file"],
+        "max_windows_per_agent_file": judge["max_windows_per_agent_file"],
+        "max_whole_file_pieces": judge["max_whole_file_pieces"],
+        "endpoints": [
+            {key: endpoint.get(key) for key in ("model", "base_url", "reasoning_effort")}
+            for endpoint in judge["endpoints"] or ()
+        ],
+        "prompt": JUDGE_SYSTEM_PROMPT,
+    }
+    return hashlib.sha256(
+        json.dumps([settings, wanted], sort_keys=True, default=str).encode()
+    ).hexdigest()[:16]
+
+
 def _finding_from_dict(row: dict) -> Finding:
     return Finding(file=row["file"], chunk_id=row["chunk_id"], score=row["score"],
                    layer=row["layer"], evidence=row["evidence"], status=row["status"],
@@ -66,6 +97,11 @@ def _finding_from_dict(row: dict) -> Finding:
 
 def is_confirmed(finding: Finding) -> bool:
     return finding.layer != LAYER_MODEL or bool(finding.evidence.get("judge_confirmed"))
+
+
+def aimed_at_the_agent(finding: Finding) -> bool:
+    """A verdict saved by an older version has no addressee, and counts as aimed at it."""
+    return finding.evidence.get("judge_addressee", "reading_agent") == "reading_agent"
 
 
 def is_two_signal(finding: Finding, min_model_score: float) -> bool:
@@ -79,10 +115,12 @@ def is_two_signal(finding: Finding, min_model_score: float) -> bool:
     return is_confirmed(finding) and finding.evidence.get("model_score", 0.0) >= min_model_score
 
 
-def decides_block(finding: Finding, stop_score: float, min_model_score: float) -> bool:
-    """Enough to stop reading: two signals in a file an agent reaches first."""
+def decides_block(finding: Finding, stop_score: float, flag_threshold: float) -> bool:
+    """Enough to stop reading: the judge confirms a window the model flagged by itself, in
+    a file an agent reaches first. A weaker model score asks, so reading goes on."""
     return (finding.is_flagged and finding.score >= stop_score
-            and is_two_signal(finding, min_model_score)
+            and is_two_signal(finding, flag_threshold)
+            and (finding.layer == LAYER_SYSTEM or aimed_at_the_agent(finding))
             and (finding.layer == LAYER_SYSTEM or priority_tier(finding.file) <= 1))
 
 
@@ -104,10 +142,30 @@ def _merge(into: ScanStats, part: ScanStats) -> None:
             setattr(into, f.name, new)
 
 
+def _add_repository_gaps(stats: ScanStats, walked, cfg: ReadConfig, scannable: int) -> None:
+    """What this scan left out, whether or not any file had to be read again."""
+    gaps: list[str] = []
+    if cfg.bulk_best_effort:
+        if walked.agent_files_over_cap:
+            gaps.append(f"file cap: {walked.agent_files_over_cap} agent-facing file(s) beyond "
+                        f"max_files={cfg.walker.max_files} not scanned")
+    elif walked.truncated_scan:
+        gaps.append(f"file cap: {walked.files_over_cap} file(s) beyond "
+                    f"max_files={cfg.walker.max_files} not scanned")
+    if stats.scan_time_limit_hit:
+        missing = scannable - len(set(stats.files_covered))
+        gaps.append(f"scan time limit: up to {missing} file(s) not reached yet; "
+                    "submitting the prompt again continues from there")
+    stats.incomplete_reasons.extend(x for x in gaps if x not in stats.incomplete_reasons)
+
+
 def scan_in_batches(target: str | Path, cfg: ReadConfig, *, detector=None, judge=None,
                     decoders: list | None = None, store: FileResultCache | None = None,
                     store_salt: str = "", time_limit_s: float | None = None,
-                    stop_score: float | None = None) -> ScanResult:
+                    stop_score: float | None = None,
+                    trusted: Callable[[str], bool] | None = None) -> ScanResult:
+    """``trusted``: files the person accepted as they are. Their findings are dropped
+    and cannot end the scan early, so the rest of the repository is still read."""
     started = time.perf_counter()
     target = Path(target)
     walked = walk(target, cfg.walker)
@@ -131,6 +189,8 @@ def scan_in_batches(target: str | Path, cfg: ReadConfig, *, detector=None, judge
     findings: list[Finding] = []
     low_left = MAX_LOW_SCORE_CALLS
     decided = False
+    store_salt = f"{store_salt}|{result_salt(cfg)}"
+    trusted = trusted or (lambda rel: False)
 
     def left() -> float | None:
         return None if time_limit_s is None else time_limit_s - (time.perf_counter() - started)
@@ -150,8 +210,8 @@ def scan_in_batches(target: str | Path, cfg: ReadConfig, *, detector=None, judge
             findings.extend(_finding_from_dict(row) for row in stored)
             stats.files_covered.append(f.rel_path)
             stats.files_cached += 1
-            if stop_score is not None and any(
-                    decides_block(_finding_from_dict(row), stop_score, cfg.review_low)
+            if stop_score is not None and not trusted(f.rel_path) and any(
+                    decides_block(_finding_from_dict(row), stop_score, cfg.flag_threshold)
                     for row in stored):
                 decided = True
         if decided:
@@ -181,14 +241,22 @@ def scan_in_batches(target: str | Path, cfg: ReadConfig, *, detector=None, judge
                     rows = [x.to_dict() for x in part.findings if x.file == rel]
                     if not any(row["evidence"].get("note") for row in rows):
                         store.put(keys[rel], rows)
-        if stop_score is not None and any(decides_block(x, stop_score, cfg.review_low)
-                                          for x in part.findings):
+        if stop_score is not None and any(
+                decides_block(x, stop_score, cfg.flag_threshold) and not trusted(x.file)
+                for x in part.findings):
             decided = True
             break
 
     stats.scan_stopped_early = decided
+    if cfg.on_file_error == "flag":
+        findings.extend(system_finding(rel, f"unreadable file: {reason}")
+                        for rel, reason in walked.unreadable
+                        if not (cfg.bulk_best_effort and is_broken_symlink(reason)))
+    _add_repository_gaps(stats, walked, cfg, len(scannable))
     unique: dict[tuple, Finding] = {}
     for x in findings:
+        if x.layer != LAYER_SYSTEM and trusted(x.file):
+            continue
         unique.setdefault((x.file, x.chunk_id, x.layer, x.status, x.score), x)
     merged = sorted(unique.values(), key=lambda x: (not x.is_flagged, -x.score))
     stats.flagged = sum(1 for x in merged if x.is_flagged)
