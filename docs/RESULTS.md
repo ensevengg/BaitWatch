@@ -19,10 +19,10 @@ The two attack repos that got "ask" are `git-hook-installer` and `runtime-eval-c
 
 - **Date:** 2026-11-04
 - **Build:** the hook as it was before the changes merged in PR #22 later that day
-- **Method:** 100 popular GitHub repos, chosen across star and size bands, none used before. Each went through the hook once.
+- **Method:** 100 popular GitHub repos, chosen across star and size bands, none used before. Each went through the hook. 97 needed one try, and 3 were resubmitted after a scan ran out of time.
 - **Result:** 77 allow, 17 ask, 6 block
 
-This test measures false alarms, because these are ordinary projects and not planted attacks. About 10 of the 23 stops came from a scan running out of time.
+This test measures false alarms, because these are ordinary projects and not planted attacks. About 10 of the 23 stops ended at the scan's time limit.
 
 The test harness and per-repo results are not in this repo.
 
