@@ -1,7 +1,22 @@
 # BaitWatch
 
-Catches prompt-injection attacks aimed at AI coding agents before the agent is
-allowed to run in a repository.
+Stops prompt-injection attacks hidden in a repository before your AI coding agent acts on them.
+
+![BaitWatch stopping a prompt on a poisoned test repo](docs/assets/hook-blocked.gif)
+
+*A test repo we built, with hidden instructions in its docs. Waits are shortened and local paths trimmed.*
+
+## What it does
+
+- Installs as a Claude Code hook, so your normal workflow stays the same.
+- Scans the repo when you send a prompt.
+- Checks files again before each tool call.
+- Decodes hidden text first, including invisible Unicode.
+- Answers with allow, ask or block, and explains why in plain English.
+
+## What a block looks like
+
+![A blocked prompt with the reason for each flagged file](docs/assets/hook-blocked.png)
 
 ## How it works
 
@@ -15,90 +30,89 @@ untrusted repo
   verdict (ALLOW / ASK / BLOCK, fail-closed) → agent hook stops the coding agent
 ```
 
-## Layout
+## Results
 
-| Path | What | Owner |
-|---|---|---|
-| `read/` | READ scanner: walker, decoders, chunker, detector, judge | [ensevengg](https://github.com/ensevengg) |
-| `run/` | sandbox, sinks, honeytokens, decoy runner, verdict engine, CLI | [pixelash459](https://github.com/pixelash459) |
-| `attacks/` | attack repos, obfuscation synthesizer, decoders, per-repo harness | [Shellghostt](https://github.com/Shellghostt) |
-| `hooks/` | Gate A / Gate B agent hook, verdict cache, Claude Code installer | [Shellghostt](https://github.com/Shellghostt) |
-| `tests/` | per-component test suites (`read/`, `run/`, `attacks/`) | all |
-| `demo/` | three-minute beat sheet (`demo/run_demo.sh`) | all |
-| `docs/` | shared contracts (`verdict.schema.json`) and `HOOKS.md` | all |
+| Test | Result |
+|---|---|
+| Our attack repos | 17 of 17 stopped (15 block, 2 ask) |
+| Harmless twins of those repos | 5 of 5 allowed |
+| 100 popular repos it had not seen | 77 allow, 17 ask, 6 block |
+| Detector alone, held-out attacks | 128 of 150 caught |
+| Detector alone, held-out harmless files | 39 of 7,989 flagged |
 
-Status: READ, RUN and the ATTACK slice are implemented and merged; CI runs the
-RUN, ATTACK and READ CPU suites. Measured results, the pinned detector and
-known gaps are recorded in [`read/docs/MODEL_CARD.md`](read/docs/MODEL_CARD.md)
-and [`docs/ATTACKS_REPORT.md`](docs/ATTACKS_REPORT.md).
+Full numbers and known misses: [model card](read/docs/MODEL_CARD.md) and [attack report](docs/ATTACKS_REPORT.md).
 
-**Known result — decoy trial failed.** On 2026-10-28, Muse Spark was run ten
-times against repo #1 (`readme-bait-curl`) through the decoy loop in PR #12. It
-did not attempt exfiltration in any run: **0/10 bites** against a required
-`>= 8/10`. All ten runs were complete and error-free, so this is a real miss,
-not a broken harness. Repo #1 is a negative control for this model. Raw
-evidence: [`docs/decoy-trial/`](docs/decoy-trial/); protocol and analysis:
-[`docs/DECOY_TRIAL.md`](docs/DECOY_TRIAL.md).
-
-## Quick start (ATTACK side)
-
-No GPU and no model download are needed for the attack package:
+## Install the hook
 
 ```bash
-python -m attacks build --check       # generated repos/manifests are current
-python -m attacks lint                # safety rails: *.example + 10.13.37.0/24 only
-python -m attacks harness             # all attack repos, READ gate, CPU stand-in
-python -m attacks check               # lint + drift + gate
-python -m hooks selftest              # 11 gate decisions
-python -m hooks install --scope user --dry-run
-bash demo/run_demo.sh                 # three-minute demo
+pip install -e ".[dev]"
+python -m hooks install --scope user --dry-run   # preview the change
+python -m hooks install --scope user
+python -m hooks install --scope user --uninstall # remove it
 ```
 
-Manifest contract, transform table, repo catalogue and safety rails:
-[`attacks/README.md`](attacks/README.md). Gate A/B, output schemas, cache and
-fail-closed matrix: [`docs/HOOKS.md`](docs/HOOKS.md).
+- Restart the agent after installing.
+- Set `META_API_KEY` to turn on the Muse Spark judge.
+- The judge sends suspicious repo text to Meta's API.
+- The trained detector is not in this repo. Set `BAITWATCH_MODEL_PATH` to your copy.
 
-## Quick start (READ side)
+Details: [`docs/HOOKS.md`](docs/HOOKS.md).
+
+## Run each part
+
+**Attacks** (no GPU or model download needed):
 
 ```bash
-pip install -e ".[test]"             # add ".[train]" for the training pipeline
-git clone https://github.com/uiuc-kang-lab/InjecAgent injectionagent/InjecAgent   # frozen eval set
-baitwatch-read scan <repo>           # human-readable findings
+python -m attacks check     # lint, drift check and READ gate
+python -m hooks selftest    # 11 gate decisions
+bash demo/run_demo.sh       # three-minute demo
+```
+
+**READ scanner:**
+
+```bash
+pip install -e ".[test]"             # add ".[train]" for training
+baitwatch-read scan <repo>           # readable findings
 baitwatch-read scan <repo> --json    # input for the verdict engine
-pytest -m "not gpu" tests/read       # CPU test suite
+pytest -m "not gpu" tests/read       # CPU tests
 ```
 
-Detector checkpoint, thresholds and the full API: [`read/README.md`](read/README.md).
-
-## Quick start (RUN side)
-
-Needs Linux, Docker Engine 28 or later, and uv.
+**RUN sandbox** (needs Linux, Docker Engine 28 or later, and uv):
 
 ```bash
-bash run/setup.sh                    # deps, images, cage build and a smoke scan
-bash run/setup.sh --tests            # same, plus the full RUN check (lint, format, tests)
+bash run/setup.sh                    # deps, images, cage build, smoke scan
+bash run/setup.sh --tests            # same, plus lint, format and tests
 baitwatch-run sandbox <repo> -- echo hello
 ```
 
-Plain `uv sync` or pip installs the default torch, which is CUDA-capable on Linux; `--extra cpu` keeps the CPU build for CI and machines without a GPU.
+## Repository layout
 
-Sandbox boundary, evidence contract and known limits: [`run/README.md`](run/README.md).
+| Path | What |
+|---|---|
+| [`read/`](read/README.md) | Scanner: walker, decoders, chunker, detector, judge |
+| [`run/`](run/README.md) | Sandbox, sinks, honeytokens, decoy runner, verdict engine, CLI |
+| [`attacks/`](attacks/README.md) | Attack repos, obfuscation synthesizer, per-repo harness |
+| `hooks/` | Prompt and tool-call gates, verdict cache, installer |
+| `tests/` | Test suites for each component |
+| `demo/` | Demo script |
+| `docs/` | Shared contracts and hook docs |
+
+## Known limits
+
+- No scanner is a guarantee. An allow lowers the risk; it does not prove a repo is safe.
+- The decoy agent is not a reliable trigger. Muse Spark took the bait 0 of 10 times on repo #1. See the [trial write-up](docs/DECOY_TRIAL.md).
 
 ## Meta models
 
 - **Llama Prompt Guard 2 (86M), fine-tuned:** local detector
 - **Muse Spark (Meta Model API):** judge and plain-English explanations
 
-## Hackathon
+## Hackathon and credits
 
-Built for the Meta Global AI Developer Hackathon (Indie track, "Push the
-Frontier"). Any reused prior work is credited in this section.
-
-The hidden-instruction taxonomy and the "decaffeinate the payload" framing in
-the ATTACK slice build on De-Caffeinator (Camel-AI); credit is by name only in
-payload-bearing directories, where the safety lint forbids real URLs.
+- Built for the Meta Global AI Developer Hackathon (Indie track, "Push the Frontier").
+- Team: [ensevengg](https://github.com/ensevengg), [pixelash459](https://github.com/pixelash459), [Shellghostt](https://github.com/Shellghostt).
+- The hidden-instruction taxonomy and "decaffeinate the payload" framing build on De-Caffeinator (Camel-AI).
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Datasets are not vendored; sources and licenses
-are listed in [`read/docs/DATA.md`](read/docs/DATA.md).
+MIT, see [LICENSE](LICENSE). Datasets are not vendored; sources and licenses are in [`read/docs/DATA.md`](read/docs/DATA.md).
