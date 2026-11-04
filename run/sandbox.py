@@ -30,8 +30,10 @@ from run.honeytokens import (
     Honeytoken,
     generate_tokens,
     plant_tokens,
+    scan_files,
     scan_sink_log,
     scan_tool_results,
+    scan_transcript,
 )
 from run.llm import LLMBackend
 from run.sink_logs import read_sink_log
@@ -237,6 +239,10 @@ class Sandbox:
         self._planted_bytes = 0
         self._planted_max_file_bytes = 0
         self._honeytoken_scanned = False
+        self._file_honeytoken_scanned = False
+        self.decoy_transcript: list[str] = []
+        self.decoy_transcript_incomplete = False
+        self._trace_after_kinds: dict[str, str] | None = None
         self._trace_before: dict | None = None
         self._git_paths: frozenset[str] = frozenset()
 
@@ -654,8 +660,47 @@ class Sandbox:
         tool_scan = scan_tool_results(self.evidence.tool_log, self._honeytokens)
         hits.extend(tool_scan.hits)
         incomplete = incomplete or tool_scan.incomplete
+        transcript_scan = scan_transcript(list(self.decoy_transcript), self._honeytokens)
+        hits.extend(transcript_scan.hits)
+        incomplete = incomplete or transcript_scan.incomplete or self.decoy_transcript_incomplete
         self.evidence.honeytoken_hits.extend(hits)
         if incomplete:
+            self._error(
+                "HONEYTOKEN_SCAN_INCOMPLETE",
+                "honeytoken detection hit a size bound; records past it were not scanned",
+                component=None,
+            )
+
+    def _scan_file_honeytokens(self) -> None:
+        if self._file_honeytoken_scanned or not self._honeytokens:
+            return
+        self._file_honeytoken_scanned = True
+        planted: dict[str, set[str]] = {}
+        for token in self._honeytokens:
+            planted.setdefault(token.location, set()).add(token.token_id)
+        try:
+            root = self.staged_path
+            home = self.home_path
+        except Exception:
+            self._error(
+                "HONEYTOKEN_SCAN_INCOMPLETE",
+                "honeytoken file scan could not locate the staged or home tree",
+                component=None,
+            )
+            return
+        diffs = self.evidence.file_diffs
+        if self._trace_after_kinds is not None:
+            diffs = [
+                diff for diff in diffs if self._trace_after_kinds.get(diff.path, "file") == "file"
+            ]
+        scan = scan_files(root, diffs, self._honeytokens, planted, home_root=home)
+        existing = {(hit.token_id, hit.source) for hit in self.evidence.honeytoken_hits}
+        self.evidence.honeytoken_hits.extend(
+            hit for hit in scan.hits if (hit.token_id, hit.source) not in existing
+        )
+        if scan.incomplete and not any(
+            error.code == "HONEYTOKEN_SCAN_INCOMPLETE" for error in self.evidence.errors
+        ):
             self._error(
                 "HONEYTOKEN_SCAN_INCOMPLETE",
                 "honeytoken detection hit a size bound; records past it were not scanned",
@@ -858,6 +903,8 @@ class Sandbox:
             )
             for path, change in diff(self._trace_before, after)
         ]
+        self._trace_after_kinds = {path: entry.kind for path, entry in after.items()}
+        self._scan_file_honeytokens()
         limits = self.config.staging
         # Bait the cage left untouched is ours, not the repository's growth.
         planted = {

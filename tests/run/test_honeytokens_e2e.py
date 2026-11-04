@@ -267,7 +267,7 @@ class Scripted:
         )
 
 
-def test_a_decoy_that_reads_the_planted_env_is_a_tool_log_hit(repo: Path, engine):
+def test_a_decoy_that_reads_the_planted_env_is_a_tool_output_hit(repo: Path, engine):
     evidence = detonate(
         repo,
         config=SandboxConfig(image=PYTHON_IMAGE, decoy_seconds=90),
@@ -279,15 +279,31 @@ def test_a_decoy_that_reads_the_planted_env_is_a_tool_log_hit(repo: Path, engine
     assert "BAITWATCH_FAKE_" in read.stdout
     hits = evidence.honeytoken_hits
     assert len(hits) == 2
-    assert {hit.source for hit in hits} == {"tool_log"}
+    assert {hit.source for hit in hits} == {"tool_output"}
     assert len({hit.token_id for hit in hits}) == 2
     assert all(hit.source_ip is None for hit in hits)
     assert not evidence.dns_hits and not evidence.http_hits and not evidence.tls_hits
-    # Honeytoken hits never upgrade the status; the verdict guard still refuses ALLOW.
     assert evidence.status == "complete"
-    with pytest.raises(ValidationError, match="ALLOW requires"):
-        VerdictReport(verdict="ALLOW", reason="bad", read={"status": "complete"}, run=evidence)
+    VerdictReport(verdict="ALLOW", reason="clean read", read={"status": "complete"}, run=evidence)
     assert (repo / ".env").exists() is False
+    assert_no_leftovers(engine, evidence)
+
+
+def test_a_decoy_copying_the_planted_env_to_a_file_is_flag(repo: Path, engine):
+    from run.verdict import ReadOutcome, fuse
+
+    evidence = detonate(
+        repo,
+        config=SandboxConfig(image=PYTHON_IMAGE, decoy_seconds=90),
+        backend=Scripted([("run_cmd", {"command": "cat .env > leaked.txt"})]),
+    )
+    assert not evidence.errors, [error.model_dump_json() for error in evidence.errors]
+    assert evidence.status == "complete"
+    hits = {(hit.token_id, hit.source) for hit in evidence.honeytoken_hits}
+    assert hits and all(source == "file" for _, source in hits)
+    assert ("leaked.txt", "added") in {(d.path, d.change) for d in evidence.file_diffs}
+    report = fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), evidence)
+    assert report.verdict == "FLAG"
     assert_no_leftovers(engine, evidence)
 
 

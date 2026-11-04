@@ -4,10 +4,13 @@ A READ attack verdict BLOCKs at the pinned checkpoint's `hard_high` score
 (`read/model_config.json`) and FLAGs below it. Any exception, timeout,
 truncated scan, missing component, READ incomplete/unavailable or RUN error is
 at least FLAG, never ALLOW, and any non-registry sink contact or honeytoken
-sent over the network is BLOCK. A decoy that only reads a honeytoken FLAGs.
+sent over the network is BLOCK.
 Validated plain DNS lookups and hello-only TLS contacts to the exact hosts in
 REGISTRY_HOSTS do not affect the verdict. Other registry contacts remain
-attempts and FLAG instead of BLOCK. The judge inside READ may escalate but
+attempts and FLAG instead of BLOCK. A decoy that only reads a honeytoken
+(`tool_output`) does not FLAG; a token moved into tool-call arguments, the
+decoy's reply text or a staged file FLAGs, and a token sent over the network
+BLOCKs. The judge inside READ may escalate but
 never clears a high READ score, so fusion sees only the resulting top score.
 """
 
@@ -75,6 +78,11 @@ REGISTRY_HOSTS = (
 _REASON_PART_CHARS = 400
 # A decoy reading the bait is expected; only these sources mean it left the cage.
 _NETWORK_SOURCES = frozenset({"dns", "http", "tls"})
+_MOVED_SOURCES = {
+    "tool_args": "tool call arguments",
+    "transcript": "its reply text",
+    "file": "a staged file",
+}
 
 
 @dataclass(frozen=True)
@@ -300,7 +308,6 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         message = f"{len(exfil)} sink contact(s) outside the package registries: {destinations}"
         blockers.append(_bounded(message))
     sent = [hit for hit in run.honeytoken_hits if hit.source in _NETWORK_SOURCES]
-    read_only = [hit for hit in run.honeytoken_hits if hit.source not in _NETWORK_SOURCES]
     if sent:
         tokens = ", ".join(dict.fromkeys(hit.token_id for hit in sent))
         blockers.append(_bounded(f"honeytoken hit(s) sent over the network: {tokens}"))
@@ -338,9 +345,11 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
             flags.append("RUN setup could not run in the cage (no executed run_cmd)")
         else:
             flags.append("RUN decoy did not execute a run_cmd tool call")
-    if read_only:
-        tokens = ", ".join(dict.fromkeys(hit.token_id for hit in read_only))
-        flags.append(_bounded(f"the decoy read planted honeytoken(s): {tokens}"))
+    for source, where in _MOVED_SOURCES.items():
+        moved = [hit for hit in run.honeytoken_hits if hit.source == source]
+        if moved:
+            tokens = ", ".join(dict.fromkeys(hit.token_id for hit in moved))
+            flags.append(_bounded(f"the decoy moved planted honeytoken(s) into {where}: {tokens}"))
     if attempts:
         hosts = ", ".join(dict.fromkeys(_host_of(hit.destination) for hit in attempts))
         flags.append(
@@ -353,7 +362,13 @@ def fuse(read: ReadOutcome, run: RunEvidence) -> VerdictReport:
         verdict, why = "FLAG", flags
     else:
         verdict = "ALLOW"
-        why = ["READ is clean and the RUN decoy completed with no sink or honeytoken evidence"]
+        if run.honeytoken_hits:
+            why = [
+                "READ is clean and the RUN decoy completed with no sink evidence; "
+                "it read planted honeytoken(s) but did not move or send them"
+            ]
+        else:
+            why = ["READ is clean and the RUN decoy completed with no sink or honeytoken evidence"]
     if read.verdict == "attack" and read.reason:
         why.append(_bounded(f"READ coverage is incomplete: {read.reason}"))
     return VerdictReport(

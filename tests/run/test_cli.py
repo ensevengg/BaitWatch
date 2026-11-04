@@ -43,6 +43,6 @@ def test_decoy_hits_never_exit_zero(monkeypatch, tmp_path):
         dns_hits=[NetworkHit(source_ip="192.0.2.20", destination="evil.example")],
     )
     monkeypatch.setattr("run.cli.detonate", lambda *a, **k: evidence)
-    monkeypatch.setattr("run.llm.make_backend", lambda spec: object())
+    monkeypatch.setattr("run.llm.make_backend", lambda spec, **_: object())
     result = runner.invoke(app, ["decoy", str(tmp_path), "--llm", "scripted:unused"])
     assert result.exit_code == 2

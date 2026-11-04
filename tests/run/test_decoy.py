@@ -24,6 +24,8 @@ class FakeSandbox:
         self._results = list(results)
         self.config = SimpleNamespace(decoy_seconds=120)
         self.alive = True
+        self.decoy_transcript: list[str] = []
+        self.decoy_transcript_incomplete = False
 
     def cage_running(self):
         return self.alive
@@ -99,6 +101,91 @@ def test_tool_calls_dispatch_through_sandbox_exec():
         "list_files",
         "run_cmd",
     ]
+
+
+def test_decoy_transcript_is_recorded_bounded():
+    sandbox = FakeSandbox()
+    backend = FakeBackend(
+        LLMReply(
+            text="intermediate note", tool_calls=[ToolCall(id="1", name="list_files", arguments={})]
+        ),
+        LLMReply(text="final summary"),
+    )
+    run_decoy(sandbox, backend)
+    assert sandbox.decoy_transcript == ["intermediate note", "final summary"]
+
+
+def test_failed_dispatch_arguments_are_recorded_in_transcript():
+    from run.honeytokens import Honeytoken, scan_transcript
+
+    token = Honeytoken("ht-x", "BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w", ".env", "API_KEY")
+    sandbox = FakeSandbox()
+    backend = FakeBackend(
+        LLMReply(tool_calls=[ToolCall(id="1", name="bogus", arguments={"command": token.value})]),
+        LLMReply(text="done"),
+    )
+    run_decoy(sandbox, backend)
+    assert sandbox.evidence.tool_log[0].command == ["bogus"]
+    assert token.value not in " ".join(sandbox.evidence.tool_log[0].command)
+    scan = scan_transcript(list(sandbox.decoy_transcript), (token,))
+    assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-x", "transcript")]
+    # Bad-argument dispatch also records its raw arguments.
+    sandbox2 = FakeSandbox()
+    backend2 = FakeBackend(
+        LLMReply(
+            tool_calls=[
+                ToolCall(id="1", name="run_cmd", arguments={"command": 42, "x": token.value})
+            ]
+        ),
+        LLMReply(text="done"),
+    )
+    run_decoy(sandbox2, backend2)
+    scan2 = scan_transcript(list(sandbox2.decoy_transcript), (token,))
+    assert [(hit.token_id, hit.source) for hit in scan2.hits] == [("ht-x", "transcript")]
+
+
+def test_transcript_overflow_marks_incomplete_and_non_allow():
+    from run.decoy import TRANSCRIPT_CHARS
+    from run.evidence import RunComponents
+    from run.verdict import ReadOutcome, fuse
+
+    sandbox = FakeSandbox()
+    sandbox.decoy_transcript = ["x" * TRANSCRIPT_CHARS]
+    backend = FakeBackend(
+        LLMReply(tool_calls=[ToolCall(id="1", name="bogus", arguments={"command": "y"})]),
+        LLMReply(text="done"),
+    )
+    run_decoy(sandbox, backend)
+    assert sandbox.decoy_transcript_incomplete is True
+    # Through the sandbox scan, the incomplete flag becomes a non-ALLOW error.
+    from run.honeytokens import Honeytoken
+    from run.sandbox import Sandbox
+
+    real = Sandbox.__new__(Sandbox)
+    real.decoy_transcript = list(sandbox.decoy_transcript)
+    real.decoy_transcript_incomplete = True
+    real._honeytokens = (
+        Honeytoken("ht-x", "BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w", ".env", "API_KEY"),
+    )
+    real._honeytoken_scanned = False
+    real._sink_logs = {}
+    real.evidence = RunEvidence()
+    real._scan_honeytokens()
+    assert any(e.code == "HONEYTOKEN_SCAN_INCOMPLETE" for e in real.evidence.errors)
+    evidence = sandbox.evidence
+    evidence.components = RunComponents(**{k: State.COMPLETE for k in RunComponents.model_fields})
+    evidence.errors.append(RunError(code="HONEYTOKEN_SCAN_INCOMPLETE", message="bound"))
+    evidence.status = "error"
+    assert fuse(ReadOutcome(status=State.COMPLETE, verdict="clean"), evidence).verdict != "ALLOW"
+
+
+def test_missing_transcript_store_fails_closed():
+    sandbox = FakeSandbox()
+    del sandbox.decoy_transcript
+    backend = FakeBackend(LLMReply(text="hello"))
+    run_decoy(sandbox, backend)
+    assert sandbox.evidence.components.decoy == State.ERROR
+    assert sandbox.evidence.status == "error"
 
 
 def test_first_request_has_system_role_then_the_task_as_user():
@@ -192,6 +279,8 @@ def test_llm_error_fails_the_decoy_closed():
 def test_cage_failure_fails_the_decoy_closed():
     class DeadCage:
         evidence = RunEvidence()
+        decoy_transcript: list = []
+        decoy_transcript_incomplete = False
 
         def exec(self, argv):
             raise SandboxError("the cage is not running")
@@ -287,7 +376,7 @@ def _complete_evidence() -> RunEvidence:
 def test_decoy_cli_passes_backend_spec_and_steps(monkeypatch, tmp_path):
     seen: dict = {}
 
-    def fake_make_backend(spec):
+    def fake_make_backend(spec, **_):
         seen["spec"] = spec
         return "backend"
 
@@ -308,7 +397,7 @@ def test_decoy_cli_passes_backend_spec_and_steps(monkeypatch, tmp_path):
 
 
 def test_decoy_cli_exit_zero_only_when_complete(monkeypatch, tmp_path):
-    monkeypatch.setattr("run.llm.make_backend", lambda spec: "backend", raising=False)
+    monkeypatch.setattr("run.llm.make_backend", lambda spec, **_: "backend", raising=False)
     monkeypatch.setattr("run.cli.detonate", lambda *args, **kwargs: _complete_evidence())
     result = runner.invoke(app, ["decoy", str(tmp_path), "--llm", "scripted:steps.json"])
     assert result.exit_code == 0
@@ -316,7 +405,7 @@ def test_decoy_cli_exit_zero_only_when_complete(monkeypatch, tmp_path):
 
 
 def test_decoy_cli_error_exits_three(monkeypatch, tmp_path):
-    monkeypatch.setattr("run.llm.make_backend", lambda spec: "backend", raising=False)
+    monkeypatch.setattr("run.llm.make_backend", lambda spec, **_: "backend", raising=False)
     evidence = RunEvidence(status="error", errors=[RunError(code="TEST", message="synthetic")])
     monkeypatch.setattr("run.cli.detonate", lambda *args, **kwargs: evidence)
     result = runner.invoke(app, ["decoy", str(tmp_path), "--llm", "scripted:steps.json"])
@@ -374,6 +463,8 @@ def test_run_tool_never_raises_and_only_execs_known_argv():
             self.argv: list[str] | None = None
             self.config = SimpleNamespace(decoy_seconds=120)
             self.alive = True
+            self.decoy_transcript: list[str] = []
+            self.decoy_transcript_incomplete = False
 
         def cage_running(self):
             return True

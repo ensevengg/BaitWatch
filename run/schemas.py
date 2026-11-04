@@ -44,7 +44,13 @@ def verdict_schema() -> dict:
                         "required": ["status", "components", "errors", "honeytoken_hits"],
                         "properties": {
                             **completed_run["properties"],
-                            "honeytoken_hits": {"maxItems": 0},
+                            "honeytoken_hits": {
+                                "items": {
+                                    "type": "object",
+                                    "required": ["source"],
+                                    "properties": {"source": {"const": "tool_output"}},
+                                }
+                            },
                         },
                     },
                 },

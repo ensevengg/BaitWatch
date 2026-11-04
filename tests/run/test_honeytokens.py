@@ -8,6 +8,8 @@ import string
 import urllib.parse
 from pathlib import Path
 
+import pytest
+
 from run.evidence import CommandResult, State
 from run.honeytokens import (
     CANARY_HOST_SUFFIX,
@@ -424,7 +426,7 @@ def test_random_unrelated_records_and_output_yield_no_hits():
         assert tool.hits == () and not tool.incomplete
 
 
-def test_tool_log_output_is_detected_as_tool_log_without_source_ip():
+def test_tool_log_output_is_tool_output_and_command_is_tool_args():
     token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
     results = [
         CommandResult(command=["run_cmd", "cat /repo/.env"], stdout=f"API_KEY={token.value}\n"),
@@ -434,9 +436,112 @@ def test_tool_log_output_is_detected_as_tool_log_without_source_ip():
         ),
     ]
     scan = scan_tool_results(results, (token,))
-    assert [(hit.token_id, hit.source, hit.source_ip) for hit in scan.hits] == [
-        ("ht-fixture", "tool_log", None)
+    assert {(hit.token_id, hit.source, hit.source_ip) for hit in scan.hits} == {
+        ("ht-fixture", "tool_output", None),
+        ("ht-fixture", "tool_args", None),
+    }
+
+
+def test_tool_output_only_is_a_single_tool_output_hit():
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    scan = scan_tool_results(
+        [CommandResult(command=["run_cmd", "cat .env"], stdout=token.value)], (token,)
+    )
+    assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-fixture", "tool_output")]
+
+
+def test_encoded_variant_in_tool_args_is_caught():
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    encoded = base64.b64encode(token.value.encode()).decode()
+    scan = scan_tool_results(
+        [CommandResult(command=["run_cmd", f"echo {encoded} >> notes.md"])], (token,)
+    )
+    assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-fixture", "tool_args")]
+
+
+def test_transcript_scan_detects_token():
+    from run.honeytokens import scan_transcript
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    scan = scan_transcript([f"found {token.value}"], (token,))
+    assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-fixture", "transcript")]
+    assert scan_transcript(["benign"], (token,)).hits == ()
+
+
+def test_file_scan_detects_added_and_modified_but_not_planted(tmp_path: Path):
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    (tmp_path / "notes.md").write_text(f"copied {token.value}\n")
+    (tmp_path / ".env").write_text(f"API_KEY={token.value}\n")
+    (tmp_path / "clean.txt").write_text("hello\n")
+    diffs = [
+        FileDiff(path="notes.md", change="added"),
+        FileDiff(path=".env", change="added"),
+        FileDiff(path="clean.txt", change="modified"),
+        FileDiff(path="gone.txt", change="deleted"),
     ]
+    scan = scan_files(tmp_path, diffs, (token,), {".env": {token.token_id}})
+    assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-fixture", "file")]
+    assert not scan.incomplete
+    only_planted = scan_files(tmp_path, diffs[1:2], (token,), {".env": {token.token_id}})
+    assert only_planted.hits == () and not only_planted.incomplete
+
+
+def test_file_scan_encoded_variant_is_caught(tmp_path: Path):
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    encoded = base64.b64encode(token.value.encode()).decode()
+    (tmp_path / "out.txt").write_text(encoded)
+    scan = scan_files(tmp_path, [FileDiff(path="out.txt", change="added")], (token,))
+    assert [hit.source for hit in scan.hits] == ["file"]
+
+
+def test_file_scan_does_not_follow_symlink_or_open_fifo(tmp_path: Path):
+    import os
+
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    outside = tmp_path.parent / "outside_secret.txt"
+    outside.write_text(token.value)
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    (staged / "link.txt").symlink_to(outside)
+    os.mkfifo(staged / "pipe")
+    scan = scan_files(
+        staged,
+        [FileDiff(path="link.txt", change="added"), FileDiff(path="pipe", change="added")],
+        (token,),
+    )
+    assert scan.hits == ()
+    assert scan.incomplete
+
+
+def test_file_scan_bounds_mark_incomplete(tmp_path: Path, monkeypatch):
+    from run import honeytokens as ht
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    (tmp_path / "big.txt").write_text("x" * 2048)
+    monkeypatch.setattr(ht, "FILE_BYTE_LIMIT", 16)
+    scan = scan_files(tmp_path, [FileDiff(path="big.txt", change="added")], (token,))
+    assert scan.incomplete
+    monkeypatch.setattr(ht, "FILE_BYTE_LIMIT", 1024 * 1024)
+    monkeypatch.setattr(ht, "FILE_COUNT_LIMIT", 0)
+    (tmp_path / "a.txt").write_text("hi")
+    scan = scan_files(tmp_path, [FileDiff(path="a.txt", change="added")], (token,))
+    assert scan.incomplete
+    monkeypatch.setattr(ht, "FILE_COUNT_LIMIT", 1024)
+    monkeypatch.setattr(ht, "SCAN_TOTAL_BYTES", 2)
+    (tmp_path / "a.txt").write_text("hello")
+    scan = scan_files(tmp_path, [FileDiff(path="a.txt", change="added")], (token,))
+    assert scan.incomplete
 
 
 def test_bound_hits_mark_the_scan_incomplete():
@@ -486,11 +591,37 @@ def test_collect_sinks_attaches_hits_and_bound_errors_to_the_evidence(repo: Path
     sandbox._scan_honeytokens()
     assert [(hit.token_id, hit.source) for hit in sandbox.evidence.honeytoken_hits] == [
         ("ht-fixture", "dns"),
-        ("ht-fixture", "tool_log"),
+        ("ht-fixture", "tool_output"),
     ]
     assert not sandbox.evidence.errors
     sandbox._scan_honeytokens()
     assert len(sandbox.evidence.honeytoken_hits) == 2
+
+
+def test_transcript_hit_is_collected_from_sandbox(repo: Path, tmp_path: Path):
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    dns_log = tmp_path / "dns.jsonl"
+    dns_log.write_text('{"kind":"ready","ts":1.0,"sink":"dns"}\n')
+    sandbox = Sandbox(repo)
+    sandbox._honeytokens = (token,)
+    sandbox._sink_logs = {"dns": dns_log}
+    sandbox.decoy_transcript = [f"leaked {token.value}"]
+    sandbox._scan_honeytokens()
+    assert [(hit.token_id, hit.source) for hit in sandbox.evidence.honeytoken_hits] == [
+        ("ht-fixture", "transcript")
+    ]
+
+
+def test_file_scan_unreadable_file_marks_sandbox_scan_incomplete(repo: Path):
+    from run.evidence import FileDiff
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    sandbox = Sandbox(repo)
+    sandbox._honeytokens = (token,)
+    sandbox._temporary = repo.parent
+    sandbox.evidence.file_diffs = [FileDiff(path="missing.txt", change="added")]
+    sandbox._scan_file_honeytokens()
+    assert any(error.code == "HONEYTOKEN_SCAN_INCOMPLETE" for error in sandbox.evidence.errors)
 
 
 def test_a_bound_hit_during_collection_is_an_error_never_a_clean_scan(
@@ -512,6 +643,143 @@ def test_a_bound_hit_during_collection_is_an_error_never_a_clean_scan(
     assert [error.code for error in sandbox.evidence.errors] == ["HONEYTOKEN_SCAN_INCOMPLETE"]
     assert sandbox.evidence.status == "error"
     assert sandbox.evidence.components.sandbox == State.NOT_RUN
+
+
+def test_file_scan_reads_cage_home_diffs(tmp_path: Path):
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+    from run.verdict import CAGE_HOME
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    staged = tmp_path / "repo"
+    home = tmp_path / "home"
+    staged.mkdir()
+    home.mkdir()
+    (home / "stash.txt").write_text(f"copied {token.value}\n")
+    scan = scan_files(
+        staged,
+        [FileDiff(path=f"{CAGE_HOME}/stash.txt", change="added")],
+        (token,),
+        home_root=home,
+    )
+    assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-fixture", "file")]
+    assert not scan.incomplete
+
+
+@pytest.mark.parametrize("rel", ["../escape.txt", "a/../b.txt", "a//b.txt", "./c.txt"])
+def test_file_scan_refuses_unsafe_relative_paths(tmp_path: Path, rel: str):
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    (tmp_path / "escape.txt").write_text(token.value)
+    staged = tmp_path / "repo"
+    staged.mkdir()
+    scan = scan_files(staged, [FileDiff(path=rel, change="added")], (token,))
+    assert scan.hits == ()
+    assert scan.incomplete
+
+
+@pytest.mark.parametrize("home_root_given", [True, False])
+def test_file_scan_home_prefix_lookalike_or_missing_root_is_incomplete(
+    tmp_path: Path, home_root_given: bool
+):
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+    from run.verdict import CAGE_HOME
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "x.txt").write_text(token.value)
+    path = f"{CAGE_HOME}X/x.txt" if home_root_given else f"{CAGE_HOME}/x.txt"
+    scan = scan_files(
+        tmp_path,
+        [FileDiff(path=path, change="added")],
+        (token,),
+        home_root=home if home_root_given else None,
+    )
+    assert scan.hits == ()
+    assert scan.incomplete
+
+
+def test_file_scan_unknown_absolute_path_is_incomplete(tmp_path: Path):
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    scan = scan_files(tmp_path, [FileDiff(path="/etc/passwd", change="added")], (token,))
+    assert scan.hits == ()
+    assert scan.incomplete
+
+
+def test_file_scan_planted_file_with_foreign_token_hits_and_own_token_does_not(tmp_path: Path):
+    from run.evidence import FileDiff
+    from run.honeytokens import Honeytoken as HT
+    from run.honeytokens import scan_files
+
+    own = HT("ht-own", "BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w", ".env", "API_KEY")
+    foreign = HT(
+        "ht-foreign", "BAITWATCH_FAKE_m3xyn52wkr2gs3tufyq6", ".env.local", "DATABASE_PASSWORD"
+    )
+    planted = {".env": {own.token_id}, ".env.local": {foreign.token_id}}
+    (tmp_path / ".env").write_text(f"API_KEY={own.value}\nDATABASE_PASSWORD={foreign.value}\n")
+    scan = scan_files(tmp_path, [FileDiff(path=".env", change="modified")], (own, foreign), planted)
+    assert [(hit.token_id, hit.source) for hit in scan.hits] == [("ht-foreign", "file")]
+    (tmp_path / ".env").write_text(f"API_KEY={own.value}\n")
+    own_only = scan_files(
+        tmp_path, [FileDiff(path=".env", change="modified")], (own, foreign), planted
+    )
+    assert own_only.hits == () and not own_only.incomplete
+
+
+def test_file_scan_read_error_is_incomplete_not_raised(tmp_path: Path, monkeypatch):
+    from run import honeytokens as ht
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    (tmp_path / "a.txt").write_text("hello")
+
+    def boom(fd, size):
+        raise OSError("read failed")
+
+    monkeypatch.setattr(ht.os, "read", boom)
+    scan = scan_files(tmp_path, [FileDiff(path="a.txt", change="added")], (token,))
+    assert scan.hits == ()
+    assert scan.incomplete
+
+
+def test_file_scan_non_utf8_content_is_searched(tmp_path: Path):
+    from run.evidence import FileDiff
+    from run.honeytokens import scan_files
+
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    (tmp_path / "bin.dat").write_bytes(b"\xff\xfe" + token.value.encode() + b"\x80\x81")
+    scan = scan_files(tmp_path, [FileDiff(path="bin.dat", change="added")], (token,))
+    assert [hit.source for hit in scan.hits] == ["file"]
+    assert not scan.incomplete
+
+
+def test_sandbox_file_scan_skips_non_file_trace_kinds(repo: Path, tmp_path: Path):
+    token = _token("BAITWATCH_FAKE_kr2gs3tufyq6m3xyn52w")
+    from run.evidence import FileDiff
+
+    staged = tmp_path / "repo"
+    home = tmp_path / "home"
+    home.mkdir()
+    (staged / "link.txt").write_text(token.value)
+    sandbox = Sandbox(repo)
+    sandbox._honeytokens = (token,)
+    sandbox._temporary = tmp_path
+    sandbox.evidence.file_diffs = [
+        FileDiff(path="link.txt", change="added"),
+        FileDiff(path="dir", change="added"),
+    ]
+    sandbox._trace_after_kinds = {"link.txt": "symlink", "dir": "dir"}
+    sandbox._scan_file_honeytokens()
+    assert sandbox.evidence.honeytoken_hits == []
+    assert not sandbox.evidence.errors
 
 
 def test_a_token_in_an_http_header_name_or_escaped_path_is_detected():

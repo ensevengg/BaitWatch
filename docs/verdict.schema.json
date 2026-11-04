@@ -102,8 +102,10 @@
             "dns",
             "http",
             "tls",
-            "tool_log",
-            "transcript"
+            "tool_output",
+            "tool_args",
+            "transcript",
+            "file"
           ],
           "title": "Source",
           "type": "string"
@@ -553,7 +555,17 @@
                 "maxItems": 0
               },
               "honeytoken_hits": {
-                "maxItems": 0
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "source"
+                  ],
+                  "properties": {
+                    "source": {
+                      "const": "tool_output"
+                    }
+                  }
+                }
               }
             }
           }

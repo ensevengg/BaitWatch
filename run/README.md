@@ -2,7 +2,7 @@
 
 BaitWatch checks a repository for attacks aimed at coding agents before a developer lets an agent work in it. The planned product has two parts. READ runs a detector over the files. RUN executes the repository as a decoy inside an isolated Docker network and records what it tries to reach.
 
-This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, the Day 4 fused scan, and Day 5 honeytokens. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, plants per-scan fake credentials in the staged copy and detects them in sink and tool output, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not yet include model transcript scanning or agent hooks.
+This branch builds the RUN foundation, the Day 2 layers, the Day 3 decoy, the Day 4 fused scan, and Day 5 honeytokens. It copies the repository with limits, creates an internal Docker network, runs the DNS and HTTP/TLS sinks and a file trace around a restricted cage command, plants per-scan fake credentials in the staged copy and detects them in sink traffic, tool calls and output, the decoy's reply text and files the cage writes, drives a decoy LLM whose tool calls execute inside the cage, records typed evidence, fuses the READ and RUN layers into one verdict, cleans up, and tests each of these steps. It does not include agent hooks.
 
 ## Setup on Linux
 
@@ -92,7 +92,9 @@ exact hosts listed below) are exempt only for validated plain DNS and
 hello-only TLS; other registry contacts are counted as attempts, not
 exfiltration. A
 honeytoken sent over DNS, HTTP or TLS is BLOCK; a decoy that only read one
-(`tool_log`) is FLAG.
+(`tool_output`) does not FLAG, while a token moved into tool-call arguments
+(`tool_args`), the decoy's reply text (`transcript`) or a staged file
+(`file`) is FLAG.
 
 ## Measuring the decoy pwn rate
 
@@ -116,7 +118,12 @@ uv run --no-sync pytest -m gpu tests/run/test_pwnrate_gpu.py -q   # same env; sk
 Env var names: `BAITWATCH_DECOY_BASE_URL`, `BAITWATCH_DECOY_MODEL`,
 `BAITWATCH_DECOY_API_KEY_ENV` (a variable *name*, never a key value in specs,
 logs or reports), `BAITWATCH_DECOY_FALLBACK_BASE_URL`,
-`BAITWATCH_DECOY_FALLBACK_MODEL`, and `BAITWATCH_PWNRATE_RUNS` (default 10).
+`BAITWATCH_DECOY_FALLBACK_MODEL`, `BAITWATCH_DECOY_REASONING_EFFORT`
+(optional; one of `low`, `medium`, `high`; unset sends no `reasoning_effort`
+field, and an invalid value is an error; when set, `temperature` is not sent, and a non-zero temperature is an error; set it only for endpoints that accept `reasoning_effort` together with tools, since a rejected request fails the decoy (non-ALLOW); reasoning tokens count against the
+decoy token budget), `BAITWATCH_DECOY_FALLBACK_REASONING_EFFORT` (same, for
+the fallback backend), and `BAITWATCH_PWNRATE_RUNS` (default 10); an empty-string value is treated as unset.
+Model tiers that allow the provider to train on sent text (such as Muse Spark's "contributor" tier) must not be used to scan private repositories, because the decoy sends repository contents to the model.
 The report JSON and Markdown table give, per repo: runs, runs with a counted
 sink hit, runs with honeytoken hits, verdict counts, pwn rate, p50/p95 latency,
 tokens used and fallback count. A counted sink hit is a contact that verdict fusion
@@ -165,7 +172,7 @@ assert evidence.status == "incomplete"
 - Staging preserves symlinks, rejects hard links and special files, and never copies a host file when a repository file turns into a symlink during the copy.
 - Output floods and deadlines stop the container, and nonzero exit codes are kept.
 - The scripted decoy's tool calls execute inside the cage, land in `tool_log` in order, and its fake exfil reaches the DNS and HTTP sinks attributed to the cage and shows up in `file_diffs`; a decoy run that only finishes cleanly can make the whole evidence `complete`.
-- Honeytokens are generated per scan in shapes no provider's scanner matches, planted only in the staged copy before the first snapshot, and a leak to a sink or into tool output becomes a `HoneytokenHit` that forbids `ALLOW`; a hit carries only the token id, though the fake value can still appear in quoted tool output and sink detail, and a benign scan records none.
+- Honeytokens are generated per scan in shapes no provider's scanner matches, planted only in the staged copy before the first snapshot. A token sent to a sink BLOCKs, a token moved into tool arguments, reply text or an added or modified file FLAGs, and a token only read into tool output is a `tool_output` hit that does not change the verdict; a hit carries only the token id, though the fake value can still appear in quoted tool output and sink detail, and a benign scan records none.
 - A tool call that outlives its deadline is killed inside the cage and recorded timed out; forked or backgrounded work from any tool call leaves no live process behind, for compound (`sleep 100; echo done`) and backgrounded (`sleep 100 &`) commands alike.
 - The sandbox records setup failures, cleanup failures and subnet conflicts as errors, and `exec` fails closed on a cage that was never opened, has closed, or has exited.
 - The fusion flags or blocks on every incomplete READ or RUN, blocks on sink contacts outside the package registries, and only allows a clean READ plus a complete decoy run without disallowed evidence — the local attack fixtures block, the benign fixture allows, and every report validates against the schema.
@@ -272,3 +279,5 @@ The sandbox boundary has its own [known limits](SANDBOX.md#known-limits); the tw
 - During the response-header phase, the OpenAI-compatible backend is bounded only by the per-read socket timeout. An endpoint that sends headers slowly can push one model call past the decoy wall budget. The scan stays non-ALLOW when that happens.
 - When a call fails after the wall deadline, the decoy records `DECOY_TIME_BUDGET`, and the underlying error kind isn't shown.
 - If the cage deadline expires during model inference and that call then fails, it's recorded as `DECOY_FAILED`, not a deadline code (`DECOY_DEADLINE` is only checked between calls). It's still non-ALLOW.
+- A honeytoken value split across two files or two entries is not detected.
+- A decoy that deletes a planted honeytoken file outright leaves no honeytoken hit; only added or modified files are scanned.
