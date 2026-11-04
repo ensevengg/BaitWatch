@@ -10,8 +10,13 @@ Fail-closed rules implemented here (each has a test):
   leaves the chunk *reviewed but unjudged*, with a note saying why: the READ
   verdict becomes "incomplete", never "clean" and never "attack" (no attack
   was found, but none was ruled out either). The same holds when no judge is
-  configured at all. Inside the band the judge CAN clear; above
-  flag_threshold nothing the judge says removes the flag.
+  configured at all.
+- The judge decides when it answers: "mention" records quoted attack text outside
+  agent instruction files, "attack" flags a window from any tier and
+  "benign" clears one, including a window above flag_threshold. Only the
+  primary endpoint may clear a flag. A flagged window the judge did not answer
+  for stays flagged. Windows below the review band are best effort: when no
+  judge reaches them they read as they would with no judge at all.
 - Evidence the scan could not cover — walker file cap, decoded content past
   its cap, decoded views the per-file chunk budget could not fully cover,
   review-band chunks no judge cleared, decoder crashes, and (with
@@ -44,7 +49,8 @@ from read.findings import (LAYER_JUDGE, LAYER_MODEL, LAYER_SYSTEM,
                            STATUS_FLAGGED, STATUS_REVIEWED, Finding,
                            system_finding)
 from read.judge import Judge, JudgeResult, ScanBudget
-from read.walk import sniff_encoding, walk
+from read.rules import rule_hits
+from read.walk import priority_tier, sniff_encoding, walk
 
 __all__ = ["ScanResult", "scan", "VERDICT_ATTACK", "VERDICT_INCOMPLETE", "VERDICT_CLEAN"]
 
@@ -76,9 +82,27 @@ class ScanStats:
     judge_calls: int = 0            # judge requests actually attempted
     judge_unavailable: int = 0
     judge_skipped: int = 0          # review-band chunks the per-scan budget did not cover
+    judge_cached: int = 0           # verdicts served by the judge cache
+    judge_cleared: int = 0          # model flags the judge cleared
+    judge_low_flagged: int = 0      # windows below the review band the judge flagged
+    judge_low_unjudged: int = 0     # low-tier windows no judge answered for
+    judge_deadline_hit: bool = False  # time ran out; a later scan can finish the work
+    judge_low_planned: int = 0      # low-score tier 2/3 windows sent to the judge
+    judge_last_error: str | None = None   # a sample, so an outage can be diagnosed
+    files_cached: int = 0           # batches: results reused for unchanged files
+    files_generated: int = 0        # batches: generated files left for the check on open
+    scan_time_limit_hit: bool = False   # batches: time ran out; a later scan resumes
+    scan_stopped_early: bool = False    # batches: the verdict was decided, the rest skipped
+    # Files with more candidate windows than the per-file cap.
+    judge_overflow_files: list[str] = field(default_factory=list)
     elapsed_s: float = 0.0
     truncated_scan: bool = False    # walker file cap hit
     files_over_cap: int = 0         # files the walker cap left unscanned
+    agent_files_over_cap: int = 0   # of those, tier 0 or 1
+    # Best-effort mode: tier 0/1 files only partly scanned.
+    agent_files_partial: list[str] = field(default_factory=list)
+    best_effort_gaps: int = 0       # best-effort mode: tier 2/3 files skipped or partly scanned
+    files_covered: list[str] = field(default_factory=list)  # read in full, every view scored
     detector_error: str | None = None
     decoder_errors: list[str] = field(default_factory=list)
     incomplete_reasons: list[str] = field(default_factory=list)
@@ -292,16 +316,24 @@ def _judge_all(judge, items: list[tuple[str, str, float]], budget: ScanBudget | 
         return JudgeResult("unavailable", None, None, error=f"judge crashed: {exc}")
 
     results: list[JudgeResult | None] = [None] * len(requests)
+    lookup = getattr(judge, "lookup", None)
+    if lookup is not None:
+        for i, (text, file, _score) in enumerate(requests):
+            results[i] = lookup(text, file)
+        stats.judge_cached += sum(1 for r in results if r is not None)
+    open_requests = [i for i, r in enumerate(results) if r is None]
     estimate = getattr(judge, "estimate_tokens", None)
     if estimate is None or concurrency <= 1:
-        for i, (text, file, score) in enumerate(requests):
+        for i in open_requests:
+            text, file, score = requests[i]
             try:
                 results[i] = judge.review(text, file, score, budget)
             except Exception as exc:   # noqa: BLE001 - a judge bug is a failure, not a crash
                 results[i] = crashed(exc)
     else:
         planned: list[tuple[int, int | None]] = []
-        for i, (text, file, score) in enumerate(requests):
+        for i in open_requests:
+            text, file, score = requests[i]
             try:
                 est = estimate(text, file, score)
             except Exception as exc:   # noqa: BLE001
@@ -328,17 +360,217 @@ def _judge_all(judge, items: list[tuple[str, str, float]], budget: ScanBudget | 
             with ThreadPoolExecutor(max_workers=min(concurrency, len(planned))) as pool:
                 for (i, _), result in zip(planned, pool.map(run, planned)):
                     results[i] = result
-    stats.judge_calls += sum(1 for r in results if r.verdict != "skipped")
+    stats.judge_calls += sum(1 for i in open_requests if results[i].verdict != "skipped")
     return [results[index[text]] for text, _, _ in items]
+
+
+def _evidence(chunk: Chunk, score: float) -> dict:
+    return {"text": _snippet(chunk.text), "line": chunk.start_line,
+            "model_score": round(score, 4)}
+
+
+def _finding(chunk: Chunk, score: float, layer: str, evidence: dict, status: str,
+             explanation: str | None = None) -> Finding:
+    decoded = chunk.view != "original"
+    return Finding(file=chunk.file, chunk_id=chunk.chunk_id, score=score, layer=layer,
+                   evidence=evidence, status=status, explanation=explanation,
+                   decoded=decoded, decoder=chunk.view if decoded else None)
+
+
+def _low_tier(scored: list[tuple[Chunk, float]], cfg: ReadConfig,
+              stats: ScanStats) -> list[tuple[Chunk, float]]:
+    """Windows under the review band worth a judge call, most promising first.
+
+    Each file gets its best-scoring windows from ``judge_floor`` up, then its
+    rule-matching windows, up to a per-file cap that counts windows already above
+    the band. A file with a rule hit always gets one rule window.
+    """
+    by_file: dict[str, list[tuple[Chunk, float]]] = {}
+    for chunk, score in scored:
+        by_file.setdefault(chunk.file, []).append((chunk, score))
+    picked: list[tuple[Chunk, float]] = []
+    for windows in by_file.values():
+        above = sum(1 for _, s in windows if s >= cfg.review_low)
+        low = [(c, s) for c, s in windows if s < cfg.review_low]
+        cap = (cfg.judge.max_windows_per_agent_file if priority_tier(windows[0][0].file) <= 1
+               else cfg.judge.max_windows_per_file)
+        slots = max(0, cap - above)
+        by_score = sorted(low, key=lambda w: -w[1])
+        chosen = [w for w in by_score[:2] if w[1] >= cfg.judge_floor][:slots]
+        hits = {id(c): len(rule_hits(c.text)) for c, _ in low}
+        ruled = sorted((w for w in low if hits[id(w[0])]),
+                       key=lambda w: (-hits[id(w[0])], -w[1]))
+        taken = {id(c) for c, _ in chosen}
+        for window in ruled:
+            if id(window[0]) in taken:
+                continue
+            if len(chosen) < slots or not any(hits[id(c)] for c, _ in chosen):
+                chosen.append(window)
+                taken.add(id(window[0]))
+            else:
+                # Harmless rule matches could otherwise crowd out a real payload.
+                stats.judge_overflow_files.append(windows[0][0].file)
+                break
+        picked.extend(chosen)
+    # Agent-facing files first, so a flood of other files cannot use up the budget.
+    picked.sort(key=lambda w: (priority_tier(w[0].file) > 1, -w[1]))
+    return picked
+
+
+WHOLE_FILE_OVERLAP_CHARS = 400     # long enough to hold one instruction across a cut
+
+
+def is_broken_symlink(reason: str) -> bool:
+    """Nothing can be read through one, by us or by an agent: an uninitialised submodule
+    leaves them behind in ordinary repositories."""
+    return reason.startswith("broken symlink")
+
+
+def _whole_file_windows(whole: dict[str, str], scored: list[tuple[Chunk, float]],
+                        cfg: ReadConfig, stats: ScanStats) -> list[tuple[Chunk, float]]:
+    """Tier 0 files for the judge to read, split so that no text is cut out. A piece gets
+    the best model score inside it, so that the model and the judge have to agree about
+    the same text. Decoded text has no position in the file and counts for every piece.
+    Whitespace padding only adds pieces: _prepare collapses it."""
+    size = cfg.judge.max_chunk_chars
+    windows: list[tuple[Chunk, float]] = []
+    for rel, text in whole.items():
+        starts = list(range(0, max(1, len(text) - WHOLE_FILE_OVERLAP_CHARS),
+                            size - WHOLE_FILE_OVERLAP_CHARS))
+        if len(starts) > cfg.judge.max_whole_file_pieces:
+            stats.judge_overflow_files.append(rel)
+            starts = starts[:cfg.judge.max_whole_file_pieces]
+        for number, start in enumerate(starts):
+            end = min(len(text), start + size)
+            best = max((score for chunk, score in scored if chunk.file == rel and (
+                chunk.view != "original" or (chunk.start_char < end and chunk.end_char > start))),
+                default=0.0)
+            windows.append((Chunk(file=rel, view="original", chunk_id=-1 - number,
+                                  text=text[start:end], start_char=start, end_char=end,
+                                  start_line=1 + text.count("\n", 0, start)), best))
+    return windows
+
+
+def _apply_judge(scored: list[tuple[Chunk, float]], findings: list[Finding], judged, budget,
+                 cfg: ReadConfig, stats: ScanStats, started: float,
+                 whole: dict[str, str] | None = None) -> None:
+    """Judge flags first, then the review band, then low-tier windows, and record each outcome."""
+    high = sorted((w for w in scored if w[1] >= cfg.flag_threshold), key=lambda w: -w[1])
+    band = sorted((w for w in scored if cfg.review_low <= w[1] < cfg.flag_threshold),
+                  key=lambda w: -w[1])
+    low = _low_tier(scored, cfg, stats)
+    whole_windows = _whole_file_windows(whole or {}, scored, cfg, stats)
+    unread: set[str] = set(stats.judge_overflow_files)
+    if cfg.judge.max_bulk_calls_per_scan is not None:
+        kept = []
+        for window in low:      # tier 0/1 windows sort first
+            if priority_tier(window[0].file) <= 1:
+                kept.append(window)
+            elif stats.judge_low_planned < cfg.judge.max_bulk_calls_per_scan:
+                kept.append(window)
+                stats.judge_low_planned += 1
+            else:
+                stats.judge_low_unjudged += 1
+                unread.add(window[0].file)
+        low = kept
+    low = whole_windows + low
+    tiers = [("high", w) for w in high] + [("band", w) for w in band] + [("low", w) for w in low]
+    if not tiers:
+        return
+    if cfg.judge.deadline_s is not None and hasattr(judged, "deadline"):
+        # scan() times itself with perf_counter; the judge checks time.monotonic.
+        judged.deadline = time.monotonic() + max(
+            0.0, cfg.judge.deadline_s - (time.perf_counter() - started))
+    results = _judge_all(judged, [(c.text, c.file, s) for _, (c, s) in tiers],
+                         budget, cfg.judge.concurrency, stats)
+    for (tier, (chunk, score)), result in zip(tiers, results):
+        evidence = _evidence(chunk, score)
+        if getattr(result, "answers", None):
+            evidence["judge_addressee"] = result.answers.get("addressee")
+        if result.verdict == "skipped" and "deadline" in (result.error or ""):
+            stats.judge_deadline_hit = True
+        if result.verdict == "unavailable" and result.error:
+            stats.judge_last_error = result.error[:160]
+        if (result.verdict == "mention" and priority_tier(chunk.file) >= 1
+                and getattr(result, "can_clear", True)):
+            # Attack text that is quoted or meant for another program. It cannot stop
+            # the prompt, and an agent is stopped if it opens the file. Agent instruction
+            # files never get this: an agent loads their quotes as instructions.
+            findings.append(_finding(
+                chunk, score, LAYER_MODEL, {**evidence, "judge_mention": True},
+                STATUS_FLAGGED, result.explanation))
+        elif result.verdict in ("attack", "mention"):
+            sev = result.severity if result.severity is not None else score
+            raised = sev > score
+            if tier == "low":
+                stats.judge_low_flagged += 1
+            findings.append(_finding(
+                chunk, max(score, sev),
+                LAYER_JUDGE if raised or tier != "high" else LAYER_MODEL,
+                {**evidence, "judge_confirmed": True}, STATUS_FLAGGED, result.explanation))
+        elif tier == "high":
+            clears = (result.verdict == "benign" and cfg.judge_clears_flags
+                      and getattr(result, "can_clear", True))
+            if clears:
+                stats.judge_cleared += 1
+                findings.append(_finding(
+                    chunk, score, LAYER_MODEL, {**evidence, "cleared_by_judge": True},
+                    STATUS_REVIEWED, result.explanation))
+                continue
+            explanation = None
+            if result.verdict == "benign":
+                explanation = (f"Judge assessed this as benign, flag kept "
+                               f"(model score {score:.2f}): "
+                               + (result.explanation or "no explanation given"))
+            elif result.verdict == "skipped":
+                stats.judge_skipped += 1
+            else:
+                stats.judge_unavailable += 1
+            findings.append(_finding(chunk, score, LAYER_MODEL, evidence, STATUS_FLAGGED,
+                                     explanation))
+        elif tier == "band":
+            if result.verdict == "benign":
+                findings.append(_finding(chunk, score, LAYER_MODEL, evidence, STATUS_REVIEWED,
+                                         result.explanation))
+            elif result.verdict == "skipped":
+                stats.judge_skipped += 1
+                findings.append(_finding(
+                    chunk, score, LAYER_MODEL,
+                    {**evidence, "note": f"not judged: {result.error or 'budget exhausted'}"},
+                    STATUS_REVIEWED))
+            else:
+                stats.judge_unavailable += 1
+                findings.append(_finding(
+                    chunk, score, LAYER_MODEL,
+                    {**evidence, "note": f"not judged: judge unavailable: {result.error}"},
+                    STATUS_REVIEWED, result.explanation))
+        elif result.verdict != "benign":
+            # Below the band nothing was promised: same outcome as having no judge,
+            # unless the budget or the deadline cut off an agent-facing file.
+            stats.judge_low_unjudged += 1
+            if result.verdict == "skipped":
+                unread.add(chunk.file)
+            if result.verdict == "skipped" and priority_tier(chunk.file) <= 1:
+                stats.judge_skipped += 1
+                findings.append(_finding(
+                    chunk, score, LAYER_MODEL,
+                    {**evidence, "note": f"not judged: {result.error or 'budget exhausted'}"},
+                    STATUS_REVIEWED))
+    # The model read these, but the judge did not reach all their candidates, so
+    # the hook must check them again when an agent opens one.
+    stats.files_covered = [f for f in stats.files_covered if f not in unread]
 
 
 def scan(path: str | Path, cfg: ReadConfig | None = None,
          detector: Detector | None = None, judge: Judge | None = None,
-         decoders: list | None = None) -> ScanResult:
+         decoders: list | None = None, *, only_files: set[str] | None = None,
+         walked=None) -> ScanResult:
     """Scan one repository (or any directory / single file) for injections.
 
     With no explicit config, the pinned thresholds from model_config.json
     apply; an explicitly passed ReadConfig is honored exactly as given.
+    ``only_files`` and ``walked`` let read.batches scan part of a repository
+    without walking it again.
     """
     started = time.perf_counter()
     if cfg is None:
@@ -374,9 +606,11 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
     judged = judge if judge is not None else (Judge(cfg.judge) if cfg.judge.enabled else None)
     budget = ScanBudget(cfg.judge.max_calls_per_scan, cfg.judge.max_tokens_per_scan) if judged else None
 
-    walk_result = walk(target, cfg.walker) if target.is_dir() else None
+    walk_result = walked if walked is not None else (
+        walk(target, cfg.walker) if target.is_dir() else None)
     if walk_result is not None:
-        scanned_files = [(f.path, f.rel_path, f.encoding) for f in walk_result.files]
+        scanned_files = [(f.path, f.rel_path, f.encoding) for f in walk_result.files
+                         if only_files is None or f.rel_path in only_files]
     else:
         scanned_files = [(target, target.name, None)]
     stats = ScanStats(model_path=str(det.model_path), thresholds={
@@ -391,12 +625,21 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
         stats.unreadable_files = len(walk_result.unreadable)
         stats.truncated_scan = walk_result.truncated_scan
         stats.files_over_cap = walk_result.files_over_cap
+        stats.agent_files_over_cap = walk_result.agent_files_over_cap
 
     findings: list[Finding] = []
 
     # Pass 1: read text (head + tail), build decoded views, mask blobs, chunk.
     chunks: list[Chunk] = []
+    whole_files: dict[str, str] = {}
     for fpath, rel, encoding in scanned_files:
+        best_effort = cfg.bulk_best_effort and priority_tier(rel) >= 2
+        if (best_effort and cfg.max_chunks_per_scan is not None
+                and len(chunks) >= cfg.max_chunks_per_scan):
+            # The walker sorts tier 0 and 1 first, so only bulk files reach this.
+            stats.best_effort_gaps += 1
+            continue
+        before = (stats.views_dropped, stats.decoded_views_uncovered, len(decoder_errors))
         try:
             ft = _read_file(fpath, cfg.walker.max_file_bytes, cfg.tail_bytes, encoding)
         except OSError as exc:
@@ -409,6 +652,8 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
             stats.files_skipped_binary += 1     # single-file binary sniff rejection
             continue
         stats.files_scanned += 1
+        if cfg.judge_whole_agent_files and priority_tier(rel) == 0 and ft.text.strip():
+            whole_files[rel] = f"{ft.text}\n{ft.tail}" if ft.tail else ft.text
         partial = ft.truncated
         if ft.truncated:
             stats.files_truncated += 1
@@ -523,8 +768,24 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
                 next_id += 1
             chunks.extend(segment_chunks)
             budget_left -= len(segment_chunks)
+        spent = (stats.views_dropped, stats.decoded_views_uncovered,
+                 len(decoder_errors)) != before
         if partial:
             stats.partial_files += 1
+        if partial or spent:
+            # Only an agent instruction file stops the prompt for this: a host may load it
+            # with no tool call to check. Other files are checked when an agent opens them,
+            # which asks if they are still too large to read in full. A huge generated doc
+            # at the repository root stopped the prompt otherwise.
+            if cfg.bulk_best_effort and priority_tier(rel) >= 1:
+                # Recorded as a gap, not as evidence the whole scan fell short.
+                stats.views_dropped, stats.decoded_views_uncovered = before[:2]
+                del decoder_errors[before[2]:]
+                stats.best_effort_gaps += 1
+            elif cfg.bulk_best_effort and partial:
+                stats.agent_files_partial.append(rel)
+        else:
+            stats.files_covered.append(rel)
     stats.decoder_errors = [f"{name}: {msg}" for name, msg in decoder_errors]
 
     # Pass 2: one batched GPU pass over the distinct chunk texts.
@@ -562,110 +823,22 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
     # Pass 3: banding + judge.
     if scores is not None:
         stats.chunks_scored = len(chunks)
-        band: list[tuple[Chunk, float, dict]] = []
-        for chunk, score in zip(chunks, scores):
-            score = float(score)
-            evidence = {
-                "text": _snippet(chunk.text),
-                "line": chunk.start_line,
-                "model_score": round(score, 4),
-            }
-            decoded = chunk.view != "original"
-            decoder = chunk.view if decoded else None
-            if score >= cfg.flag_threshold:
-                findings.append(Finding(
-                    file=chunk.file, chunk_id=chunk.chunk_id, score=score,
-                    layer=LAYER_MODEL, evidence=evidence, status=STATUS_FLAGGED,
-                    decoded=decoded, decoder=decoder,
-                ))
-            elif score >= cfg.review_low and judged is not None:
-                band.append((chunk, score, evidence))
-            elif score >= cfg.review_low:
-                # No judge configured (CI / explicit --no-judge): the uncertain
-                # band still surfaces, as reviewed-not-flagged, so nothing
-                # silently disappears and the ASK tier can act on it — but it
-                # was never judged, so the note keeps the verdict incomplete.
-                findings.append(Finding(
-                    file=chunk.file, chunk_id=chunk.chunk_id, score=score,
-                    layer=LAYER_MODEL,
-                    evidence={**evidence, "note": "not judged: no judge configured"},
-                    status=STATUS_REVIEWED,
-                    decoded=decoded, decoder=decoder,
-                ))
-            # else: below review band, genuinely clean — no finding.
-
-        if band:
-            # Highest scores first: if the budget runs out, the least
-            # suspicious chunks are the ones left unjudged.
-            band.sort(key=lambda item: -item[1])
-            results = _judge_all(judged, [(c.text, c.file, s) for c, s, _ in band],
-                                 budget, cfg.judge.concurrency, stats)
-            for (chunk, score, evidence), result in zip(band, results):
-                decoded = chunk.view != "original"
-                decoder = chunk.view if decoded else None
-                if result.verdict == "attack":
-                    sev = result.severity if result.severity is not None else score
-                    findings.append(Finding(
-                        file=chunk.file, chunk_id=chunk.chunk_id,
-                        score=max(score, sev), layer=LAYER_JUDGE,
-                        evidence=evidence, status=STATUS_FLAGGED,
-                        explanation=result.explanation,
-                        decoded=decoded, decoder=decoder,
-                    ))
-                elif result.verdict in ("benign", "skipped"):
-                    if result.verdict == "skipped":
-                        stats.judge_skipped += 1
-                        evidence = {**evidence,
-                                    "note": "not judged: per-scan judge budget exhausted"}
-                    findings.append(Finding(
-                        file=chunk.file, chunk_id=chunk.chunk_id, score=score,
-                        layer=LAYER_MODEL, evidence=evidence, status=STATUS_REVIEWED,
-                        explanation=result.explanation,
-                        decoded=decoded, decoder=decoder,
-                    ))
-                else:
-                    # Judge unavailable is not an attack and not clean: the
-                    # chunk stays reviewed with a note, and the scan reports
-                    # incomplete evidence instead of flagging a benign repo.
-                    stats.judge_unavailable += 1
-                    findings.append(Finding(
-                        file=chunk.file, chunk_id=chunk.chunk_id, score=score,
-                        layer=LAYER_MODEL,
-                        evidence={**evidence,
-                                  "note": f"not judged: judge unavailable: {result.error}"},
-                        status=STATUS_REVIEWED,
-                        explanation=result.explanation,
-                        decoded=decoded, decoder=decoder,
-                    ))
-
-        # Flagged chunks still owed an explanation get judged last, by score.
+        scored = [(chunk, float(score)) for chunk, score in zip(chunks, scores)]
         if judged is not None:
-            unexplained = [f for f in findings
-                           if f.is_flagged and f.layer == LAYER_MODEL and f.explanation is None]
-            unexplained.sort(key=lambda f: f.score, reverse=True)
-            if unexplained and (budget is None or budget.can_call()):
-                by_key = {(c.file, c.chunk_id): c for c in chunks}
-                items = [(by_key[(f.file, f.chunk_id)].text, f.file, f.score)
-                         for f in unexplained]
-                results = _judge_all(judged, items, budget, cfg.judge.concurrency, stats)
-                for f, result in zip(unexplained, results):
-                    if result.verdict == "attack":
-                        if result.severity is not None and result.severity > f.score:
-                            f.score = result.severity
-                            f.layer = LAYER_JUDGE
-                        f.explanation = result.explanation or f.explanation
-                    elif result.verdict == "benign":
-                        # Escalate-only: the judge never clears a model flag,
-                        # however confident. It records its dissent instead.
-                        f.explanation = (
-                            f"Judge assessed this as benign, flag kept "
-                            f"(model score {f.score:.2f}): "
-                            + (result.explanation or "no explanation given")
-                        )
-                    elif result.verdict == "skipped":
-                        stats.judge_skipped += 1
-                    elif result.verdict == "unavailable":
-                        stats.judge_unavailable += 1
+            _apply_judge(scored, findings, judged, budget, cfg, stats, started, whole_files)
+        else:
+            for chunk, score in scored:
+                evidence = _evidence(chunk, score)
+                if score >= cfg.flag_threshold:
+                    findings.append(_finding(chunk, score, LAYER_MODEL, evidence, STATUS_FLAGGED))
+                elif score >= cfg.review_low:
+                    # No judge configured (CI / explicit --no-judge): the band
+                    # still surfaces so the ASK tier can act on it, but it was
+                    # never judged, so the note keeps the verdict incomplete.
+                    findings.append(_finding(
+                        chunk, score, LAYER_MODEL,
+                        {**evidence, "note": "not judged: no judge configured"},
+                        STATUS_REVIEWED))
 
     elif chunks:   # detector failed: fail closed over everything we could not score
         for chunk in chunks:
@@ -678,10 +851,20 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
     if walk_result is not None and cfg.on_file_error == "flag":
         # lstat-level failures never reached the read loop; flag them too.
         findings.extend(system_finding(rel, f"unreadable file: {reason}")
-                        for rel, reason in walk_result.unreadable)
+                        for rel, reason in walk_result.unreadable
+                        if not (cfg.bulk_best_effort and is_broken_symlink(reason)))
 
     reasons: list[str] = []
-    if stats.truncated_scan:
+    if cfg.bulk_best_effort:
+        stats.best_effort_gaps += stats.files_over_cap - stats.agent_files_over_cap
+        if stats.agent_files_over_cap:
+            reasons.append(f"file cap: {stats.agent_files_over_cap} agent-facing file(s) beyond "
+                           f"max_files={cfg.walker.max_files} not scanned")
+        if stats.agent_files_partial:
+            names = ", ".join(stats.agent_files_partial[:3])
+            reasons.append(f"partial coverage: {len(stats.agent_files_partial)} agent instruction "
+                           f"file(s) only partly scanned ({names})")
+    elif stats.truncated_scan:
         reasons.append(f"file cap: {stats.files_over_cap} file(s) beyond "
                        f"max_files={cfg.walker.max_files} not scanned")
     if stats.views_dropped:
@@ -690,12 +873,18 @@ def scan(path: str | Path, cfg: ReadConfig | None = None,
     if stats.decoded_views_uncovered:
         reasons.append(f"decoded chunk budget: {stats.decoded_views_uncovered} decoded "
                        f"view(s) not fully scored")
+    crowded = [f for f in stats.judge_overflow_files if priority_tier(f) == 0]
+    if crowded:
+        reasons.append(f"judge coverage: {len(crowded)} agent instruction file(s) with more suspicious "
+                       f"windows than the judge reads ({', '.join(crowded[:3])})")
     if stats.judge_skipped:
-        reasons.append(f"judge budget: {stats.judge_skipped} review-band chunk(s) not judged")
+        cause = "judge time limit" if stats.judge_deadline_hit else "judge budget"
+        reasons.append(f"{cause}: {stats.judge_skipped} chunk(s) not judged")
     unjudged = sum(1 for f in findings
                    if f.status == STATUS_REVIEWED and f.evidence.get("note"))
     if unjudged:
-        reasons.append(f"unjudged review-band: {unjudged} review-band chunk(s) not judged")
+        cause = f" ({stats.judge_last_error})" if stats.judge_last_error else ""
+        reasons.append(f"unjudged review-band: {unjudged} review-band chunk(s) not judged{cause}")
     if stats.decoder_errors:
         reasons.append(f"decoder errors: {len(stats.decoder_errors)}")
     if cfg.strict_coverage and stats.partial_files:

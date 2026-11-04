@@ -78,7 +78,7 @@ the observation limits below; it does not establish that the repository is safe.
 The fusion in `run/verdict.py` BLOCKs a READ attack verdict when its top score
 reaches the pinned checkpoint's `hard_high` in `read/model_config.json`
 (0.9965 for v1.7). A READ attack below that score, such as one the judge
-escalated from the review band, is FLAG. If the pin is missing or invalid,
+found in the review band or below it, is FLAG, while the hook blocks it. If the pin is missing or invalid,
 fusion uses the lower cutoff 0.9. Its other rules: any exception, timeout, truncated scan,
 missing component, incomplete READ, or RUN error is at least FLAG;
 step-budget exhaustion and killed background work are errors; a decoy without

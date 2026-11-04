@@ -118,6 +118,17 @@ details summary { cursor: pointer; color: var(--text-secondary); }
     <div id="valtable" class="muted">No epoch has finished yet.</div>
   </section>
 
+  <section class="grid2">
+    <div class="card">
+      <h2>Job chain <span class="muted" style="font-weight:400" id="chainname"></span></h2>
+      <pre id="chain" class="muted" style="white-space:pre-wrap;font-size:12px;margin:0">No chain log yet.</pre>
+    </div>
+    <div class="card">
+      <h2>Held-out attacks caught <span class="muted" style="font-weight:400">(at each model's gate threshold; FF = harmless files flagged)</span></h2>
+      <div id="redteam" class="muted">No red-team reports yet.</div>
+    </div>
+  </section>
+
   <section class="card">
     <h2>Gate: held-out attacks caught at ≤0.5% harmless files flagged <span class="muted" style="font-weight:400">(target ≥96%)</span></h2>
     <div id="gates" class="muted">No gate reports yet.</div>
@@ -142,6 +153,7 @@ const STATUS = {
   idle:     { color: "var(--muted)",    icon: "○", label: "Idle" },
 };
 
+const WATCHER_STALE_MS = 20000;
 let lastData = null, hoverX = null, lastSeen = Date.now(), lastTs = null;
 
 // Report names and log lines come from files on disk: insert them as text.
@@ -294,7 +306,47 @@ function render(d) {
 
   renderLoss(run);
   renderGates(d.gates || [], d.target || { recall: 0.96, fpr: 0.005 });
+  renderExtras(d);
 }
+
+function renderExtras(d) {
+  const c = d.chain;
+  if (c) {
+    $("chainname").textContent = c.name;
+    $("chain").textContent = c.lines.map(l => l.replace(/^\d{4}-\d\d-\d\dT(\d\d:\d\d):\d\d\+\d\d:\d\d /, "$1  ")).join("\n");
+  }
+  const rt = d.redteam || [];
+  if (rt.length) {
+    $("redteam").classList.remove("muted");
+    const sets = Object.entries(d.redteam_sets || {}).filter(([k]) => rt.some(r => r[k]));
+    const cell = (x) => !x ? `<td class="num">–</td>` : `<td class="num">${fmtPct(x.recall)}${x.ff_n ? `<span class="muted"> · ${fmtPct(x.ff)} FF</span>` : ""}</td>`;
+    // Reports for one model can use different cutoffs: never show one as all of them.
+    const thresholdOf = (r) => {
+      const seen = [...new Set(sets.map(([k]) => r[k] && r[k].threshold).filter(t => t != null))];
+      return seen.length > 1 ? "mixed" : fmtNum(seen[0], 4);
+    };
+    $("redteam").innerHTML = `<table><tr><th>Model</th>${sets.map(([, n]) => `<th class="num">${esc(n)}</th>`).join("")}<th class="num">Threshold</th></tr>` +
+      rt.map(r => `<tr><td>${esc(r.name)}</td>${sets.map(([k]) => cell(r[k])).join("")}<td class="num">${thresholdOf(r)}</td></tr>`).join("") + `</table>`;
+  }
+}
+
+// Between watcher updates, keep the clocks moving and estimate the current step.
+setInterval(() => {
+  const d = lastData, run = d && d.run;
+  if (!run || run.status !== "running" || run.stage !== "training") return;
+  if (Date.now() - lastSeen > WATCHER_STALE_MS) return;   // no data, so no estimate either
+  const dt = (Date.now() - lastSeen) / 1000;
+  if (run.elapsed_s != null) $("elapsed").textContent = fmtDur(run.elapsed_s + dt);
+  if (run.eta_s != null) $("eta").textContent = fmtDur(Math.max(0, run.eta_s - dt));
+  const steps = run.steps || [], last = steps[steps.length - 1];
+  if (last && run.rate && run.total_steps) {
+    const est = Math.min(run.total_steps, Math.round(run.rate * (run.elapsed_s + dt)));
+    $("step").textContent = `~${est} / ${run.total_steps}`;
+    $("pct").textContent = fmtPct(est / run.total_steps, 0);
+    $("bar").style.width = (100 * est / run.total_steps) + "%";
+  }
+  if (d.log_mtime) $("runmeta").textContent = `log ${run.log} · last log line ${fmtDur(Date.now() / 1000 - d.log_mtime)} ago (loss is logged every 50 steps)`;
+}, 1000);
 
 function poll() {
   const s = document.createElement("script");
@@ -307,7 +359,7 @@ function poll() {
   };
   s.onerror = () => s.remove();
   document.head.appendChild(s);
-  if (Date.now() - lastSeen > 20000) {
+  if (Date.now() - lastSeen > WATCHER_STALE_MS) {
     $("updated").innerHTML = `<span class="stale">watcher not updating — is read.training.live running?</span>`;
     $("status").innerHTML = `<span class="pill"><span style="color:${STATUS.idle.color}">${STATUS.idle.icon}</span>Unknown</span>`;
   }

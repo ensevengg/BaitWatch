@@ -113,7 +113,9 @@ class Chunker:
             start_tok += stride
         # Always cover the tail: a payload hidden at EOF must not depend on luck.
         tail = windows[-1]
-        if len(windows) > 1 and (tail[1] - tail[0]) < self.window // 4:
+        if len(windows) > 2 and (tail[1] - tail[0]) < self.window // 4:
+            # Two windows stay as they are: moving the only other window up to
+            # the end of the file would leave the start of the file unscored.
             windows[-2] = (len(content) - min(self.window, len(content)), len(content))
             windows.pop()
 

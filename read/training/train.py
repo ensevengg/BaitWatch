@@ -218,10 +218,13 @@ def train(data_dir: Path, base_model: Path, out_dir: Path,
           freeze_embeddings_flag: bool = False, llrd: float = 1.0,
           energy_weight: float = 0.0, energy_margin: float | None = None,
           label_smoothing: float = 0.0, grad_checkpointing: bool = False,
+          stop_after_epoch: int | None = None,
           tracker=None) -> dict:
     from transformers import AutoModelForSequenceClassification, AutoTokenizer, \
         get_linear_schedule_with_warmup
 
+    if stop_after_epoch is not None and stop_after_epoch < 1:
+        raise ValueError(f"stop_after_epoch must be 1 or more, got {stop_after_epoch}")
     set_seed(seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if mode == "head" and lr is None:
@@ -321,7 +324,7 @@ def train(data_dir: Path, base_model: Path, out_dir: Path,
         epoch_dir.mkdir(parents=True, exist_ok=True)
         model.save_pretrained(epoch_dir)
         tokenizer.save_pretrained(epoch_dir)
-        if done:
+        if done or epoch + 1 == stop_after_epoch:
             break
 
     out_dir = out_path
@@ -365,6 +368,13 @@ def train(data_dir: Path, base_model: Path, out_dir: Path,
     return meta
 
 
+def _stop_epoch(value: str) -> int:
+    epoch = int(value)
+    if epoch < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, got {epoch}")
+    return epoch
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="read.training.train")
     parser.add_argument("--data-dir",
@@ -393,6 +403,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--energy-margin", type=float, default=None)
     parser.add_argument("--label-smoothing", type=float, default=0.0)
     parser.add_argument("--grad-checkpointing", action="store_true")
+    parser.add_argument("--stop-after-epoch", type=_stop_epoch, default=None,
+                        help="keep the --epochs learning-rate schedule but stop after this epoch")
     parser.add_argument("--mlflow-uri", default=None,
                         help="MLflow tracking server (default: $MLFLOW_TRACKING_URI; "
                              "unset = no MLflow logging)")
@@ -409,7 +421,8 @@ def main(argv: list[str] | None = None) -> int:
                      freeze_embeddings_flag=args.freeze_embeddings, llrd=args.llrd,
                      energy_weight=args.energy_weight, energy_margin=args.energy_margin,
                      label_smoothing=args.label_smoothing,
-                     grad_checkpointing=args.grad_checkpointing, tracker=tracker)
+                     grad_checkpointing=args.grad_checkpointing,
+                     stop_after_epoch=args.stop_after_epoch, tracker=tracker)
     except BaseException:
         if tracker:
             tracker.finish(ok=False)

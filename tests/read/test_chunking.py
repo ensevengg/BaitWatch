@@ -125,3 +125,18 @@ def test_line_offset_and_unknown_lines(tokenizer):
     assert chunks[0].start_line == 101
     chunks, _ = chunker.chunk("a\nb\n", "f.txt", line_offset=None)
     assert chunks[0].start_line is None
+
+
+@pytest.mark.parametrize("extra", [1, 20, 47, 48, 60])
+def test_start_of_a_file_just_over_one_window_is_scored(tokenizer, extra):
+    """449-495 tokens: moving the only other window to the end left the start unscored."""
+    from read.chunking import Chunker
+
+    chunker = Chunker(tokenizer, window_tokens=448, overlap_tokens=64)
+    text = "START " + " ".join(f"word{i}" for i in range(4000))
+    ids = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+    cut = ids["offset_mapping"][448 + extra - 1][1]
+    chunks, uncovered = chunker.chunk(text[:cut], "f")
+    assert uncovered == 0
+    assert chunks[0].text.startswith("START")
+    assert chunks[-1].end_char == cut

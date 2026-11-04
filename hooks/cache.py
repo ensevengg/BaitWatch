@@ -36,9 +36,12 @@ __all__ = [
 
 DEFAULT_TTL = 600.0
 DEFAULT_APPROVAL_TTL = 900.0
-MAX_FINGERPRINT_FILES = 4_000
-MAX_FINGERPRINT_DIRS = 4_000
+MAX_FINGERPRINT_FILES = 100_000
+MAX_FINGERPRINT_DIRS = 20_000
+# Content hashed per tree. Past this, and for files over the per-file limit,
+# path, size and mtime stand in, except agent-facing files, which are always read.
 MAX_FINGERPRINT_BYTES = 8 * 1024 * 1024
+MAX_FINGERPRINT_FILE_BYTES = 256 * 1024
 # Mirrors read.config.WalkerConfig.excluded_dirs: a directory READ never scans
 # must not be fingerprinted either, so the key changes only when the scan can.
 _SKIP_DIRS = {
@@ -59,6 +62,9 @@ _SKIP_DIRS = {
     ".parcel-cache",
     "target",
 }
+
+
+TRUST_FILE_NAME = "trusted-files.json"
 
 
 def default_cache_path() -> Path:
@@ -154,7 +160,13 @@ def repo_fingerprint(repo: str | Path, *, exclude: list[str | Path] | None = Non
 
     Returns ``None`` when the tree is too large or unreadable, which the caller
     must treat as "cannot confirm unchanged": rescan, never reuse ALLOW.
+    Without this limit on hashing, every repository past the byte budget was
+    rescanned on every prompt and tool call.
     """
+    from hooks.lightread import load
+
+    priority_tier = load("tiers").priority_tier
+
     root = Path(repo)
     if not root.is_dir():
         return None
@@ -179,10 +191,12 @@ def repo_fingerprint(repo: str | Path, *, exclude: list[str | Path] | None = Non
             if not stat.S_ISREG(info.st_mode):
                 continue
             size = info.st_size
-            total += size
-            if total > MAX_FINGERPRINT_BYTES:
-                return None
             digest.update(f"{rel}\0{size}\0{info.st_mtime_ns}\0".encode())
+            if priority_tier(rel) > 1 and (
+                size > MAX_FINGERPRINT_FILE_BYTES or total + size > MAX_FINGERPRINT_BYTES
+            ):
+                continue
+            total += size
             with open(resolved, "rb") as handle:
                 while chunk := handle.read(1024 * 1024):
                     digest.update(chunk)
@@ -200,10 +214,25 @@ def scanner_signature() -> str:
         "BAITWATCH_MODEL_PATH",
         "BAITWATCH_MODEL_DIR",
         "BAITWATCH_ON_ERROR",
+        "BAITWATCH_JUDGE_MODEL",
+        "BAITWATCH_JUDGE_BASE_URL",
+        "BAITWATCH_FALLBACK_MODEL",
+        "BAITWATCH_FALLBACK_BASE_URL",
     ):
         digest.update(f"{key}={os.environ.get(key, '')}\0".encode())
     root = Path(__file__).resolve().parents[1]
-    for rel in ("read/model_config.json", "attacks/decoders.py", "read/decoders.py"):
+    for rel in (
+        "read/model_config.json",
+        "read/config.py",
+        "attacks/decoders.py",
+        "read/decoders.py",
+        "read/scan.py",
+        "read/batches.py",
+        "read/walk.py",
+        "read/tiers.py",
+        "read/rules.py",
+        "read/judge.py",
+    ):
         path = root / rel
         try:
             stat = path.stat()
@@ -251,6 +280,10 @@ class CachedScan:
     files: list[str]
     model: str
     created: float
+    covered: list[str] | None = None  # files read in full; None: not recorded
+    detail: str = ""  # what was flagged and why, for the person at Gate A
+    notice: str = ""  # what the scan did and did not check
+    cleared: list[str] | None = None  # files with a model flag the judge cleared
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -288,13 +321,21 @@ class ScanCache:
             reason = str(entry.get("reason", ""))
             files = [str(item) for item in entry.get("files", [])]
             model = str(entry.get("model", ""))
+            covered = entry.get("covered")
+            covered = [str(item) for item in covered] if isinstance(covered, list) else None
+            detail = str(entry.get("detail", ""))
+            notice = str(entry.get("notice", ""))
         except (KeyError, TypeError, ValueError):
             return None
         if verdict not in ("allow", "ask", "block"):
             return None
         if self.ttl >= 0 and time.time() - created > self.ttl:
             return None
-        return CachedScan(verdict, score, reason, files, model, created)
+        cleared = entry.get("cleared")
+        cleared = [str(item) for item in cleared] if isinstance(cleared, list) else None
+        return CachedScan(
+            verdict, score, reason, files, model, created, covered, detail, notice, cleared
+        )
 
     def set(self, key: str, scan: CachedScan) -> None:
         data = self._load()
@@ -356,7 +397,9 @@ class ApprovalStore:
     def _key(self, root: Path, fingerprint: str) -> str:
         return f"{root}|{fingerprint}"
 
-    def approve(self, repo: str | Path, minutes: float | None = None) -> str:
+    def approve(
+        self, repo: str | Path, minutes: float | None = None, *, allow_block: bool = False
+    ) -> str:
         root = Path(repo).resolve()
         fingerprint = repo_fingerprint(root, exclude=[self.path])
         if fingerprint is None:
@@ -369,17 +412,19 @@ class ApprovalStore:
             "fingerprint": fingerprint,
             "created": now,
             "expires": now + seconds,
+            "allow_block": allow_block,
         }
         self._write(data)
         return fingerprint
 
-    def is_approved(self, repo: str | Path) -> bool:
+    def is_approved(self, repo: str | Path, *, block: bool = False) -> bool:
+        """``block``: the approval must also have been given for a BLOCK verdict."""
         root = Path(repo).resolve()
         fingerprint = repo_fingerprint(root, exclude=[self.path])
         if fingerprint is None:
             return False
         entry = self._load().get(self._key(root, fingerprint))
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or (block and entry.get("allow_block") is not True):
             return False
         try:
             return float(entry.get("expires", 0)) > time.time()
@@ -393,3 +438,106 @@ class ApprovalStore:
         data = {key: value for key, value in data.items() if not key.startswith(f"{root}|")}
         self._write(data)
         return before - len(data)
+
+
+class TrustStore:
+    """Flagged files the person accepted, until their content changes.
+
+    It lives in the user's own folder, never in the repository, because the
+    repository is what is being checked. A scan records what it flagged as pending,
+    so that ``hooks approve`` accepts what the person was shown without scanning again.
+    """
+
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = (
+            Path(path) if path is not None else default_approval_path().with_name(TRUST_FILE_NAME)
+        )
+        self._digests: dict[Path, str | None] = {}
+
+    def _load(self) -> dict:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write(self, data: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + f".{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+
+    def _digest(self, path: Path) -> str | None:
+        if path not in self._digests:
+            digest = hashlib.sha256()
+            try:
+                with open(path, "rb") as handle:
+                    while block := handle.read(1024 * 1024):
+                        digest.update(block)
+                self._digests[path] = digest.hexdigest()
+            except OSError:
+                self._digests[path] = None
+        return self._digests[path]
+
+    def is_trusted(self, repo: str | Path, rel: str) -> bool:
+        root = Path(repo).resolve()
+        stored = self._load().get("trusted", {}).get(str(root), {}).get(rel)
+        return stored is not None and stored == self._digest(root / rel)
+
+    def tag(self, repo: str | Path) -> str:
+        """Changes when this repository's accepted files do, so a saved verdict is not reused."""
+        entries = self._load().get("trusted", {}).get(str(Path(repo).resolve()), {})
+        if not entries:
+            return ""
+        return hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()[:12]
+
+    def set_pending(self, repo: str | Path, verdict: str, files: list[str]) -> None:
+        root = Path(repo).resolve()
+        data = self._load()
+        pending = data.setdefault("pending", {})
+        if files:
+            pending[str(root)] = {
+                "verdict": verdict,
+                "files": {rel: self._digest(root / rel) for rel in sorted(set(files))},
+            }
+        elif str(root) not in pending:
+            return
+        else:
+            del pending[str(root)]
+        self._write(data)
+
+    def accept_pending(self, repo: str | Path, *, allow_block: bool = False) -> tuple[list, list]:
+        """(accepted, refused). A blocked file needs ``allow_block``; a file that changed
+        since it was flagged was not what the person read, so it is refused."""
+        root = Path(repo).resolve()
+        data = self._load()
+        entry = data.get("pending", {}).get(str(root))
+        if not isinstance(entry, dict):
+            return [], []
+        files = entry.get("files", {})
+        if entry.get("verdict") == "block" and not allow_block:
+            return [], sorted(files)
+        accepted: list[str] = []
+        refused: list[str] = []
+        known = data.setdefault("trusted", {}).setdefault(str(root), {})
+        for rel, digest in sorted(files.items()):
+            if digest is not None and digest == self._digest(root / rel):
+                known[rel] = digest
+                accepted.append(rel)
+            else:
+                refused.append(rel)
+        del data["pending"][str(root)]
+        self._write(data)
+        return accepted, refused
+
+    def revoke(self, repo: str | Path) -> int:
+        root = str(Path(repo).resolve())
+        data = self._load()
+        removed = len(data.get("trusted", {}).pop(root, {}))
+        data.get("pending", {}).pop(root, None)
+        self._write(data)
+        return removed

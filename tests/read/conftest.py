@@ -16,6 +16,11 @@ import pytest
 os.environ["BAITWATCH_SCORE_CACHE"] = str(
     Path(tempfile.mkdtemp(prefix="bw-test-cache-")) / "scores.sqlite")
 
+os.environ["BAITWATCH_JUDGE_CACHE"] = str(
+    Path(tempfile.mkdtemp(prefix="bw-test-cache-")) / "judge.sqlite")
+os.environ["BAITWATCH_FILE_CACHE"] = str(
+    Path(tempfile.mkdtemp(prefix="bw-test-cache-")) / "files.sqlite")
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -145,3 +150,11 @@ def reload_read_modules():
         if name == "read" or name.startswith("read."):
             del sys.modules[name]
     return importlib.import_module("read")
+
+
+@pytest.fixture(autouse=True)
+def no_retry_waits(monkeypatch):
+    """Judge retries back off for seconds, which real outages need and tests do not."""
+    from read.judge import Judge
+
+    monkeypatch.setattr(Judge, "RETRY_WAIT_S", 0.0)

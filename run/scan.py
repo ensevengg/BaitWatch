@@ -56,7 +56,15 @@ def _outcome_from(result, *, skipped_dirs_covered: bool = False) -> ReadOutcome:
         status=State.ERROR if system else State.COMPLETE,
         verdict=verdict,
         max_score=max((finding.score for finding in flagged), default=0.0),
-        reason=f"{gaps} coverage gap(s): {reasons}" if reasons else "",
+        reason=(
+            f"{gaps} coverage gap(s): {reasons}"
+            if reasons
+            else (
+                f"the judge cleared {result.stats.judge_cleared} model flag(s)"
+                if result.stats.judge_cleared
+                else ""
+            )
+        ),
     )
 
 

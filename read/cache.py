@@ -14,6 +14,7 @@ plain inference. Nothing about a verdict depends on it.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 import threading
@@ -22,6 +23,14 @@ from pathlib import Path
 DEFAULT_CACHE_PATH = Path(os.environ.get(
     "BAITWATCH_SCORE_CACHE",
     str(Path.home() / ".cache" / "baitwatch" / "scores.sqlite")))
+
+DEFAULT_JUDGE_CACHE_PATH = Path(os.environ.get(
+    "BAITWATCH_JUDGE_CACHE",
+    str(Path.home() / ".cache" / "baitwatch" / "judge.sqlite")))
+
+DEFAULT_FILE_CACHE_PATH = Path(os.environ.get(
+    "BAITWATCH_FILE_CACHE",
+    str(Path.home() / ".cache" / "baitwatch" / "files.sqlite")))
 
 _BATCH = 500
 
@@ -104,3 +113,69 @@ class ScoreCache:
                 self._db.executemany("INSERT OR REPLACE INTO scores (k, s) VALUES (?, ?)", rows)
         except sqlite3.Error:
             self._disable()
+
+
+class JudgeCache:
+    """Persistent judge verdicts, so a repeat scan pays for no call.
+
+    As with the score cache, any SQLite error disables it and the scan carries on.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._lock = threading.Lock()
+        self._db: sqlite3.Connection | None = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            db = sqlite3.connect(str(self.path), timeout=2.0, check_same_thread=False)
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("CREATE TABLE IF NOT EXISTS verdicts (k BLOB PRIMARY KEY, v TEXT) WITHOUT ROWID")
+            self._db = db
+        except (sqlite3.Error, OSError):
+            self._db = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._db is not None
+
+    @staticmethod
+    def _key(key: str) -> bytes:
+        return hashlib.blake2b(key.encode("utf-8", errors="surrogatepass"), digest_size=16).digest()
+
+    def _disable(self) -> None:
+        try:
+            if self._db is not None:
+                self._db.close()
+        except sqlite3.Error:
+            pass
+        self._db = None
+
+    def get(self, key: str) -> dict | None:
+        if self._db is None:
+            return None
+        try:
+            with self._lock:
+                row = self._db.execute("SELECT v FROM verdicts WHERE k = ?",
+                                       (self._key(key),)).fetchone()
+            return json.loads(row[0]) if row else None
+        except (sqlite3.Error, ValueError):
+            self._disable()
+            return None
+
+    def put(self, key: str, value) -> None:
+        if self._db is None:
+            return
+        try:
+            with self._lock, self._db:
+                self._db.execute("INSERT OR REPLACE INTO verdicts (k, v) VALUES (?, ?)",
+                                 (self._key(key), json.dumps(value)))
+        except sqlite3.Error:
+            self._disable()
+
+
+class FileResultCache(JudgeCache):
+    """Findings per exact file content, so a repeat scan reads only changed files."""
+
+    def get(self, key: str) -> list | None:
+        stored = super().get(key)
+        return stored if isinstance(stored, list) else None

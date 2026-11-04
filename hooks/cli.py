@@ -23,8 +23,9 @@ import threading
 import time
 from pathlib import Path
 
-from hooks.cache import ApprovalStore, ScanCache, default_cache_path
+from hooks.cache import ApprovalStore, ScanCache, TrustStore, default_cache_path
 from hooks.guard import (
+    DEFAULT_HOOK_DEADLINE_S,
     Decision,
     RepoScan,
     error_decision,
@@ -34,11 +35,18 @@ from hooks.guard import (
     resolve_project_root,
     run_gate,
 )
-from hooks.install import detect_claude_version, hook_command, install, settings_path, uninstall
+from hooks.install import (
+    detect_claude_version,
+    hook_command,
+    install,
+    settings_path,
+    stale_install_warnings,
+    uninstall,
+)
 
 __all__ = ["approve_command", "emit", "main", "read_payload", "selftest"]
 
-DEFAULT_DEADLINE_S = 20.0
+DEFAULT_DEADLINE_S = DEFAULT_HOOK_DEADLINE_S
 
 
 def _deadline_seconds() -> float:
@@ -89,6 +97,16 @@ _USER_HOOK_ENV_KEYS = (
     "BAITWATCH_MODEL_PATH",
     "BAITWATCH_MODEL_DIR",
     "BAITWATCH_HOOK_DEADLINE",
+    # The judge can clear a flag, so a repository must not be able to choose it.
+    "BAITWATCH_HOOK_JUDGE",
+    "BAITWATCH_JUDGE_BASE_URL",
+    "BAITWATCH_JUDGE_MODEL",
+    "BAITWATCH_FALLBACK_BASE_URL",
+    "BAITWATCH_FALLBACK_MODEL",
+    "BAITWATCH_JUDGE_USD_CAP",
+    "BAITWATCH_JUDGE_CACHE",
+    "BAITWATCH_FILE_CACHE",
+    "BAITWATCH_SPEND_LEDGER",
 )
 
 
@@ -168,19 +186,28 @@ def emit(decision: Decision, host: str = "claude") -> None:
     gate = decision.gate.upper()
     if gate == "A":
         if decision.verdict == "block":
-            payload = {"decision": "block", "reason": decision.reason}
+            reason = decision.reason
+            if decision.detail:
+                reason = f"{reason}\n{decision.detail}"
+            if decision.source in ("repo", "cache"):
+                reason = (
+                    f"{reason}\nIf you have read this and trust the repository, run "
+                    f"`{approve_command()} --allow-block` and resubmit the prompt."
+                )
+            payload = {"decision": "block", "reason": reason}
         elif decision.verdict == "ask":
             # Claude Code's UserPromptSubmit contract has no ASK: context plus
             # exit 0 would run the prompt immediately.  Turn the ask into a
             # block that tells the user exactly how to approve and retry.
             reason = (
                 f"BaitWatch needs approval before this prompt runs: {decision.reason}. "
-                f"Inspect the repository, then run `{approve_command()}` "
-                "and resubmit the prompt."
+                + (f"{decision.detail} " if decision.detail else "")
+                + f"Inspect the repository, then run `{approve_command()}` "
+                "and resubmit the prompt. Flagged files stay accepted until they change."
             )
             payload = {"decision": "block", "reason": reason}
         else:
-            payload = {}
+            payload = {"systemMessage": decision.notice} if decision.notice else {}
     else:
         if decision.verdict in ("block", "ask"):
             payload = {
@@ -379,6 +406,11 @@ def _install_command(args: argparse.Namespace) -> int:
     print(
         f"{verb} {report.path} ({report.action}: {report.added} added, {report.removed} replaced)"
     )
+    if not args.uninstall:
+        print(
+            "With META_API_KEY set, suspicious text and agent instruction files from scanned "
+            "repositories are sent to Meta's API. See docs/HOOKS.md."
+        )
     return 0
 
 
@@ -405,16 +437,26 @@ def _approve_command(args: argparse.Namespace) -> int:
     # too, or a custom approval path would leave the block in place.
     with _applied_user_hook_env():
         store = ApprovalStore()
+        trust = TrustStore()
         if args.revoke:
             removed = store.revoke(root)
-            print(f"revoked {removed} approval(s) for {root}")
+            accepted = trust.revoke(root)
+            print(f"revoked {removed} approval(s) and {accepted} accepted file(s) for {root}")
             return 0
         try:
-            fingerprint = store.approve(root, args.minutes)
+            fingerprint = store.approve(root, args.minutes, allow_block=args.allow_block)
         except (OSError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
+        accepted, refused = trust.accept_pending(root, allow_block=args.allow_block)
     print(f"approved {root} for {args.minutes:g} minute(s); fingerprint {fingerprint[:16]}...")
+    if accepted:
+        print(f"accepted until they change: {', '.join(accepted)}")
+    if refused:
+        print(
+            f"not accepted: {', '.join(refused)} (changed since it was flagged, or "
+            "blocked, which needs --allow-block)"
+        )
     return 0
 
 
@@ -427,6 +469,8 @@ def _status() -> int:
     print(f"inline_judge: {os.environ.get('BAITWATCH_HOOK_JUDGE', '0')}")
     print(f"approvals: {ApprovalStore().path}")
     print(f"claude user settings: {settings_path('user')}")
+    for warning in stale_install_warnings():
+        print(f"warning: {warning}")
     print(f"CLI: {hook_command('a')} | {hook_command('b')}")
     return 0
 
@@ -468,6 +512,11 @@ def main(argv: list[str] | None = None) -> int:
     approve_parser.add_argument("--repo", type=Path, default=None)
     approve_parser.add_argument("--minutes", type=float, default=15.0)
     approve_parser.add_argument("--revoke", action="store_true")
+    approve_parser.add_argument(
+        "--allow-block",
+        action="store_true",
+        help="also continue past a BLOCK for this exact tree; read the reason first",
+    )
 
     cache_parser = sub.add_parser("cache")
     cache_parser.add_argument("cache_action", choices=("path", "clear"))

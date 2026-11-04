@@ -58,7 +58,7 @@ def test_quick_preset_uses_pinned_thresholds(monkeypatch, tmp_path):
     (tmp_path / "model_config.json").write_text(json.dumps(pin))
     cfg = rc.ReadConfig.quick()
     assert (cfg.flag_threshold, cfg.review_low) == (0.85, 0.521)
-    assert cfg.walker.max_files == 400
+    assert cfg.walker.max_files == 50_000
 
 
 def test_judge_defaults_match_the_live_meta_api(monkeypatch):
@@ -69,6 +69,12 @@ def test_judge_defaults_match_the_live_meta_api(monkeypatch):
     muse = rc.JudgeConfig().endpoints[0]
     assert muse["base_url"] == "https://api.meta.ai/v1"
     assert muse["model"] == "muse-spark-1.3"
+
+
+def test_quick_preset_keeps_full_scan_coverage_per_file():
+    full, quick = rc.ReadConfig(), rc.ReadConfig.quick()
+    assert quick.max_chunks_per_file >= full.max_chunks_per_file
+    assert quick.max_file_tokens >= full.max_file_tokens
 
 
 def test_quick_preset_disables_judge():

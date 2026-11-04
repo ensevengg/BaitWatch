@@ -98,22 +98,46 @@ class JudgeConfig:
     # Env overrides are resolved at construction (not import) so runtime
     # configuration actually takes effect.
     endpoints: tuple[dict, ...] | None = None
-    timeout_s: float = 10.0                # per judge call, roadmap D5
-    concurrency: int = 4                   # parallel judge calls per scan
-    max_calls_per_scan: int = 12
-    max_tokens_per_scan: int = 16_000      # judge input+output token budget per scan
-    max_chunk_chars: int = 4_000           # never send more than this to the judge
-    usd_cap: float = 120.0                 # hard cap per API key, enforced in code
+    timeout_s: float = 30.0                # per judge call; p95 at low effort is about 11 s
+    concurrency: int = 8                   # parallel judge calls per scan
+    max_calls_per_scan: int = 60
+    # Low-score tier 2/3 windows stop after this many, so they cannot take budget or
+    # time from agent-facing files and flags. None: no separate limit.
+    max_bulk_calls_per_scan: int | None = None
+    max_tokens_per_scan: int = 200_000     # judge input+output token budget per scan
+    # Reasoning tokens count against max_tokens, so a small limit returns an
+    # empty answer (300 was used up by reasoning on every call). At 2,000 about 0.6% of
+    # answers were still cut off, mostly on attacks, which take longer to reason about.
+    max_output_tokens: int = 4_000
+    max_windows_per_file: int = 3          # low-score windows judged per tier 2/3 file
+    # The same for tier 0/1 files. More rule-matching windows than this in one
+    # such file makes the verdict incomplete: at most 14 in 34 public repos.
+    max_windows_per_agent_file: int = 16
+    # Seconds from scan start after which no new judge call starts (None: no limit).
+    deadline_s: float | None = None
+    # Persistent verdict cache (read/cache.py). None path = BAITWATCH_JUDGE_CACHE
+    # or ~/.cache/baitwatch/judge.sqlite.
+    cache: bool = True
+    cache_path: Path | None = None
+    # Never send more than this to the judge at once. About 4,000 tokens, or half a
+    # cent at standard prices. 4,000 cut 43% of public agent files in the middle.
+    max_chunk_chars: int = 16_000
+    # A longer agent file is read in overlapping pieces of that size. More pieces than
+    # this leaves the verdict incomplete rather than unread text unreported.
+    max_whole_file_pieces: int = 24
+    # Hard cap per API key, enforced in code.
+    usd_cap: float = field(
+        default_factory=lambda: float(os.environ.get("BAITWATCH_JUDGE_USD_CAP", "120")))
     ledger_path: Path = field(
         default_factory=lambda: Path(
             os.environ.get("BAITWATCH_SPEND_LEDGER",
                            str(Path.home() / ".local/state/baitwatch/spend.json"))
         )
     )
-    # Rough per-1k-token prices used only for the local spend estimate; the real
-    # bill is Meta's, so the cap is deliberately conservative.
-    usd_per_1k_input: float = 0.02
-    usd_per_1k_output: float = 0.08
+    # Listed Muse Spark standard prices, used only for the local spend estimate;
+    # the real bill is Meta's. Cached input and the Contributor tier cost less.
+    usd_per_1k_input: float = 0.00125
+    usd_per_1k_output: float = 0.00425
 
     def __post_init__(self) -> None:
         if self.endpoints is None:
@@ -124,6 +148,9 @@ class JudgeConfig:
                                                "https://api.meta.ai/v1"),
                     "model": os.environ.get("BAITWATCH_JUDGE_MODEL", "muse-spark-1.3"),
                     "api_key_env": "META_API_KEY",
+                    "reasoning_effort": "low",
+                    # Only this endpoint was measured well enough to clear a flag.
+                    "can_clear": True,
                 },
                 {
                     "name": "llama32_3b_local",
@@ -163,6 +190,17 @@ class ReadConfig:
     score_cache_path: Path | None = None
     on_file_error: str = "flag"            # "flag" (fail-closed) or "skip"
     enable_decoders: bool = True
+    # Hook preset: tiers 2 and 3 (see read/tiers.py) are best effort, so gaps in
+    # them no longer make the verdict incomplete. Those files are left out of
+    # stats.files_covered, and the hook scans them when an agent opens one.
+    bulk_best_effort: bool = False
+    max_chunks_per_scan: int | None = None  # tier 2/3 files stop being chunked past this
+    judge_floor: float = 0.05              # below review_low, still judged from this score up
+    judge_clears_flags: bool = True        # a "benign" verdict may remove a model flag
+    # Also judge each tier 0 file whole. The judge then sees an attack split across
+    # windows or scored low by the model: on held-out sets this added up to 11 points of
+    # recall and raised 3 alarms on 550 public agent files.
+    judge_whole_agent_files: bool = False
     judge: JudgeConfig = field(default_factory=JudgeConfig)
     walker: WalkerConfig = field(default_factory=WalkerConfig)
 
@@ -171,18 +209,30 @@ class ReadConfig:
 
     @classmethod
     def quick(cls) -> "ReadConfig":
-        """Inline-hook preset: agent-config files first, tight caps.
+        """Inline-hook preset: agent-config files first, capped file count.
 
         The walker's priority ordering guarantees AGENTS.md/CLAUDE.md/README
         and .claude settings are scanned before anything else, so the highest
-       -risk files are always covered within the budget; everything past the
-        caps is reported via stats.truncated_scan / views_dropped and treated
-        as incomplete evidence by the verdict engine.
+       -risk files are always covered within the budget. A repo over the file
+        cap is reported via stats.truncated_scan and treated as incomplete.
+
+        Per-file coverage matches a full scan: a tighter chunk cap let a
+        payload in the middle of a long file read as clean. The middle of a
+        file over max_file_tokens is still skipped, and only strict_coverage
+        makes that incomplete.
         """
         cfg = cls()
-        cfg.walker.max_files = 400
-        cfg.max_chunks_per_file = 8
-        cfg.max_file_tokens = 8_000
+        cfg.walker.max_files = 50_000
+        # Enough for a long README or workflow: a partly scanned agent-facing file
+        # makes the verdict incomplete.
+        cfg.max_file_tokens = 60_000
+        cfg.max_chunks_per_file = 160
+        cfg.bulk_best_effort = True
+        cfg.judge_whole_agent_files = True
+        # read.batches limits low-score judging; flags and the band are always judged.
+        cfg.judge.concurrency = 16
+        cfg.judge.max_calls_per_scan = 5_000
+        cfg.judge.max_tokens_per_scan = 20_000_000
         # The inline hook must not block on judge round-trips: detector-only.
         # Review-band chunks it surfaces are reported as unjudged/incomplete
         # (see read/scan.py), never silently clean.

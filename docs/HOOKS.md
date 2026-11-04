@@ -54,7 +54,8 @@ The generated hook entries look like this:
           {
             "type": "command",
             "command": "\"/usr/bin/python3\" -I -m hooks gate-a --user-config",
-            "timeout": 30,
+            "timeout": 630,
+            "statusMessage": "BaitWatch is checking this repository",
             "onFailure": "block"
           }
         ]
@@ -62,12 +63,13 @@ The generated hook entries look like this:
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|WebFetch|Read",
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit|WebFetch|Read|Grep",
         "hooks": [
           {
             "type": "command",
             "command": "\"/usr/bin/python3\" -I -m hooks gate-b --user-config",
-            "timeout": 30,
+            "timeout": 630,
+            "statusMessage": "BaitWatch is checking this repository",
             "onFailure": "block"
           }
         ]
@@ -178,26 +180,105 @@ cannot be parsed completely is unsafe and blocked.
 The static policy is intentionally narrow. It is not a general shell
 sandbox; it targets the actions the generated attacks need to succeed.
 
+## Coverage
+
+Gate A reads the whole repository before the first prompt runs, one batch after
+another, because security comes before speed (`read/batches.py`):
+
+| Batch | Files | If not fully scanned |
+|---|---|---|
+| 1 | tier 0 and 1: agent instructions and configuration, shallow READMEs and manifests, workflows, other root-level docs and scripts | ask |
+| 2 | tier 2: other docs, scripts and `.github/` files | checked on open |
+| 3 | tier 3: source code | checked on open |
+| none | generated files: lockfiles, snapshots, bundles, data, vendored code | checked on open |
+
+- Most repositories finish in under 3 minutes of model time; the largest we tried
+  take about 9. A status message shows while it runs.
+- Each batch saves its work. A scan that runs out of time asks, and says how many files
+  it did not reach. It never allows. Submitting the prompt again resumes where it stopped, and
+  a later scan reads only the files that changed.
+- A confirmed attack stops the scan: the verdict is decided.
+- The judge reads every agent instruction file in full, in overlapping pieces of up to
+  16,000 characters, and every flag and suspicious
+  window in agent-facing files. Low-score windows in other files stop after 150 per
+  scan, and those files are checked on open.
+
+When an agent opens a file Gate A did not fully cover, by the model or by the judge,
+with `Read`, `Grep` on that file, or with `cat`, `head`, `tail`, `less`, `more`, `bat`,
+`nl`, `sed` or `awk`, Gate B scans it first. That includes excluded directories such
+as `dist/` and `node_modules/`. Source files load the model only if they look
+agent-directed, which sees about 91% of real attack windows.
+
+Known limits:
+
+- **An allowed repository is not proven safe.** Real malware skills are still missed
+  about 29% of the time.
+- Other ways of reading a file (`grep -r`, the `Grep` tool on a whole directory,
+  `python -c`, a build script) are not checked on open.
+- Hosts that auto-load instruction files from excluded directories, without a
+  tool call, are not covered.
+- Tool output and fetched pages are not scanned.
+- Edits that keep a large non-agent file's size and modification time do not
+  invalidate the cached verdict. Agent-facing files are compared by content.
+
+## Verdicts and overrides
+
+A finding counts as two signals when the judge confirms a window the model also scored
+high. All 17 attack repositories we test have one; the judge alone mostly reacts to
+ordinary install instructions that the model scores near zero. A block takes more: the
+model has to have flagged the window by itself, at its full threshold.
+
+| Finding | Result |
+|---|---|
+| The judge confirms text aimed at the agent, in a window the model flagged by itself, in an agent-facing file | **block** |
+| BaitWatch itself failed | **block** |
+| Other two-signal findings, anywhere | ask |
+| Judge alone in an agent-facing file | ask |
+| Low score, incomplete evidence, or no judge to confirm a model flag | ask |
+| Judge alone in any other file | prompt runs, the person is told, the agent is stopped if it opens the file |
+
+Without a judge the model flagged 16 of 29 normal repositories, so it asks rather than
+blocks. Set `META_API_KEY` to turn the judge on. The person sees the file, line and
+the judge's reading; the agent does not.
+
+- `python -m hooks approve` continues past an ask. `python -m hooks approve
+  --allow-block` continues past a block. Flagged files stay accepted until their content
+  changes, and BaitWatch still reads the rest of the repository. The list lives in your own
+  cache folder, so a repository cannot add to it, and `--revoke` clears it. Other gaps,
+  such as a scan that ran out of time, are approved for 15 minutes by default and only for the exact
+  tree approved. Dangerous actions are still refused, and prompt risk cannot be approved.
+- Agents cannot approve for themselves: a command that runs `hooks approve` or names
+  these files is refused. Approve in your own terminal.
+
 ## Fail-closed matrix
 
 | Situation | Default | Override |
 |---|---|---|
 | scanner raises / model missing | block | `BAITWATCH_ON_ERROR=ask` |
 | malformed stdin JSON | block | `BAITWATCH_ON_ERROR=ask` |
-| internal deadline expires (20 s) | block | `BAITWATCH_HOOK_DEADLINE` |
+| internal deadline expires (600 s) | block | `BAITWATCH_HOOK_DEADLINE` |
 | project root cannot be resolved | block (Gate A) / ask (Gate B) | — |
 | prompt longer than 65 536 chars | ask | shorten it |
 | prompt decoding exceeds its budget | ask | shorten it |
 | READ verdict `incomplete` | ask | — |
-| READ verdict `attack` | block | — |
+| agent opens an unscanned file: model and judge both flag it | block | `hooks approve --allow-block` |
+| agent opens an unscanned file: only one of them flags it | ask | — |
+| agent opens an unscanned tier 0-2 file too large to check in full | ask | — |
+| READ verdict `attack`, the judge confirms a model flag in an agent-facing file | block | `hooks approve --allow-block` |
+| READ verdict `attack`, anything less certain | ask | `hooks approve` |
+| Attack text the judge reads as quoted or meant for another program, outside agent instruction files | notice; the agent is stopped if it opens the file | `hooks approve` |
+| The judge cleared a model flag | notice; the agent has to ask before it opens the file | `hooks approve` |
+| Scan ran out of time | ask; submitting again resumes | `hooks approve` |
+| Agent instruction file too large to read in full | ask | `hooks approve` |
+| Any other file too large to read in full | notice; the agent is asked about it if it opens the file | — |
 | hook disabled | allow | `BAITWATCH_HOOK=off` |
 | cache unreadable | scan again | — |
 | cache fresh | cached verdict | `BAITWATCH_HOOK_REFRESH=1` |
 | tree cannot be fingerprinted | scan again | — |
 
 The CLI runs each gate in a daemon thread with an internal deadline
-(`BAITWATCH_HOOK_DEADLINE`, default 20 s) that is shorter than Claude Code's
-30 s hook timeout. If the scan hangs, the CLI prints a deny and exits; the
+(`BAITWATCH_HOOK_DEADLINE`, default 600 s) that is shorter than the 630 s hook
+timeout the installer sets. The judge stops starting calls 8 s before the deadline. If the scan hangs, the CLI prints a deny and exits; the
 host never sees a timeout it would have to interpret.
 
 `BAITWATCH_HOOK=off` is a deliberate escape hatch for debugging. It should
@@ -211,7 +292,7 @@ approval:
 ```bash
 "<installed python>" -I -m hooks approve --minutes 15   # approve the current root
 "<installed python>" -I -m hooks approve --repo PATH
-"<installed python>" -I -m hooks approve --revoke
+"<installed python>" -I -m hooks approve --revoke       # also clears accepted files
 ```
 
 The Gate A block prints this command with the interpreter that installed the
@@ -251,6 +332,20 @@ Measured in `tests/attacks/test_hooks.py::test_hook_under_three_seconds`: the
 first call in a fresh process (imports plus the first walk) must stay under
 10 s, and the steady-state call must stay under 3 s.
 
+## What leaves your machine
+
+With `META_API_KEY` set, the judge sends text from the repository to Meta's API: suspicious
+windows from any file, and agent instruction files in full. The rest of the repository stays
+on your machine. Use the standard `muse-spark-1.3` model on private code. The cheaper
+Contributor model lets Meta train on what it receives, so it only suits public text. Without a
+key nothing is sent, and model flags ask instead of being judged.
+
+## Upgrading
+
+Run `python -m hooks install` again after upgrading BaitWatch. An older install keeps its
+shorter hook timeout, so Claude Code stops long scans and blocks the prompt with no
+explanation. `python -m hooks status` warns about this.
+
 ## Environment variables
 
 For `BAITWATCH_HOOK`, `BAITWATCH_HOOK_SCANNER`, `BAITWATCH_ON_ERROR`,
@@ -269,8 +364,8 @@ process-environment behavior used by CI and the demo.
 | `BAITWATCH_HOOK=off` | bypass both gates (debug only) |
 | `BAITWATCH_ON_ERROR=deny\|ask` | crash behavior; `deny` is the default |
 | `BAITWATCH_HOOK_SCANNER=read\|keyword` | `read` is the product; `keyword` is the CPU stand-in for CI/demo |
-| `BAITWATCH_HOOK_JUDGE=1` | enable the inline judge (off by default; capped at 2 calls × 3 s) |
-| `BAITWATCH_HOOK_DEADLINE` | internal gate deadline in seconds (default 20) |
+| `BAITWATCH_HOOK_JUDGE=0` | turn the judge off (it is on when `META_API_KEY` is set) |
+| `BAITWATCH_HOOK_DEADLINE` | internal gate deadline in seconds (default 600) |
 | `BAITWATCH_CLAUDE_VERSION` | host version used by `python -m hooks install` when detection is unavailable |
 | `BAITWATCH_HOOK_CACHE` | cache file path |
 | `BAITWATCH_HOOK_APPROVALS` | approval store path |

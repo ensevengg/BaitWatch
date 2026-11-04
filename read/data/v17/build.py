@@ -67,7 +67,8 @@ LOADED_HOST_RE = re.compile(
     r"\b[\w.-]*(?:evil|attacker|malicious|exfil|badguy|hacker)[\w-]*\.[a-z]{2,}(?:\.[a-z]{2,})?\b",
     re.I)
 
-V17_SOURCES = ("v17_planted", "v17_bare", "v17_carrier", "v17_agentfile", "v17_noise")
+V17_SOURCES = ("v17_planted", "v17_bare", "v17_carrier", "v17_agentfile", "v17_noise",
+               "v17_glm_file")
 
 
 class Out:
@@ -253,7 +254,8 @@ def build(out_dir: Path, tokenizer_path: Path, old_dir: Path, seed: int = 42,
           muse_dir: Path = RAW / "muse", carriers_dir: Path = RAW / "carriers",
           agent_dir: Path = RAW / "agentfiles", agent_exclude: Path | None = None,
           extra_frozen: list[Path] | None = None,
-          window: tuple[int, int] = (448, 64)) -> dict:
+          window: tuple[int, int] = (448, 64), glm_dir: Path | None = None,
+          glm_exclude: Path | None = None, redteam_dirs: list[Path] | None = None) -> dict:
     from transformers import AutoTokenizer
 
     started = time.time()
@@ -306,6 +308,13 @@ def build(out_dir: Path, tokenizer_path: Path, old_dir: Path, seed: int = 42,
         else:
             plant_snippet(out, chunker, snip, train_pool, snip.group, rng, stats,
                           plants[snip.label])
+
+    glm_stats = None
+    if glm_dir is not None:
+        from read.data.v17.glm import add_glm
+        excl = set(json.loads(glm_exclude.read_text(encoding="utf-8"))) if glm_exclude else set()
+        glm_stats = add_glm(out, chunker, plant_snippet, train_pool, glm_dir, muse_dir,
+                            redteam_dirs or [], excl, plants, rng, stats)
 
     def repo_split(c: Carrier) -> str:
         return "val" if stable_unit("v17-carrier:" + c.repo + ":" + c.rel) < 0.1 else "train"
@@ -376,6 +385,7 @@ def build(out_dir: Path, tokenizer_path: Path, old_dir: Path, seed: int = 42,
         "window": list(window),
         "snippet_load": load_stats,
         "snippets_by_group": dict(Counter(f"{s.group}:{s.label}" for s in snippets)),
+        "glm": glm_stats,
         "carriers": {"train": train_pool.counts(), "test": test_pool.counts()},
         "agentfiles": {"train": len(agent_train), "test": len(agent_test)},
         "stats": dict(sorted(stats.items())),
@@ -398,12 +408,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent-exclude", default=str(RAW / "agentfiles_exclude.json"))
     parser.add_argument("--extra-frozen", nargs="*",
                         default=[str(RAW / "frozen" / "aditya_attack_slice.json")])
+    parser.add_argument("--glm", default=None,
+                        help="GLM training batches (one folder per batch), off by default")
+    parser.add_argument("--glm-exclude", default=None, help="JSON list of rejected src ids")
+    parser.add_argument("--redteam-raw", nargs="*",
+                        default=[str(RAW / "glm" / d)
+                                 for d in ("zcode", "zcode_strong", "opencode")],
+                        help="red-team raw batches; GLM rows sharing text with them are dropped")
     args = parser.parse_args(argv)
     manifest = build(Path(args.out), Path(args.tokenizer), Path(args.old_data), args.seed,
                      agent_exclude=Path(args.agent_exclude),
                      extra_frozen=[Path(p) for p in args.extra_frozen],
-                     window=tuple(args.window))
-    print(json.dumps({k: manifest[k] for k in ("snippet_load", "snippets_by_group",
+                     window=tuple(args.window),
+                     glm_dir=Path(args.glm) if args.glm else None,
+                     glm_exclude=Path(args.glm_exclude) if args.glm_exclude else None,
+                     redteam_dirs=[Path(p) for p in args.redteam_raw])
+    print(json.dumps({k: manifest[k] for k in ("snippet_load", "snippets_by_group", "glm",
                                                "counts", "leakage")}, indent=2))
     return 0
 
