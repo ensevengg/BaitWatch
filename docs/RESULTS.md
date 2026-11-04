@@ -18,7 +18,7 @@ The two attack repos that got "ask" are `git-hook-installer` and `runtime-eval-c
 ## Popular repos
 
 - **Date:** 2026-11-04
-- **Build:** the hook as it was before the changes merged in PR #22 later that day
+- **Build:** uncommitted changes on top of commit `c84f827`. They were committed later and merged in PR #22, along with further edits, so no commit matches this exact code.
 - **Method:** 100 popular GitHub repos, chosen across star and size bands, none used before. Each went through the hook. 97 needed one try, and 3 were resubmitted after a scan ran out of time.
 - **Result:** 77 allow, 17 ask, 6 block
 
