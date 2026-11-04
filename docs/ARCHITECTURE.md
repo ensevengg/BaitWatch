@@ -72,7 +72,7 @@ The installer (`python -m hooks install`) adds two Claude Code hooks to `setting
 
 - A **static policy** blocks or asks about dangerous actions, such as piping `curl` into `sh`, sending `.env` or SSH keys over the network, `rm -rf /`, editing agent instruction files, or contacting the test attacker hosts.
 - If the repo verdict is attack, every matched tool call is blocked.
-- **Scan on open:** when the agent opens a file Gate A did not fully cover (with `Read`, `Grep` on that file, `cat`, `head` and similar), Gate B checks it first. For a file the judge cleared, Gate B asks without scanning again. It scans tier 0 to 2 files and generated files, including excluded directories such as `dist/`. For source code (tier 3), Gate B scans only files that look agent-directed: text addressed to an agent, a rule hit, or imperative prose, in the file or its decoded views (`_worth_scanning_on_read`). That check sees about 91% of real attack windows. Other source files open without a scan.
+- **Scan on open:** when the agent opens a file Gate A did not fully cover (with `Read`, `Grep` on that file, `cat`, `head` and similar), Gate B checks it first. For a file the judge cleared, Gate B asks without scanning again. It always scans tier 0 to 2 files and generated files such as lockfiles, snapshots and vendored code. For source code (tier 3), including files in directories the first scan skips, such as `dist/` and `node_modules/`, Gate B scans only files that look agent-directed: text addressed to an agent, a rule hit, or imperative prose, in the file or its decoded views (`_worth_scanning_on_read`). That check sees about 91% of real attack windows. Other source files open without a scan. Scan on open needs the real READ scanner: with `BAITWATCH_HOOK_SCANNER=keyword`, Gate B does not check opened files.
 
 **Approvals.** `python -m hooks approve` lets the person continue past an ask, and `--allow-block` past a block. Approvals live in the user's own cache folder, so a repo cannot add to them. An accepted file stays accepted until its content changes. Other approvals, such as for a scan that ran out of time, cover only the exact tree and expire after 15 minutes by default. An agent cannot approve for itself. The hook refuses any tool call that runs `hooks approve`.
 
@@ -97,8 +97,8 @@ Details: [`docs/HOOKS.md`](HOOKS.md).
 |---|---|
 | A honeytoken sent over DNS, HTTP or TLS | BLOCK |
 | Any network contact outside the package registries | BLOCK |
-| A write to agent config, editor settings, Git hooks or CI workflows, anywhere in the copy or the cage home | BLOCK |
-| A write to shell startup files, `.ssh`, `.gitconfig`, package-manager config or cron files in the cage home | BLOCK |
+| A write to agent config, editor settings, Git hooks or CI workflows in the copy or the cage home, outside build and cache folders such as `dist`, `node_modules`, `vendor` and `.venv`. `.git/hooks` and `.git/config` block wherever they are | BLOCK |
+| A write to shell startup files, `.ssh`, `.gitconfig`, package-manager config or cron files in the cage home, outside build and cache folders | BLOCK |
 | Half or more of the repo's own files deleted or emptied, or more than 200, not counting build and cache folders or planted honeytokens | BLOCK |
 | A READ attack at or above the pinned `hard_high` score (0.9965 for v1.7) | BLOCK |
 | A honeytoken moved into a command, the decoy's reply or a file | FLAG |
@@ -125,7 +125,7 @@ How BaitWatch keeps that line:
 - **Errors never allow.** In the hook, a crash, a bad payload or a missed deadline becomes block, or ask if `BAITWATCH_ON_ERROR=ask` is set. In fusion, any error or missing evidence is at least FLAG.
 - **BaitWatch caps spending.** The judge has per-scan call and token budgets, and the decoy has step, token and time budgets.
 
-**What leaves your machine.** With `META_API_KEY` set, the judge sends suspicious windows from any file, and agent instruction files in full, to Meta's API. The decoy sends what it reads from the repo to its model backend. With no key and a local decoy model (for example `ollama:`), nothing leaves the machine. Do not use model tiers that let the provider train on what you send, such as Muse Spark's Contributor tier, on private code.
+**What leaves your machine.** With `META_API_KEY` set, the judge sends suspicious windows from any file, and agent instruction files in full, to its primary endpoint. That is Meta's API unless `BAITWATCH_JUDGE_BASE_URL` points elsewhere. When the primary is unavailable, the judge uses its fallback, a local `llama-server` unless `BAITWATCH_FALLBACK_BASE_URL` points elsewhere. The decoy sends what it reads from the repo to its model backend. With no key, the default local fallback and a local decoy model (for example `ollama:`), nothing leaves the machine. Do not use model tiers that let the provider train on what you send, such as Muse Spark's Contributor tier, on private code.
 
 ## Known limits
 
