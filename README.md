@@ -86,7 +86,7 @@ Sandbox boundary, evidence contract and known limits: [`run/README.md`](run/READ
 
 ## Meta models
 
-- **Llama Prompt Guard 2 (22M), fine-tuned:** local detector
+- **Llama Prompt Guard 2 (86M), fine-tuned:** local detector
 - **Muse Spark (Meta Model API):** judge and plain-English explanations
 
 ## Hackathon
