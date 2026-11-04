@@ -65,14 +65,14 @@ The installer (`python -m hooks install`) adds two Claude Code hooks to `setting
 3. It decides from the findings:
    - **block:** the judge confirms text aimed at the agent, in a window the detector flagged by itself, in a tier 0 or 1 file. A BaitWatch failure also blocks.
    - **ask:** other findings where the detector and judge agree, the judge alone in a tier 0 or 1 file, or a detector flag with no judge to confirm it.
-   - **allow, with a notice:** the judge alone in a lower-tier file, or attack text the judge reads as quoted in a file that is not an agent instruction file. Gate B stops the agent if it later opens that file.
+   - **allow, with a notice:** the judge alone in a lower-tier file, or attack text the judge reads as quoted in a file that is not an agent instruction file. Gate B checks that file again if the agent later opens it. For source code (tier 3), it does so only when the file looks agent-directed.
 4. It caches the verdict, keyed by the repo path, Git HEAD, a fingerprint of the file contents, and the scanner settings. An edit to an agent-facing file always triggers a new scan, because those files are compared by content. An edit to a large other file that keeps its size and modification time can reuse the old verdict.
 
 **Gate B** runs before each tool call that matches the installed list: `Bash`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `WebFetch`, `Read` and `Grep` (`TOOL_MATCHER` in `hooks/install.py`). Other tools do not trigger it.
 
 - A **static policy** blocks or asks about dangerous actions, such as piping `curl` into `sh`, sending `.env` or SSH keys over the network, `rm -rf /`, editing agent instruction files, or contacting the test attacker hosts.
 - If the repo verdict is attack, every matched tool call is blocked.
-- **Scan on open:** when the agent opens a file Gate A did not fully cover (with `Read`, `Grep` on that file, `cat`, `head` and similar), Gate B scans it first. This includes files the judge cleared and excluded directories such as `dist/`.
+- **Scan on open:** when the agent opens a file Gate A did not fully cover (with `Read`, `Grep` on that file, `cat`, `head` and similar), Gate B scans it first. This includes files the judge cleared and excluded directories such as `dist/`. For source code (tier 3), Gate B scans only files that look agent-directed: text addressed to an agent, a rule hit, or imperative prose, in the file or its decoded views (`_worth_scanning_on_read`). That check sees about 91% of real attack windows. Other source files open without a scan.
 
 **Approvals.** `python -m hooks approve` lets the person continue past an ask, and `--allow-block` past a block. Approvals live in the user's own cache folder, so a repo cannot add to them. An accepted file stays accepted until its content changes. Other approvals, such as for a scan that ran out of time, cover only the exact tree and expire after 15 minutes by default. An agent cannot approve for itself. The hook refuses any tool call that runs `hooks approve`.
 
